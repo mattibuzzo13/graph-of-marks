@@ -1,0 +1,12 @@
+datasets==3.3.1
+torch==2.6.0
+transformers==4.49.0
+colorlog==6.9.0
+wandb==0.19.7
+einops==0.8.0
+python-dotenv==1.0.1
+sentence-transformers==3.4.1
+pretty-errors==1.2.25
+accelerate==1.4.0
+vllm==0.8.2
+spacy===3.8.4
