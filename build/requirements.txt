@@ -10,3 +10,4 @@ pretty-errors==1.2.25
 accelerate==1.4.0
 vllm==0.8.2
 spacy===3.8.4
+nltk==3.9.1
