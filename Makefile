@@ -19,11 +19,6 @@ PROMPT_TEMPLATE ?= "Question: {question}\nAnswer:"
 BATCH_SIZE ?= 1
 TENSOR_PARALLEL_SIZE ?= 1
 
-# Default values for dataset processing
-DATASET ?=
-SPLIT ?= train
-IMAGE_COLUMN ?= image
-
 # Check if input path is provided
 check_input:
 ifndef INPUT_PATH
@@ -63,19 +58,6 @@ preprocess_detectron2: check_input
 		--detectors "detectron2" \
 		--relations "$(RELATIONSHIP_TYPE)" \
 		--max "$(MAX_RELATIONS)"
-
-# Dataset preprocessing target
-preprocess_dataset:
-ifndef DATASET
-	$(error DATASET is required. Use make preprocess_dataset DATASET=dataset_name [OPTIONS])
-endif
-	python src/image_graph_preprocessor.py \
-		--dataset "$(DATASET)" \
-		--split "$(SPLIT)" \
-		--image_column "$(IMAGE_COLUMN)" \
-		--output_folder "$(OUTPUT_FOLDER)" \
-		--detectors "$(DETECTORS)" \
-		--max_relations "$(MAX_RELATIONS)"
 
 # Target for preprocessing a batch of images
 batch_preprocess:
@@ -117,7 +99,6 @@ help:
 	@echo "  make preprocess_owlvit INPUT_PATH=/path/to/input [OPTIONS]"
 	@echo "  make preprocess_yolo INPUT_PATH=/path/to/input [OPTIONS]"
 	@echo "  make preprocess_detectron2 INPUT_PATH=/path/to/input [OPTIONS]"
-	@echo "  make preprocess_dataset DATASET=dataset_name [OPTIONS]"
 	@echo "  make batch_preprocess INPUT_PATH=/path/to/directory"
 	@echo "  make run_vqa VQA_INPUT_FILE=/path/to/input.json [VQA_OPTIONS]"
 	@echo "  make install_deps"
@@ -128,11 +109,6 @@ help:
 	@echo "  DETECTORS=d1,d2,...             Comma-separated list of detectors [default: owlvit,yolov8,detectron2]"
 	@echo "  RELATIONSHIP_TYPE=type          Relationship types to extract [default: all]"
 	@echo "  MAX_RELATIONS=n                 Maximum number of relationships to extract [default: 8]"
-	@echo ""
-	@echo "Dataset Options:"
-	@echo "  DATASET=name                    Hugging Face dataset name"
-	@echo "  SPLIT=split                     Dataset split to use [default: train]" 
-	@echo "  IMAGE_COLUMN=column             Column containing images [default: image]"
 	@echo ""
 	@echo "VQA Options:"
 	@echo "  VQA_OUTPUT_FILE=file.json       Output file for VQA results [default: vqa_results.json]"
@@ -145,4 +121,4 @@ help:
 	@echo "  BATCH_SIZE=n                    Batch size for processing [default: 1]"
 	@echo "  TENSOR_PARALLEL_SIZE=n          Number of GPUs for tensor parallelism [default: 1]"
 
-.PHONY: preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 preprocess_dataset batch_preprocess install_deps help check_input run_vqa check_vqa_input install_vqa_deps
+.PHONY: preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 batch_preprocess install_deps help check_input run_vqa check_vqa_input install_vqa_deps
