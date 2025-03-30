@@ -10,6 +10,7 @@ A powerful toolkit for visual reasoning on images using object detection, relati
 - [Image Graph Preprocessing](#-image-graph-preprocessing)
   - [Features](#features)
   - [Basic Usage](#basic-usage)
+  - [Dataset Processing](#dataset-processing)
   - [Advanced Usage](#advanced-usage)
   - [Output](#output)
 - [Visual Question Answering (VQA)](#-visual-question-answering-vqa)
@@ -86,6 +87,20 @@ Specify an output directory:
 
 ```bash
 make preprocess INPUT_PATH=/path/to/image.jpg OUTPUT_FOLDER=my_results
+```
+
+### Dataset Processing
+
+Process a dataset of images with annotations:
+
+```bash
+make preprocess_dataset DATASET_PATH=/path/to/dataset.json
+```
+
+Specify an output directory for dataset processing:
+
+```bash
+make preprocess_dataset DATASET_PATH=/path/to/dataset.json OUTPUT_FOLDER=my_results
 ```
 
 ### Advanced Usage

@@ -11,6 +11,8 @@ import numpy as np
 import nltk
 from nltk.corpus import wordnet
 import string
+import argparse
+from datasets import load_dataset
 
 from collections import defaultdict
 from ultralytics import YOLO
@@ -609,47 +611,156 @@ def run_detectron2_detection(image_pil, detectron2_predictor, detectron2_metadat
     return detections
 
 # -----------------------------------------------------------------------------
-# 9. Main function: Single Image OR Folder
+# 9. Argument Parsing
+# -----------------------------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="Image Graph Preprocessor")
+    parser.add_argument("--input_path", type=str, help="Path to a single image or directory of images")
+    parser.add_argument("--output_folder", type=str, default="output_images", help="Output folder for processed images")
+    parser.add_argument("--dataset", type=str, help="Hugging Face dataset name to download")
+    parser.add_argument("--split", type=str, default="train", help="Dataset split to use")
+    parser.add_argument("--image_column", type=str, default="image", help="Column name containing images in the dataset")
+    parser.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2", 
+                        help="Comma-separated list of detectors to use")
+    parser.add_argument("--max_relations", type=int, default=8, 
+                        help="Maximum number of relationships to extract")
+    return parser.parse_args()
+
+# -----------------------------------------------------------------------------
+# 10. Image Processing Function
+# -----------------------------------------------------------------------------
+def process_image(image_pil, image_name, output_folder, detectors_to_use, max_relations, 
+                  owlvit_processor, owlvit_model, yolo_model, d2_predictor, d2_metadata, 
+                  mask_generator, coco_labels, device):
+    """Process a single image and save the output"""
+    print(f"\nProcessing: {image_name}")
+    
+    all_detections = []
+
+    # 1) OWL‑ViT
+    if "owlvit" in detectors_to_use and owlvit_processor and owlvit_model:
+        owl_dets = run_owlvit_detection(
+            image_pil=image_pil,
+            queries=coco_labels,
+            processor=owlvit_processor,
+            model=owlvit_model,
+            threshold=0.15,  # THRESH_OWL
+            device=device
+        )
+        all_detections.extend(owl_dets)
+
+    # 2) YOLOv8
+    if "yolov8" in detectors_to_use and yolo_model:
+        yolo_dets = run_yolov8_detection(
+            image_pil=image_pil,
+            yolo_model=yolo_model,
+            threshold=0.3,  # THRESH_YOLO
+            device=device
+        )
+        all_detections.extend(yolo_dets)
+
+    # 3) Detectron2
+    if "detectron2" in detectors_to_use and d2_predictor and d2_metadata:
+        d2_dets = run_detectron2_detection(
+            image_pil=image_pil,
+            detectron2_predictor=d2_predictor,
+            detectron2_metadata=d2_metadata
+        )
+        all_detections.extend(d2_dets)
+
+    if not all_detections:
+        print("No detections found. Skipping.")
+        torch.cuda.empty_cache()
+        return
+
+    # Combine & run label-based NMS
+    detections_by_label = defaultdict(list)
+    for i, det in enumerate(all_detections):
+        label = det['label']
+        detections_by_label[label].append(i)
+
+    final_indices = []
+    label_nms_threshold = 0.5
+    for label, idx_list in detections_by_label.items():
+        label_boxes  = [all_detections[i]['box']   for i in idx_list]
+        label_scores = [all_detections[i]['score'] for i in idx_list]
+        keep_for_label = non_maximum_suppression(label_boxes, label_scores, label_nms_threshold)
+        for k in keep_for_label:
+            final_indices.append(idx_list[k])
+    final_indices = sorted(final_indices)
+
+    detected_boxes  = [all_detections[i]['box']   for i in final_indices]
+    detected_labels = [all_detections[i]['label'] for i in final_indices]
+    detected_scores = [all_detections[i]['score'] for i in final_indices]
+
+    # Generate SAM masks
+    with torch.inference_mode():
+        image_np = np.array(image_pil)
+        all_masks = mask_generator.generate(image_np)
+
+    # Filter duplicates with segmentation
+    detected_boxes, detected_labels, detected_scores = filter_segmentation_duplicates(
+        detected_boxes,
+        detected_labels,
+        detected_scores,
+        all_masks,
+        iou_threshold=0.8
+    )
+
+    # Relationship inference
+    final_relationships = infer_relationships_improved(
+        boxes=detected_boxes,
+        labels=detected_labels,
+        overlap_thresh=0.3,
+        margin=20,
+        min_distance=90,
+        max_distance=20000,
+        top_k=max_relations
+    )
+
+    # Visualization & saving
+    output_filename = f"{image_name}_output.jpg"
+    output_path = os.path.join(output_folder, output_filename)
+
+    visualize_detections_and_relationships_with_auto_masks(
+        image=image_pil,
+        boxes=detected_boxes,
+        labels=detected_labels,
+        scores=detected_scores,
+        relationships=final_relationships,
+        all_masks=all_masks,
+        view_relations_labels=False,
+        label_mode="numeric",
+        show_confidence=False,
+        draw_relationships=False,
+        display_labels=False,
+        save_path=output_path
+    )
+    print("Saved output to:", output_path)
+
+    # Clean up
+    del image_np, all_detections
+    torch.cuda.empty_cache()
+
+# -----------------------------------------------------------------------------
+# 11. Main Function
 # -----------------------------------------------------------------------------
 def main():
-    input_path = "/content/gqa_subset_images"  # can be single image OR a folder
-    output_folder = "/content/GQA_seg"
+    args = parse_args()
+    
+    # Set up output folder
+    output_folder = args.output_folder
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    DETECTORS_TO_USE = ["owlvit", "yolov8", "detectron2"]
-
-    # Detector thresholds
-    THRESH_OWL = 0.15
-    THRESH_YOLO = 0.3
-    THRESH_DETECTRON = 0.3
-
-    # Relationship inference limit
-    MAX_RELATIONS = 8
+    # Parse detectors to use
+    DETECTORS_TO_USE = args.detectors.split(',')
+    MAX_RELATIONS = args.max_relations
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Running on device: {device}")
 
-    question = (
-        "person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, "
-        "traffic light, fire hydrant, sign, bench, bird, cat, "
-        "dog, horse, sheep, cow, elephant, bear, zebra, giraffe, backpack, umbrella, "
-        "handbag, tie, suitcase, frisbee, skis, snowboard, sports ball, kite, baseball bat, "
-        "baseball glove, skateboard, surfboard, tennis racket, bottle, wine glass, cup, fork, "
-        "knife, spoon, bowl, banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, "
-        "donut, cake, chair, couch, potted plant, bed, dining table, toilet, tv, laptop, mouse, "
-        "remote, keyboard, cell phone, microwave, oven, toaster, sink, refrigerator, book, clock, "
-        "vase, scissors, teddy bear, hair drier, toothbrush, wood, fence, lamp, weel, tree, building, street lamp, flower, "
-        "shoe, hand, bridge, mountain, tomato, plant, flag, headphones, hat, shirt, plate, road sign, river, helmet, stone, "
-        "monument, sea, doll, candle, coach, wardrobe, bread, cloud"
-    )
-    query_terms = extract_query_terms(question)
-    desired_relation_labels = extract_relation_terms(question)
-    print("Extracted query terms:", query_terms)
-    print("Desired relation labels:", desired_relation_labels)
-    if not query_terms:
-        query_terms = ["chair"]
-
+    # COCO labels
     coco_labels = [
         "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
         "boat", "traffic light", "fire hydrant", "sign", "bench",
@@ -686,7 +797,7 @@ def main():
         print("Loading Detectron2 Detector...")
         d2_predictor, d2_metadata = load_detectron2_detector(
             model_config="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml",
-            score_thresh=THRESH_DETECTRON,
+            score_thresh=0.3,  # THRESH_DETECTRON
             device=device
         )
 
@@ -703,146 +814,103 @@ def main():
         min_mask_region_area=100
     )
 
-    # -----------------------------------------------------------------------------
-    # Check if input_path is a directory or a single file
-    # -----------------------------------------------------------------------------
-    if os.path.isdir(input_path):
-        image_files = [
-            f for f in os.listdir(input_path)
-            if f.lower().endswith((".jpg", ".png", ".jpeg"))
-        ]
-        image_paths = [os.path.join(input_path, f) for f in image_files]
-    else:
-        if not os.path.exists(input_path):
-            print(f"Error: {input_path} does not exist.")
+    # Process images based on source (dataset or file/directory)
+    if args.dataset:
+        # Process images from Hugging Face dataset
+        print(f"Loading dataset {args.dataset} (split: {args.split})")
+        try:
+            dataset = load_dataset(args.dataset, split=args.split)
+            print(f"Dataset loaded with {len(dataset)} examples")
+            
+            for i, example in enumerate(dataset):
+                try:
+                    if args.image_column not in example:
+                        print(f"Error: Image column '{args.image_column}' not found in dataset example")
+                        print(f"Available columns: {list(example.keys())}")
+                        break
+                    
+                    # Get image from dataset
+                    image = example[args.image_column]
+                    
+                    # Convert to PIL Image if needed
+                    if not isinstance(image, Image.Image):
+                        if isinstance(image, dict) and 'bytes' in image:
+                            image = Image.open(io.BytesIO(image['bytes'])).convert("RGB")
+                        elif isinstance(image, np.ndarray):
+                            image = Image.fromarray(image).convert("RGB")
+                        else:
+                            print(f"Warning: Item at index {i} is not a PIL Image. Skipping.")
+                            continue
+                    
+                    # Use example id or index as image name
+                    image_name = str(example.get('id', f"img_{i}"))
+                    
+                    # Process the image
+                    process_image(
+                        image_pil=image,
+                        image_name=image_name,
+                        output_folder=output_folder,
+                        detectors_to_use=DETECTORS_TO_USE,
+                        max_relations=MAX_RELATIONS,
+                        owlvit_processor=owlvit_processor,
+                        owlvit_model=owlvit_model,
+                        yolo_model=yolo_model,
+                        d2_predictor=d2_predictor,
+                        d2_metadata=d2_metadata,
+                        mask_generator=mask_generator,
+                        coco_labels=coco_labels,
+                        device=device
+                    )
+                except Exception as e:
+                    print(f"Error processing example {i}: {e}")
+                    continue
+                    
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
             return
-        image_paths = [input_path]
-
-    # -----------------------------------------------------------------------------
-    # Process each image path
-    # -----------------------------------------------------------------------------
-    for image_path in image_paths:
-        print("\nProcessing:", image_path)
-        image_pil = Image.open(image_path).convert("RGB")
-
-        all_detections = []
-
-        # 1) OWL‑ViT
-        if "owlvit" in DETECTORS_TO_USE and owlvit_processor and owlvit_model:
-            owl_dets = run_owlvit_detection(
-                image_pil=image_pil,
-                queries=coco_labels,
-                processor=owlvit_processor,
-                model=owlvit_model,
-                threshold=THRESH_OWL,
-                device=device
-            )
-            all_detections.extend(owl_dets)
-
-        # 2) YOLOv8
-        if "yolov8" in DETECTORS_TO_USE and yolo_model:
-            yolo_dets = run_yolov8_detection(
-                image_pil=image_pil,
-                yolo_model=yolo_model,
-                threshold=THRESH_YOLO,
-                device=device
-            )
-            all_detections.extend(yolo_dets)
-
-        # 3) Detectron2
-        if "detectron2" in DETECTORS_TO_USE and d2_predictor and d2_metadata:
-            d2_dets = run_detectron2_detection(
-                image_pil=image_pil,
-                detectron2_predictor=d2_predictor,
-                detectron2_metadata=d2_metadata
-            )
-            all_detections.extend(d2_dets)
-
-        if not all_detections:
-            print("No detections found. Skipping.")
-            torch.cuda.empty_cache()
-            continue
-
-        # Combine & run label-based NMS
-        detections_by_label = defaultdict(list)
-        for i, det in enumerate(all_detections):
-            label = det['label']
-            detections_by_label[label].append(i)
-
-        final_indices = []
-        label_nms_threshold = 0.5
-        for label, idx_list in detections_by_label.items():
-            label_boxes  = [all_detections[i]['box']   for i in idx_list]
-            label_scores = [all_detections[i]['score'] for i in idx_list]
-            keep_for_label = non_maximum_suppression(label_boxes, label_scores, label_nms_threshold)
-            for k in keep_for_label:
-                final_indices.append(idx_list[k])
-        final_indices = sorted(final_indices)
-
-        detected_boxes  = [all_detections[i]['box']   for i in final_indices]
-        detected_labels = [all_detections[i]['label'] for i in final_indices]
-        detected_scores = [all_detections[i]['score'] for i in final_indices]
-
-        # Generate SAM masks
-        with torch.inference_mode():
-            image_np = np.array(image_pil)
-            all_masks = mask_generator.generate(image_np)
-
-        # Filter duplicates with segmentation
-        detected_boxes, detected_labels, detected_scores = filter_segmentation_duplicates(
-            detected_boxes,
-            detected_labels,
-            detected_scores,
-            all_masks,
-            iou_threshold=0.8
-        )
-
-        # Relationship inference
-        final_relationships = infer_relationships_improved(
-            boxes=detected_boxes,
-            labels=detected_labels,
-            overlap_thresh=0.3,
-            margin=20,
-            min_distance=90,
-            max_distance=20000,
-            top_k=MAX_RELATIONS
-        )
-        # Possibly filter relationships to only the ones we extracted
-        desired_relation_labels = [
-            r for r in extract_relation_terms(question)
-        ]
-        if desired_relation_labels:
-            final_relationships = [
-                r for r in final_relationships
-                if r['relation'] in desired_relation_labels
+    else:
+        # Original code for processing local files
+        input_path = args.input_path
+        if not input_path:
+            print("Error: No input path or dataset specified")
+            return
+            
+        if os.path.isdir(input_path):
+            image_files = [
+                f for f in os.listdir(input_path)
+                if f.lower().endswith((".jpg", ".png", ".jpeg"))
             ]
-            print("Filtered relationships:", final_relationships)
+            image_paths = [os.path.join(input_path, f) for f in image_files]
+        else:
+            if not os.path.exists(input_path):
+                print(f"Error: {input_path} does not exist.")
+                return
+            image_paths = [input_path]
 
-        # Visualization & saving
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        output_filename = base_name + "_output.jpg"
-        output_path = os.path.join(output_folder, output_filename)
-
-        visualize_detections_and_relationships_with_auto_masks(
-            image=image_pil,
-            boxes=detected_boxes,
-            labels=detected_labels,
-            scores=detected_scores,
-            relationships=final_relationships,
-            all_masks=all_masks,
-            view_relations_labels=False,
-            label_mode="numeric",
-            show_confidence=False,
-            draw_relationships=False,
-            display_labels=False,
-            save_path=output_path
-        )
-        print("Saved output to:", output_path)
-
-        # Clean up
-        del image_pil, image_np, all_detections
-        torch.cuda.empty_cache()
-
+        # Process each image
+        for image_path in image_paths:
+            try:
+                image_pil = Image.open(image_path).convert("RGB")
+                base_name = os.path.splitext(os.path.basename(image_path))[0]
+                
+                process_image(
+                    image_pil=image_pil,
+                    image_name=base_name,
+                    output_folder=output_folder,
+                    detectors_to_use=DETECTORS_TO_USE,
+                    max_relations=MAX_RELATIONS,
+                    owlvit_processor=owlvit_processor,
+                    owlvit_model=owlvit_model,
+                    yolo_model=yolo_model,
+                    d2_predictor=d2_predictor,
+                    d2_metadata=d2_metadata,
+                    mask_generator=mask_generator,
+                    coco_labels=coco_labels,
+                    device=device
+                )
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
+                continue
 
 if __name__ == "__main__":
     main()
