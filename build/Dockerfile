@@ -15,6 +15,8 @@ RUN apt-get update -y && \
                         bash \
                         wget \
                         nano \
+                        zip \
+                        unzip \
                         python3.11 \
                         python3-pip && \
     apt-get autoremove -y && \
@@ -30,10 +32,17 @@ COPY build/requirements.txt .
 
 RUN pip3 install --no-cache-dir -r requirements.txt
 
+RUN pip3 install flash-attn==2.7.4.post1 --no-build-isolation
+
+
+# Download utils for preprocessing
 RUN python3 -m spacy download en_core_web_md
 RUN python3 -m nltk.downloader wordnet
 
-RUN pip3 install flash-attn==2.7.4.post1 --no-build-isolation
+
+
+
+ENTRYPOINT ["make", "-f", "/workdir/Makefile"]
 
 # Back to default frontend
 ENV DEBIAN_FRONTEND=dialog
