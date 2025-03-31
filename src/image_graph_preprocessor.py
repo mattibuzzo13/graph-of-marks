@@ -13,6 +13,7 @@ from nltk.corpus import wordnet
 import string
 import argparse
 from datasets import load_dataset
+import io
 
 from collections import defaultdict
 from ultralytics import YOLO
@@ -615,15 +616,61 @@ def run_detectron2_detection(image_pil, detectron2_predictor, detectron2_metadat
 # -----------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(description="Image Graph Preprocessor")
+    # Input/output arguments
     parser.add_argument("--input_path", type=str, help="Path to a single image or directory of images")
     parser.add_argument("--output_folder", type=str, default="output_images", help="Output folder for processed images")
     parser.add_argument("--dataset", type=str, help="Hugging Face dataset name to download")
     parser.add_argument("--split", type=str, default="train", help="Dataset split to use")
     parser.add_argument("--image_column", type=str, default="image", help="Column name containing images in the dataset")
+    
+    # Processing control arguments
     parser.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2", 
                         help="Comma-separated list of detectors to use")
+    parser.add_argument("--relationship_type", type=str, default="all",
+                       help="Types of relationships to extract (all, above, below, left_of, right_of)")
     parser.add_argument("--max_relations", type=int, default=8, 
                         help="Maximum number of relationships to extract")
+    parser.add_argument("--start_index", type=int, default=-1,
+                        help="Start index (0-based) for processing instances")
+    parser.add_argument("--end_index", type=int, default=-1,
+                        help="End index (inclusive) for processing instances")
+    parser.add_argument("--num_instances", type=int, default=-1,
+                        help="Absolute number of instances to process")
+    
+    # Detection thresholds
+    parser.add_argument("--owl_threshold", type=float, default=0.15,
+                        help="Confidence threshold for OWL-ViT detector")
+    parser.add_argument("--yolo_threshold", type=float, default=0.3,
+                        help="Confidence threshold for YOLOv8 detector")
+    parser.add_argument("--detectron_threshold", type=float, default=0.3,
+                        help="Confidence threshold for Detectron2 detector")
+    
+    # NMS parameters
+    parser.add_argument("--label_nms_threshold", type=float, default=0.5,
+                        help="IoU threshold for label-based NMS")
+    parser.add_argument("--seg_iou_threshold", type=float, default=0.8,
+                        help="IoU threshold for segmentation duplicate filtering")
+    
+    # Relationship inference parameters
+    parser.add_argument("--overlap_thresh", type=float, default=0.3,
+                        help="Horizontal overlap threshold for relationship inference")
+    parser.add_argument("--margin", type=int, default=20,
+                        help="Margin in pixels for relationship inference")
+    parser.add_argument("--min_distance", type=int, default=90,
+                        help="Minimum distance between centers for relationship inference")
+    parser.add_argument("--max_distance", type=int, default=20000,
+                        help="Maximum distance between centers for relationship inference")
+    
+    # SAM parameters
+    parser.add_argument("--points_per_side", type=int, default=32,
+                        help="Points per side for SAM mask generator")
+    parser.add_argument("--pred_iou_thresh", type=float, default=0.9,
+                        help="Predicted IoU threshold for SAM mask generator")
+    parser.add_argument("--stability_score_thresh", type=float, default=0.95,
+                        help="Stability score threshold for SAM mask generator")
+    parser.add_argument("--min_mask_region_area", type=int, default=100,
+                        help="Minimum mask region area for SAM mask generator")
+    
     return parser.parse_args()
 
 # -----------------------------------------------------------------------------
@@ -631,7 +678,10 @@ def parse_args():
 # -----------------------------------------------------------------------------
 def process_image(image_pil, image_name, output_folder, detectors_to_use, max_relations, 
                   owlvit_processor, owlvit_model, yolo_model, d2_predictor, d2_metadata, 
-                  mask_generator, coco_labels, device):
+                  mask_generator, coco_labels, device, 
+                  owl_threshold=0.15, yolo_threshold=0.3, detectron_threshold=0.3,
+                  label_nms_threshold=0.5, seg_iou_threshold=0.8,
+                  overlap_thresh=0.3, margin=20, min_distance=90, max_distance=20000):
     """Process a single image and save the output"""
     print(f"\nProcessing: {image_name}")
     
@@ -644,7 +694,7 @@ def process_image(image_pil, image_name, output_folder, detectors_to_use, max_re
             queries=coco_labels,
             processor=owlvit_processor,
             model=owlvit_model,
-            threshold=0.15,  # THRESH_OWL
+            threshold=owl_threshold,
             device=device
         )
         all_detections.extend(owl_dets)
@@ -654,7 +704,7 @@ def process_image(image_pil, image_name, output_folder, detectors_to_use, max_re
         yolo_dets = run_yolov8_detection(
             image_pil=image_pil,
             yolo_model=yolo_model,
-            threshold=0.3,  # THRESH_YOLO
+            threshold=yolo_threshold,
             device=device
         )
         all_detections.extend(yolo_dets)
@@ -680,7 +730,6 @@ def process_image(image_pil, image_name, output_folder, detectors_to_use, max_re
         detections_by_label[label].append(i)
 
     final_indices = []
-    label_nms_threshold = 0.5
     for label, idx_list in detections_by_label.items():
         label_boxes  = [all_detections[i]['box']   for i in idx_list]
         label_scores = [all_detections[i]['score'] for i in idx_list]
@@ -704,17 +753,17 @@ def process_image(image_pil, image_name, output_folder, detectors_to_use, max_re
         detected_labels,
         detected_scores,
         all_masks,
-        iou_threshold=0.8
+        iou_threshold=seg_iou_threshold
     )
 
     # Relationship inference
     final_relationships = infer_relationships_improved(
         boxes=detected_boxes,
         labels=detected_labels,
-        overlap_thresh=0.3,
-        margin=20,
-        min_distance=90,
-        max_distance=20000,
+        overlap_thresh=overlap_thresh,
+        margin=margin,
+        min_distance=min_distance,
+        max_distance=max_distance,
         top_k=max_relations
     )
 
@@ -797,7 +846,7 @@ def main():
         print("Loading Detectron2 Detector...")
         d2_predictor, d2_metadata = load_detectron2_detector(
             model_config="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml",
-            score_thresh=0.3,  # THRESH_DETECTRON
+            score_thresh=args.detectron_threshold,
             device=device
         )
 
@@ -808,10 +857,10 @@ def main():
     sam_model.to(device)
     mask_generator = SamAutomaticMaskGenerator(
         sam_model,
-        points_per_side=32,
-        pred_iou_thresh=0.9,
-        stability_score_thresh=0.95,
-        min_mask_region_area=100
+        points_per_side=args.points_per_side,
+        pred_iou_thresh=args.pred_iou_thresh,
+        stability_score_thresh=args.stability_score_thresh,
+        min_mask_region_area=args.min_mask_region_area
     )
 
     # Process images based on source (dataset or file/directory)
@@ -822,8 +871,24 @@ def main():
             dataset = load_dataset(args.dataset, split=args.split)
             print(f"Dataset loaded with {len(dataset)} examples")
             
-            for i, example in enumerate(dataset):
+            # Apply indexing parameters to dataset
+            start_idx = 0 if args.start_index < 0 else args.start_index
+            
+            if args.num_instances > 0:
+                end_idx = min(start_idx + args.num_instances - 1, len(dataset) - 1)
+            elif args.end_index >= 0:
+                end_idx = min(args.end_index, len(dataset) - 1)
+            else:
+                end_idx = len(dataset) - 1
+                
+            print(f"Processing dataset items from index {start_idx} to {end_idx}")
+            
+            for i in range(start_idx, end_idx + 1):
+                if i >= len(dataset):
+                    break
+                    
                 try:
+                    example = dataset[i]
                     if args.image_column not in example:
                         print(f"Error: Image column '{args.image_column}' not found in dataset example")
                         print(f"Available columns: {list(example.keys())}")
@@ -859,7 +924,16 @@ def main():
                         d2_metadata=d2_metadata,
                         mask_generator=mask_generator,
                         coco_labels=coco_labels,
-                        device=device
+                        device=device,
+                        owl_threshold=args.owl_threshold,
+                        yolo_threshold=args.yolo_threshold,
+                        detectron_threshold=args.detectron_threshold,
+                        label_nms_threshold=args.label_nms_threshold,
+                        seg_iou_threshold=args.seg_iou_threshold,
+                        overlap_thresh=args.overlap_thresh,
+                        margin=args.margin,
+                        min_distance=args.min_distance,
+                        max_distance=args.max_distance
                     )
                 except Exception as e:
                     print(f"Error processing example {i}: {e}")
@@ -887,7 +961,21 @@ def main():
                 return
             image_paths = [input_path]
 
-        # Process each image
+        # Apply indexing parameters to file list
+        start_idx = 0 if args.start_index < 0 else args.start_index
+        
+        if args.num_instances > 0:
+            end_idx = min(start_idx + args.num_instances - 1, len(image_paths) - 1)
+        elif args.end_index >= 0:
+            end_idx = min(args.end_index, len(image_paths) - 1)
+        else:
+            end_idx = len(image_paths) - 1
+            
+        if len(image_paths) > 1:
+            print(f"Processing images from index {start_idx} to {end_idx}")
+            image_paths = image_paths[start_idx:end_idx + 1]
+
+        # Process each image in the filtered list
         for image_path in image_paths:
             try:
                 image_pil = Image.open(image_path).convert("RGB")
@@ -906,7 +994,16 @@ def main():
                     d2_metadata=d2_metadata,
                     mask_generator=mask_generator,
                     coco_labels=coco_labels,
-                    device=device
+                    device=device,
+                    owl_threshold=args.owl_threshold,
+                    yolo_threshold=args.yolo_threshold,
+                    detectron_threshold=args.detectron_threshold,
+                    label_nms_threshold=args.label_nms_threshold,
+                    seg_iou_threshold=args.seg_iou_threshold,
+                    overlap_thresh=args.overlap_thresh,
+                    margin=args.margin,
+                    min_distance=args.min_distance,
+                    max_distance=args.max_distance
                 )
             except Exception as e:
                 print(f"Error processing {image_path}: {e}")

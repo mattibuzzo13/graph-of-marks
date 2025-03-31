@@ -13,6 +13,7 @@ RUN apt-get update -y && \
     apt-get install -y curl \
                         git \
                         bash \
+                        wget \
                         nano \
                         python3.11 \
                         python3-pip && \

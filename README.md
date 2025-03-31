@@ -7,6 +7,10 @@ A powerful toolkit for visual reasoning on images using object detection, relati
 - [Overview](#-overview)
 - [Repository Structure](#-repository-structure)
 - [Prerequisites](#-prerequisites)
+- [Dataset Downloads](#-dataset-downloads)
+  - [Available Datasets](#available-datasets)
+  - [Basic Usage](#basic-usage-for-datasets)
+  - [Advanced Options](#advanced-options-for-datasets)
 - [Image Graph Preprocessing](#-image-graph-preprocessing)
   - [Features](#features)
   - [Basic Usage](#basic-usage)
@@ -56,6 +60,66 @@ make install_vqa_deps # Dependencies for Visual QA functionality
 ```
 
 This will install Python packages and download necessary models for spaCy, NLTK, and vision-language processing.
+
+## 📥 Dataset Downloads
+
+The toolkit provides convenient methods to download standard benchmark datasets for visual reasoning tasks.
+
+### Available Datasets
+
+The following datasets are supported:
+
+- **COCO**: Common Objects in Context dataset for object detection and segmentation
+- **GQA**: Visual question answering dataset built on Visual Genome
+- **RefCOCO**: Dataset for referring expression comprehension
+- **VQA**: Visual Question Answering dataset
+- **TextVQA**: VQA dataset focused on text in images
+
+### Basic Usage for Datasets
+
+Download a specific dataset:
+
+```bash
+make download_dataset DATASET=coco
+```
+
+Or use specialized targets for each dataset:
+
+```bash
+make download_coco
+make download_gqa
+make download_refcoco
+make download_vqa
+make download_textvqa
+```
+
+### Advanced Options for Datasets
+
+Specify a custom output directory:
+
+```bash
+make download_coco DATASET_DIR=/path/to/data/coco
+```
+
+Or for the generic target:
+
+```bash
+make download_dataset DATASET=vqa DATASET_DIR=/path/to/data/vqa
+```
+
+### Direct Script Usage
+
+If you prefer to use the download script directly:
+
+```bash
+bash scripts/download/download_dataset.sh -d coco -o /path/to/output
+```
+
+Use the help option to see all available parameters:
+
+```bash
+bash scripts/download/download_dataset.sh --help
+```
 
 ## 🖼️ Image Graph Preprocessing
 
@@ -120,6 +184,26 @@ Limit the maximum number of relationships:
 make preprocess INPUT_PATH=/path/to/image.jpg MAX_RELATIONS=5
 ```
 
+#### Processing Subsets of Instances
+
+Process only specific ranges of instances in a directory:
+
+```bash
+# Process instances from index 0 to 9 (inclusive)
+make preprocess INPUT_PATH=/path/to/directory START_INDEX=0 END_INDEX=9
+
+# Process just the first 5 instances 
+make preprocess INPUT_PATH=/path/to/directory NUM_INSTANCES=5
+
+# Process instances from index 10 to 19
+make preprocess INPUT_PATH=/path/to/directory START_INDEX=10 END_INDEX=19
+```
+
+These indexing options are particularly useful for:
+- Processing large datasets in chunks
+- Parallelizing processing across multiple machines
+- Debugging with a smaller subset before full execution
+
 #### Batch Processing
 
 Process all images in a directory, creating separate output folders for each:
@@ -136,10 +220,17 @@ If you prefer to use the script directly:
 ./run_preprocessing.sh --input /path/to/image.jpg --output my_results --detectors owlvit,yolov8 --relations all --max 8
 ```
 
+You can also use indexing parameters:
+
+```bash
+./scripts/run_preprocessing.sh --input /path/to/directory --start 0 --end 9  # Process first 10 instances
+./scripts/run_preprocessing.sh --input /path/to/directory --num 5  # Process just 5 instances
+```
+
 Use the help option to see all available parameters:
 
 ```bash
-./run_preprocessing.sh --help
+./scripts/run_preprocessing.sh --help
 ```
 
 ### Output
@@ -163,13 +254,6 @@ The VQA system enables natural language querying of image content using state-of
 - ✅ **Batch Processing**: Process multiple questions and images efficiently
 - ✅ **Evaluation Tools**: Compare generated answers against ground truth
 
-### Installation
-
-Install the required dependencies for VQA:
-
-```bash
-make install_vqa_deps
-```
 
 ### Input Format
 
