@@ -43,7 +43,7 @@ RUN pip3 install 'git+https://github.com/facebookresearch/segment-anything.git'
 RUN pip3 install 'git+https://github.com/facebookresearch/fvcore'
 RUN pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
 
-RUN wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -O /workdir/sam_vit_h_4b8939.pth
+RUN wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -O $APP_PATH/sam_vit_h_4b8939.pth
 
 
 ENTRYPOINT ["make", "-f", "/workdir/Makefile"]

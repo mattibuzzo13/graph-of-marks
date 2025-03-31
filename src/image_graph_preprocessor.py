@@ -1,4 +1,5 @@
 import os
+import sys
 import math
 import torch
 import matplotlib.pyplot as plt
@@ -28,6 +29,19 @@ from detectron2.data import MetadataCatalog
 from transformers import Owlv2Processor, Owlv2ForObjectDetection
 
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+
+
+
+# Get the application directory from an environment variable, default to the current directory if not set.
+app_path = os.environ.get("APP_PATH", os.path.dirname(__file__))
+# Insert the absolute path into sys.path
+sys.path.insert(0, os.path.abspath(app_path))
+
+
+from dotenv import load_dotenv
+load_dotenv()
+
+
 
 # -----------------------------------------------------------------------------
 # 1. spaCy-based extraction of query terms
@@ -86,7 +100,7 @@ def build_relation_mapping():
 
 def extract_relation_terms(question):
     """Uses spaCy’s PhraseMatcher to extract spatial relation terms from the question."""
-    from spacy.matcher import PhraseMatcher  # ensure import is here
+    from spacy.matcher import PhraseMatcher
     relation_mapping = build_relation_mapping()
     matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
     for relation_label, phrase_list in relation_mapping.items():
@@ -851,7 +865,7 @@ def main():
         )
 
     # ----------------- Set up the SAM model -----------------
-    sam_checkpoint = "sam_vit_h_4b8939.pth"
+    sam_checkpoint = f"{app_path}/sam_vit_h_4b8939.pth"
     model_type = "vit_h"
     sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam_model.to(device)
