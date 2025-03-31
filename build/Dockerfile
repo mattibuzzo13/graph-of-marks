@@ -39,7 +39,11 @@ RUN pip3 install flash-attn==2.7.4.post1 --no-build-isolation
 RUN python3 -m spacy download en_core_web_md
 RUN python3 -m nltk.downloader wordnet
 
+RUN pip3 install 'git+https://github.com/facebookresearch/segment-anything.git'
+RUN pip3 install 'git+https://github.com/facebookresearch/fvcore'
+RUN pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
 
+RUN wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -O /workdir/sam_vit_h_4b8939.pth
 
 
 ENTRYPOINT ["make", "-f", "/workdir/Makefile"]
