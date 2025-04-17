@@ -11,14 +11,16 @@ ENV APP_PATH=/workdir
 # Install general-purpose dependencies
 RUN apt-get update -y && \
     apt-get install -y curl \
-                        git \
-                        bash \
-                        wget \
-                        nano \
-                        zip \
-                        unzip \
-                        python3.11 \
-                        python3-pip && \
+                       git \
+                       bash \
+                       wget \
+                       nano \
+                       zip \
+                       unzip \
+                       python3.11 \
+                       python3-pip \
+                       libgl1-mesa-glx \
+                       libglib2.0-0 && \
     apt-get autoremove -y && \
     apt-get clean -y && \
     rm -rf /var/lib/apt/lists/*
@@ -28,7 +30,10 @@ RUN pip install wrapt --upgrade --ignore-installed
 RUN pip install gdown
 
 
-COPY build/requirements.txt .
+COPY /build/requirements.txt /workdir/
+COPY Makefile        /workdir/
+
+COPY . /workdir/
 
 RUN pip3 install --no-cache-dir -r requirements.txt
 

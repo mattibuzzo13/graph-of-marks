@@ -5,15 +5,15 @@ INPUT_PATH ?=
 OUTPUT_FOLDER ?= output_images
 DETECTORS ?= owlvit,yolov8,detectron2
 RELATIONSHIP_TYPE ?= all
-MAX_RELATIONS ?= 8
+MAX_RELATIONS ?= 10
 START_INDEX ?= -1
 END_INDEX ?= -1
 NUM_INSTANCES ?= -1
 
 # Detection thresholds
-OWL_THRESHOLD ?= 0.15
-YOLO_THRESHOLD ?= 0.3
-DETECTRON_THRESHOLD ?= 0.3
+OWL_THRESHOLD ?= 0.5
+YOLO_THRESHOLD ?= 0.8
+DETECTRON_THRESHOLD ?= 0.8
 
 # NMS parameters
 LABEL_NMS_THRESHOLD ?= 0.5
@@ -21,8 +21,8 @@ SEG_IOU_THRESHOLD ?= 0.8
 
 # Relationship inference parameters
 OVERLAP_THRESH ?= 0.3
-MARGIN ?= 20
-MIN_DISTANCE ?= 90
+MARGIN ?= 30
+MIN_DISTANCE ?= 60
 MAX_DISTANCE ?= 20000
 
 # SAM parameters
@@ -39,7 +39,7 @@ IMAGE_DIR ?=
 MAX_LENGTH ?= 512
 TEMPERATURE ?= 0.2
 TOP_P ?= 0.9
-PROMPT_TEMPLATE ?= "Question: {question}\nAnswer:"
+PROMPT_TEMPLATE ?= 'Question: {question}\nAnswer:'
 BATCH_SIZE ?= 1
 TENSOR_PARALLEL_SIZE ?= 1
 
@@ -147,11 +147,13 @@ preprocess_detectron2: check_input
 
 # Target for preprocessing a batch of images
 batch_preprocess:
-	python -c 'import os; [os.system(f"make preprocess INPUT_PATH={os.path.join(root, f)} OUTPUT_FOLDER=output_images/{f.split(\".\")[0]}") for root, _, files in os.walk("$(INPUT_PATH)") for f in files if f.endswith((".jpg", ".png", ".jpeg"))]'
+	python3 src/image_graph_preprocessor.py \
+		--input_path "$(INPUT_PATH)" \
+		--output_folder "$(OUTPUT_FOLDER)"
 
 # Visual Question Answering targets
 run_vqa: check_vqa_input
-	python src/qa_generation.py \
+	python3 src/qa_generation.py \
 		--input_file "$(VQA_INPUT_FILE)" \
 		--output_file "$(VQA_OUTPUT_FILE)" \
 		--image_dir "$(IMAGE_DIR)" \
@@ -195,12 +197,18 @@ endif
 
 # Install dependencies
 install_deps:
+	python3 -m pip install --no-cache-dir numpy==1.24.4 scipy==1.10.1
+	python3 -m pip install --no-cache-dir wrapt --upgrade --ignore-installed
+	python3 -m pip install --no-cache-dir spacy==3.5.0
 	python3 -m spacy download en_core_web_md
+	python3 -m pip install nltk
 	python3 -m nltk.downloader wordnet
 
 # Install VQA dependencies
 install_vqa_deps:
-	pip install vllm transformers pillow tqdm
+	python3 -m pip install --upgrade transformers sentence-transformers huggingface_hub torch torchvision timm
+	pip install vllm --no-deps
+	pip install transformers pillow tqdm
 
 # Help target
 help:

@@ -10,7 +10,7 @@ sentence-transformers==3.4.1
 pretty-errors==1.2.25
 accelerate==1.4.0
 vllm==0.8.2
-spacy===3.8.4
+spacy==3.8.4
 nltk==3.9.1
 pillow==11.1.0
 tqdm==4.67.1

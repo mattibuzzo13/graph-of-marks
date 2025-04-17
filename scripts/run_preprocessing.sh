@@ -183,7 +183,7 @@ DETECTORS_LIST=$(echo "$DETECTORS" | sed 's/,/", "/g')
 DETECTORS_LIST="[\"$DETECTORS_LIST\"]"
 
 # Build the command with optional parameters
-CMD="python -m src.image_graph_preprocessor \
+CMD="python3 -m src.image_graph_preprocessor \
     --input_path \"$INPUT_PATH\" \
     --output_folder \"$OUTPUT_FOLDER\" \
     --detectors \"$DETECTORS_LIST\" \
