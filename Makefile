@@ -39,9 +39,13 @@ IMAGE_DIR ?=
 MAX_LENGTH ?= 512
 TEMPERATURE ?= 0.2
 TOP_P ?= 0.9
-PROMPT_TEMPLATE ?= 'Question: {question}\nAnswer:'
+PROMPT_TEMPLATE ?= 'Answer with only one word.\nQuestion: {question}\nAnswer:'
 BATCH_SIZE ?= 1
 TENSOR_PARALLEL_SIZE ?= 1
+USE_VLLM ?= true
+MAX_IMAGES ?= -1
+MAX_QUESTIONS_PER_IMAGE ?= -1
+# DTYPE ?= float32
 
 # Dataset download defaults
 DATASET ?=
@@ -159,12 +163,15 @@ run_vqa: check_vqa_input
 		--image_dir "$(IMAGE_DIR)" \
 		--model_name "$(MODEL_NAME)" \
 		--device cuda \
-		--max_length "$(MAX_LENGTH)" \
-		--temperature "$(TEMPERATURE)" \
-		--top_p "$(TOP_P)" \
-		--prompt_template "$(PROMPT_TEMPLATE)" \
-		--batch_size "$(BATCH_SIZE)" \
-		--tensor_parallel_size "$(TENSOR_PARALLEL_SIZE)"
+		$(if $(filter true,$(USE_VLLM)),--use_vllm) \
+    	--max_length "$(MAX_LENGTH)" \
+    	--temperature "$(TEMPERATURE)" \
+    	--top_p "$(TOP_P)" \
+    	--prompt_template "$(PROMPT_TEMPLATE)" \
+    	--batch_size "$(BATCH_SIZE)" \
+    	--tensor_parallel_size "$(TENSOR_PARALLEL_SIZE)" \
+		--max_images "$(MAX_IMAGES)" \
+		--max_questions_per_image "$(MAX_QUESTIONS_PER_IMAGE)" 
 
 check_vqa_input:
 ifndef VQA_INPUT_FILE

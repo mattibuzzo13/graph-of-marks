@@ -16,6 +16,7 @@ __pycache__/
 *.pth
 *.pt
 *.json
-
+*.jpg
 
 **/data/
+**/data1/

@@ -1,7 +1,6 @@
 datasets==3.3.1
 torch==2.6.0
 torchvision==0.21.0
-transformers==4.49.0
 colorlog==6.9.0
 wandb==0.19.7
 einops==0.8.0
@@ -17,3 +16,8 @@ tqdm==4.67.1
 matplotlib==3.10.1
 ultralytics==8.3.99
 opencv-python==4.11.0.86
+qwen-vl-utils[torchcodec]==0.0.10
+packaging==23.2
+peft
+backoff
+huggingface_hub

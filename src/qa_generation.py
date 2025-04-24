@@ -1,556 +1,507 @@
+import torch.multiprocessing as mp
+mp.set_start_method("spawn", force=True)
+
 """
-Visual Question Answering using VLLM (Vision-Language Large Language Models)
+Visual Question Answering using Vision-Language Models (VLMs)
 
-This script handles:
-1. Loading images and extracting visual features
-2. Processing questions/prompts related to visual content
-3. Generating answers using vision-language models
-4. Evaluating and saving results
-
-Supports multiple VLM architectures including LLaVA, MiniGPT4, and others via VLLM.
+This script supports both vLLM and Hugging Face based multimodal models under
+an Ubuntu 22.04 + CUDA 12.2 Docker environment.
 """
 
-import os
-import json
 import argparse
-import torch
+import json
 import logging
-from typing import List, Dict, Any, Tuple, Optional, Union
-from PIL import Image
-import requests
-from io import BytesIO
-from tqdm import tqdm
-from dataclasses import dataclass
+import os
 import time
-import numpy as np
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Union
 
-# Import VLLM
-from vllm import LLM, SamplingParams
-from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
+import requests
 
-# Import various vision-language models
+from huggingface_hub import login as hf_login
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise RuntimeError("Please set HF_TOKEN environment variable with your Hugging Face access token.")
+hf_login(token=HF_TOKEN)
+
+# Monkey-patch PEFT LoraModel to expose prepare_inputs_for_generation
 try:
-    from transformers import (
-        AutoProcessor, 
-        AutoModelForCausalLM,
-        LlavaForConditionalGeneration, 
-        BlipProcessor, 
-        Blip2ForConditionalGeneration
-    )
-    HF_TRANSFORMERS_AVAILABLE = True
+    from peft.tuners.lora.model import LoraModel
+    def _lora_prepare(self, *args, **kwargs):
+        return self.model.prepare_inputs_for_generation(*args, **kwargs)
+    LoraModel.prepare_inputs_for_generation = _lora_prepare
 except ImportError:
-    HF_TRANSFORMERS_AVAILABLE = False
-    print("Warning: Hugging Face Transformers not available. Install with: pip install transformers")
+    pass
 
-# Configure logging
+import torch
+from PIL import Image
+from tqdm import tqdm
+
+# Optional HF dependencies
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoProcessor,
+    Blip2ForConditionalGeneration,
+    BlipProcessor,
+    LlavaForConditionalGeneration,
+    Qwen2_5_VLForConditionalGeneration,
+    AutoTokenizer
+)
+
+# Optional vLLM dependencies
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_OK = True
+except ImportError:
+    VLLM_OK = False
+
+# Qwen utils
+try:
+    from qwen_vl_utils import process_vision_info
+    QWEN_UTILS_OK = True
+except ImportError:
+    QWEN_UTILS_OK = False
+
+# Logging config
+torch.backends.cudnn.benchmark = True
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("vqa_generation.log"),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s — %(levelname)s — %(message)s",
+    handlers=[logging.FileHandler("vqa_generation.log"), logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("vqa")
 
-# Data structures
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
 @dataclass
 class VQAExample:
-    """Data structure for a visual question answering example."""
     image_path: str
     question: str
     answer: Optional[str] = None
     image_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
         return {
             "image_path": self.image_path,
             "question": self.question,
             "answer": self.answer,
             "image_id": self.image_id,
-            "metadata": self.metadata or {}
+            "metadata": self.metadata or {},
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'VQAExample':
-        """Create from dictionary."""
+    def from_dict(cls, d: Dict[str, Any]) -> "VQAExample":
         return cls(
-            image_path=data["image_path"],
-            question=data["question"],
-            answer=data.get("answer"),
-            image_id=data.get("image_id"),
-            metadata=data.get("metadata", {})
+            image_path=d["image_path"],
+            question=d["question"],
+            answer=d.get("answer"),
+            image_id=d.get("image_id"),
+            metadata=d.get("metadata", {}),
         )
 
-# -------------------------------------------------------------------------
-# Image Loading and Processing Functions
-# -------------------------------------------------------------------------
-def load_image(image_path: str) -> Image.Image:
-    """
-    Load an image from a file path or URL.
-    
-    Args:
-        image_path: Path to the image file or URL
-        
-    Returns:
-        PIL Image object
-    """
-    if image_path.startswith(('http://', 'https://')):
-        response = requests.get(image_path, stream=True)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content))
+# ---------------------------------------------------------------------------
+# Utils
+# ---------------------------------------------------------------------------
+
+def load_image(path_or_url: str) -> Image.Image:
+    if path_or_url.lower().startswith(("http://", "https://")):
+        resp = requests.get(path_or_url, stream=True, timeout=30)
+        resp.raise_for_status()
+        img = Image.open(BytesIO(resp.content))
     else:
-        image = Image.open(image_path)
-    
-    # Convert to RGB if needed
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-        
-    return image
+        img = Image.open(path_or_url)
+    return img.convert("RGB")
 
-def load_examples_from_json(json_file: str) -> List[VQAExample]:
-    """
-    Load VQA examples from a JSON file.
-    
-    Expected format:
-    [
-        {
-            "image_path": "/path/to/image.jpg",
-            "question": "What color is the car?",
-            "answer": "red"  # Optional
-        },
-        ...
-    ]
-    
-    Args:
-        json_file: Path to the JSON file
-        
-    Returns:
-        List of VQAExample objects
-    """
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    
-    examples = []
-    for item in data:
-        examples.append(VQAExample.from_dict(item))
-    
-    return examples
 
-# -------------------------------------------------------------------------
-# VLLM Integration
-# -------------------------------------------------------------------------
+def load_examples(json_path: str) -> List[VQAExample]:
+    encodings = ["utf-8", "latin-1", "utf-16"]
+    for enc in encodings:
+        try:
+            with open(json_path, "r", encoding=enc) as fp:
+                data = json.load(fp)
+            return [VQAExample.from_dict(item) for item in data]
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"Unable to decode JSON file: {json_path}")
+
+# ---------------------------------------------------------------------------
+# vLLM wrapper
+# ---------------------------------------------------------------------------
+
 class VLLMWrapper:
-    """Wrapper for VLLM to handle vision-language models."""
-    
     def __init__(
-        self, 
-        model_name: str, 
-        device: str = "cuda", 
+        self,
+        model_name: str,
+        *,
+        device: str = "cuda",
         max_length: int = 512,
         temperature: float = 0.2,
         top_p: float = 0.9,
-        quantization: Optional[str] = None,
-        tensor_parallel_size: int = 1
+        tensor_parallel_size: int = 1,
     ):
-        """
-        Initialize the VLLM wrapper.
-        
-        Args:
-            model_name: Name or path of the model
-            device: Device to run on ("cuda" or "cpu")
-            max_length: Maximum length of generated text
-            temperature: Temperature for sampling
-            top_p: Top-p probability threshold for sampling
-            quantization: Quantization method (None, "int8", "int4")
-            tensor_parallel_size: Number of GPUs for tensor parallelism
-        """
-        
-        self.model_name = model_name
-        self.device = device
+        if not VLLM_OK:
+            raise ImportError("Please install vLLM: pip install vllm")
         self.max_length = max_length
-        self.temperature = temperature
-        self.top_p = top_p
-        
-        # Initialize VLLM
-        logger.info(f"Loading model {model_name} with VLLM...")
+        self.is_vl = any(tok in model_name.lower() for tok in (
+            "qwen", "llava", "blip", "vision", "janus", "phi-4"
+        ))
+        logger.info("[vLLM] loading %s", model_name)
         self.llm = LLM(
             model=model_name,
             tensor_parallel_size=tensor_parallel_size,
-            quantization=quantization,
             dtype="half" if device == "cuda" else "float32",
             trust_remote_code=True,
         )
-        
-        # Set up sampling parameters
         self.sampling_params = SamplingParams(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_length,
         )
-        
-        # Check if this is a vision-language model
-        self.is_vision_model = "llava" in model_name.lower() or "mpt-7b-instruct" in model_name.lower()
-        logger.info(f"Model loaded: {model_name}")
-        
-    def generate(self, 
-                 prompt: str, 
-                 image_path: Optional[str] = None) -> str:
-        """
-        Generate a response for a given prompt and optional image.
-        
-        Args:
-            prompt: Text prompt
-            image_path: Optional path to an image file
-            
-        Returns:
-            Generated text response
-        """
-        if self.is_vision_model and image_path:
-            try:
-                # Format input as messages with text and image content
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_path
-                                }
-                            }
-                        ]
-                    }
-                ]
-                
-                # Use the chat API instead of generate for better image handling
-                outputs = self.llm.chat(messages, sampling_params=self.sampling_params)
-                
-            except Exception as e:
-                logger.error(f"Error processing image: {e}")
-                # Fallback to text-only generation
-                outputs = self.llm.generate([prompt], self.sampling_params)
-                
-                # Extract the generated text from generate API
-                if outputs and len(outputs) > 0:
-                    generated_text = outputs[0].outputs[0].text.strip()
-                    return generated_text
-                else:
-                    logger.warning("No output generated")
-                    return ""
-        else:
-            # For text-only models or when no image is provided
-            outputs = self.llm.generate([prompt], self.sampling_params)
-            
-            # Extract the generated text from generate API
-            if outputs and len(outputs) > 0:
-                generated_text = outputs[0].outputs[0].text.strip()
-                return generated_text
-            else:
-                logger.warning("No output generated")
-                return ""
-        
-        # Extract the generated text from chat API
-        if outputs and len(outputs) > 0:
-            generated_text = outputs[0].outputs[0].text.strip()
-            return generated_text
-        else:
-            logger.warning("No output generated")
-            return ""
 
-# -------------------------------------------------------------------------
-# Hugging Face VL Models Integration 
-# -------------------------------------------------------------------------
-class HFVisionLanguageModel:
-    """Wrapper for Hugging Face vision-language models."""
-    
+    def generate(self, prompt: str, *, image_path: Optional[str] = None) -> str:
+        if self.is_vl and image_path:
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_path}},
+                    {"type": "text", "text": prompt},
+                ],
+            }]
+            out = self.llm.chat(messages, sampling_params=self.sampling_params)
+        else:
+            out = self.llm.generate([prompt], self.sampling_params)
+        return out[0].outputs[0].text.strip() if out and out[0].outputs else ""
+
+# ---------------------------------------------------------------------------
+# Hugging Face VLM wrapper
+# ---------------------------------------------------------------------------
+
+class HFVLModel:
     def __init__(
-        self, 
-        model_name: str, 
-        device: str = "cuda", 
+        self,
+        model_name: str,
+        *,
+        device: str = "cuda",
         max_length: int = 512,
         temperature: float = 0.2,
         top_p: float = 0.9,
+        torch_dtype: str = "auto",
     ):
-        """
-        Initialize the Hugging Face vision-language model.
-        
-        Args:
-            model_name: Name or path of the model
-            device: Device to run on ("cuda" or "cpu")
-            max_length: Maximum length of generated text
-            temperature: Temperature for sampling
-            top_p: Top-p probability threshold for sampling
-        """
-        if not HF_TRANSFORMERS_AVAILABLE:
-            raise ImportError("Hugging Face Transformers is not installed")
-        
-        self.model_name = model_name
-        self.device = torch.device(device if device == "cuda" and torch.cuda.is_available() else "cpu")
+        # detect device
+        self.device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
         self.max_length = max_length
         self.temperature = temperature
         self.top_p = top_p
-        
-        # Select the right model class based on the model name
-        if "llava" in model_name.lower():
-            self.processor = AutoProcessor.from_pretrained(model_name)
-            self.model = LlavaForConditionalGeneration.from_pretrained(
-                model_name, torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
-            )
-        elif "blip" in model_name.lower():
-            self.processor = BlipProcessor.from_pretrained(model_name)
-            self.model = Blip2ForConditionalGeneration.from_pretrained(
-                model_name, torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
-            )
-        else:
-            # Generic model loading
-            self.processor = AutoProcessor.from_pretrained(model_name)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
-            )
-        
-        self.model.to(self.device)
-        self.model.eval()
-        
-    def generate(self, prompt: str, image_path: Optional[str] = None) -> str:
-        """
-        Generate a response for a given prompt and optional image.
-        
-        Args:
-            prompt: Text prompt
-            image_path: Optional path to an image file
-            
-        Returns:
-            Generated text response
-        """
-        with torch.no_grad():
-            try:
-                if image_path:
-                    # Process image and text for vision-language model
-                    image = load_image(image_path)
-                    
-                    # Different models have different input formats
-                    if "llava" in self.model_name.lower():
-                        inputs = self.processor(text=prompt, images=image, return_tensors="pt").to(self.device)
-                    elif "blip" in self.model_name.lower():
-                        inputs = self.processor(images=image, text=prompt, return_tensors="pt").to(self.device)
-                    else:
-                        # Generic processing, may not work for all models
-                        inputs = self.processor(images=image, text=prompt, return_tensors="pt").to(self.device)
-                else:
-                    # Text-only input
-                    inputs = self.processor(text=prompt, return_tensors="pt").to(self.device)
-                
-                # Generate response
-                outputs = self.model.generate(
-                    **inputs,
-                    max_length=self.max_length,
-                    do_sample=True,
-                    temperature=self.temperature,
-                    top_p=self.top_p
-                )
-                
-                # Process output
-                if "llava" in self.model_name.lower():
-                    generated_text = self.processor.decode(outputs[0], skip_special_tokens=True)
-                elif "blip" in self.model_name.lower():
-                    generated_text = self.processor.decode(outputs[0], skip_special_tokens=True)
-                else:
-                    generated_text = self.processor.decode(outputs[0], skip_special_tokens=True)
-                
-                return generated_text.strip()
-                
-            except Exception as e:
-                logger.error(f"Error generating response: {e}")
-                return ""
+        self.name_lower = model_name.lower()
+        self.is_qwen_vl = "qwen2.5-vl" in self.name_lower
+        self.is_phi4 = "phi-4-multimodal-instruct" in self.name_lower
+        self.is_pixtral = "pixtral" in self.name_lower
 
-# -------------------------------------------------------------------------
-# Main VQA Functions
-# -------------------------------------------------------------------------
-def run_vqa_batch(
-    examples: List[VQAExample],
-    model_wrapper: Union[VLLMWrapper, HFVisionLanguageModel],
-    output_file: str,
-    prompt_template: str = "Question: {question}\nAnswer:",
-    batch_size: int = 1,
-):
-    """
-    Run visual question answering on a batch of examples.
-    
-    Args:
-        examples: List of VQAExample objects
-        model_wrapper: Model wrapper (VLLM or HF)
-        output_file: Path to save results
-        prompt_template: Template for formatting the prompt
-        batch_size: Batch size for processing
-    """
-    results = []
-    
-    # Process examples in batches
-    for i in tqdm(range(0, len(examples), batch_size)):
-        batch = examples[i:i+batch_size]
-        
-        for example in batch:
+
+        logger.info("[HF] loading %s", model_name)
+        # attempt to load config, fallback if unsupported
+        try:
+            config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        except Exception as e:
+            logger.warning(
+                "Could not load config for %s: %s — proceeding without explicit config",
+                model_name,
+                e,
+            )
+            config = None
+        # determine dtype
+        if torch_dtype == "auto":
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        else:
+            dtype = getattr(torch, torch_dtype)
+
+        # instantiate model and processor based on type
+        if self.is_qwen_vl:
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_name, config=config, torch_dtype=dtype, device_map="auto"
+            )
+        elif self.is_phi4:
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, config=config, trust_remote_code=True, torch_dtype=dtype, device_map="auto"
+            )
+        elif "janus-pro" in self.name_lower:
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             try:
-                # Format the prompt
-                prompt = prompt_template.format(question=example.question)
-                
-                # Generate answer
-                start_time = time.time()
-                answer = model_wrapper.generate(prompt, image_path=example.image_path)
-                end_time = time.time()
-                
-                # Log results
-                logger.info(f"Processed: {example.image_path}")
-                logger.info(f"Question: {example.question}")
-                logger.info(f"Answer: {answer}")
-                logger.info(f"Processing time: {end_time - start_time:.2f} seconds")
-                
-                # Store results
-                result = example.to_dict()
-                result["generated_answer"] = answer
-                result["processing_time"] = end_time - start_time
-                results.append(result)
-                
-                # Save intermediate results
-                with open(output_file, 'w') as f:
-                    json.dump(results, f, indent=2)
-                    
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name, config=config, trust_remote_code=True, torch_dtype=dtype, device_map="auto"
+                )
+            except ValueError:
+                # fallback without explicit config
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name, trust_remote_code=True, torch_dtype=dtype, device_map="auto"
+                )
+        elif "llava" in self.name_lower:
+            from transformers import LlavaProcessor
+            self.processor = LlavaProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = LlavaForConditionalGeneration.from_pretrained(
+                model_name, config=config, torch_dtype=dtype, trust_remote_code=True, device_map="auto", low_cpu_mem_usage=True
+            )
+            self.model.to(self.device)
+        elif "blip" in self.name_lower:
+            self.processor = BlipProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = Blip2ForConditionalGeneration.from_pretrained(
+                model_name, config=config, torch_dtype=dtype
+            )
+        elif self.is_pixtral:
+            try:
+                # First try to load LlamaTokenizer which is often used for Mistral models
+                from transformers import LlamaTokenizer
+                self.processor = LlamaTokenizer.from_pretrained(model_name, trust_remote_code=True)
             except Exception as e:
-                logger.error(f"Error processing example {example.image_path}: {e}")
-    
-    # Final save
-    with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    logger.info(f"Saved results to {output_file}")
+                logger.warning(f"Failed to load LlamaTokenizer: {e}")
+                try:
+                    # Fallback to MistralTokenizer if available
+                    from transformers import MistralTokenizer
+                    self.processor = MistralTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                except Exception as e:
+                    logger.warning(f"Failed to load MistralTokenizer: {e}")
+                    # Last resort: try to use AutoTokenizer with a similar model
+                    try:
+                        self.processor = AutoTokenizer.from_pretrained(
+                            "mistralai/Mistral-7B-v0.1", 
+                            trust_remote_code=True
+                        )
+                        logger.warning("Using fallback tokenizer from Mistral-7B-v0.1")
+                    except Exception as e:
+                        logger.error(f"All tokenizer loading attempts failed: {e}")
+                        raise
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name, 
+                    config=config, 
+                    trust_remote_code=True, 
+                    torch_dtype=dtype, 
+                    device_map="auto"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load Pixtral model: {e}")
+                raise
+
+        else:
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, config=config, trust_remote_code=True, torch_dtype=dtype
+            )
+
+        self.model.eval()
+
+    def generate(self, prompt: str, *, image_path: Optional[str] = None) -> str:
+        if self.is_pixtral:
+            if image_path:
+                logger.warning("Pixtral model does not support image input. Ignoring image.")
+            inputs = self.processor(prompt, return_tensors="pt").to(self.device)
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_length,
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
+            )
+            return self.processor.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        if self.is_qwen_vl:
+            return self._gen_qwen(prompt, image_path)
+        if self.is_phi4 and image_path:
+            return self._gen_phi4(prompt, image_path)
+        if self.is_pixtral:
+            if image_path:
+                logger.warning("Pixtral model does not support image input. Ignoring image.")
+            # Use tokenizer-style encoding for Pixtral
+            inputs = self.processor(prompt, return_tensors="pt").to(self.device)
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_length,
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
+            )
+            return self.processor.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        if image_path:
+            img = load_image(image_path)
+            multimodal_prompt = "<image> " + prompt
+            inputs = self.processor(text=multimodal_prompt, images=img, return_tensors="pt").to(self.device)
+        else:
+            inputs = self.processor(text=prompt, return_tensors="pt").to(self.device)
+        out = self.model.generate(
+            **inputs,
+            max_new_tokens=self.max_length,
+            do_sample=True,
+            temperature=self.temperature,
+            top_p=self.top_p,
+        )
+        return self.processor.decode(out[0], skip_special_tokens=True).strip()
+
+    def _gen_qwen(self, prompt: str, image_path: Optional[str]) -> str:
+        if not image_path:
+            inp = self.processor(prompt, return_tensors="pt").to(self.device)
+            ids = self.model.generate(
+                **inp,
+                max_new_tokens=self.max_length,
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
+            )
+            return self.processor.decode(ids[0], skip_special_tokens=True).strip()
+        if not QWEN_UTILS_OK:
+            raise RuntimeError("Install qwen_vl_utils for Qwen2.5-VL image inference")
+        msgs = [{"role":"user","content":[{"type":"image","image":f"file://{image_path}"},{"type":"text","text":prompt}]}]
+        text = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        img_inputs, vid_inputs = process_vision_info(msgs)
+        inp = self.processor(text=[text], images=img_inputs, videos=vid_inputs, padding=True, return_tensors="pt").to(self.device)
+        gen = self.model.generate(
+            **inp,
+            max_new_tokens=self.max_length,
+            do_sample=True,
+            temperature=self.temperature,
+            top_p=self.top_p,
+        )
+        trimmed = gen[:, inp.input_ids.shape[1]:]
+        return self.processor.decode(trimmed[0], skip_special_tokens=True).strip()
+
+    def _gen_phi4(self, prompt: str, image_path: str) -> str:
+        placeholder = "<|image_1|>"
+        c = f"{placeholder}{prompt}"
+        template = self.processor.tokenizer.apply_chat_template([{"role":"user","content":c}], tokenize=False, add_generation_prompt=True)
+        img = load_image(image_path)
+        inputs = self.processor(template, [img], return_tensors="pt").to(self.device)
+        prefix_len = inputs["input_ids"].shape[1]
+        gen = self.model.generate(
+            **inputs,
+            max_new_tokens=self.max_length,
+            do_sample=True,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            num_logits_to_keep=prefix_len,
+        )
+        out = gen[:, prefix_len:]
+        return self.processor.batch_decode(out, skip_special_tokens=True)[0].strip()
+
+# ---------------------------------------------------------------------------
+# Runner & evaluation
+# ---------------------------------------------------------------------------
+
+def run_vqa(
+    examples: List[VQAExample],
+    model: Union[VLLMWrapper, HFVLModel],
+    out_json: str,
+    prompt_tpl: str,
+    batch_size: int,
+    max_qpi: int,
+    max_imgs: int,
+) -> List[Dict[str, Any]]:
+    os.makedirs(os.path.dirname(out_json) or '.', exist_ok=True)
+    grouped: Dict[str, List[VQAExample]] = {}
+    for ex in examples:
+        grouped.setdefault(ex.image_path, []).append(ex)
+    paths = list(grouped)
+    if max_imgs > 0:
+        paths = paths[:max_imgs]
+    results: List[Dict[str, Any]] = []
+    for img_path in paths:
+        group = grouped[img_path]
+        if max_qpi > 0:
+            group = group[:max_qpi]
+        for i in tqdm(range(0, len(group), batch_size), desc='batches'):
+            batch = group[i:i+batch_size]
+            for ex in batch:
+                prompt = prompt_tpl.format(question=ex.question)
+                start_time = time.time()
+                ans = model.generate(prompt, image_path=ex.image_path)
+                # after you call model.generate…
+                # if full looks like "Answer with only one word.\nQuestion: Is this a horse?\nAnswer: No"
+                # this will grab just "No"
+                if "Answer:" in ans:
+                    ans = ans.rsplit("Answer:", 1)[-1].strip()
+                    ans = ans.strip().strip("'\"")
+                else:
+                    ans = ans.strip()
+
+                elapsed = time.time() - start_time
+                logger.info("%s | %.2fs | %s", os.path.basename(ex.image_path), elapsed, ans[:80])
+                results.append({**ex.to_dict(), "generated_answer": ans, "processing_time": elapsed})
+            with open(out_json, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
     return results
 
-# -------------------------------------------------------------------------
-# Evaluation Functions
-# -------------------------------------------------------------------------
-def evaluate_vqa_results(results: List[Dict[str, Any]]) -> Dict[str, float]:
-    """
-    Evaluate VQA results if ground truth answers are available.
-    
-    Args:
-        results: List of result dictionaries
-        
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    # Filter results with both ground truth and generated answers
-    valid_results = [r for r in results if r.get("answer") and r.get("generated_answer")]
-    
-    if not valid_results:
-        logger.warning("No valid results with ground truth answers for evaluation")
-        return {}
-    
-    # Initialize metrics
-    metrics = {
-        "exact_match": 0,
-        "total": len(valid_results),
-        "avg_processing_time": 0,
-    }
-    
-    # Calculate metrics
-    for result in valid_results:
-        # Check for exact match (can be extended with more sophisticated metrics)
-        if result["answer"].lower() == result["generated_answer"].lower():
-            metrics["exact_match"] += 1
-        
-        # Accumulate processing time
-        metrics["avg_processing_time"] += result.get("processing_time", 0)
-    
-    # Calculate percentages and averages
-    if metrics["total"] > 0:
-        metrics["exact_match_percent"] = 100 * metrics["exact_match"] / metrics["total"]
-        metrics["avg_processing_time"] = metrics["avg_processing_time"] / metrics["total"]
-    
-    return metrics
 
-# -------------------------------------------------------------------------
-# Main function
-# -------------------------------------------------------------------------
+def evaluate(results: List[Dict[str, Any]]) -> Dict[str, float]:
+    gold = [r for r in results if r.get("answer")]
+    if not gold:
+        return {}
+    correct = sum(r["answer"].strip().lower() == r["generated_answer"].strip().lower() for r in gold)
+    avg_time = sum(r["processing_time"] for r in gold) / len(gold)
+    return {"total": len(gold), "exact": correct, "exact_percent": 100 * correct / len(gold), "avg_time": avg_time}
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser("VQA pipeline")
+    ap.add_argument("--input_file", required=True)
+    ap.add_argument("--output_file", default="vqa_results.json")
+    ap.add_argument("--image_dir")
+    ap.add_argument("--model_name", default="Qwen/Qwen2.5-VL-7B-Instruct")
+    ap.add_argument("--use_vllm", action="store_true")
+    ap.add_argument("--max_length", type=int, default=512)
+    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--top_p", type=float, default=0.9)
+    ap.add_argument("--prompt_template", default="Question: {question}\nAnswer:")
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--batch_size", type=int, default=1)
+    ap.add_argument("--tensor_parallel_size", type=int, default=1)
+    ap.add_argument("--max_images", type=int, default=-1)
+    ap.add_argument("--max_questions_per_image", type=int, default=-1)
+    return ap.parse_args()
+
+
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Visual Question Answering using VLLM")
-    
-    # Input/output arguments
-    parser.add_argument("--input_file", type=str, help="Path to input JSON file with VQA examples")
-    parser.add_argument("--output_file", type=str, default="vqa_results.json", help="Path to output JSON file")
-    parser.add_argument("--image_dir", type=str, help="Path to directory containing images (optional)")
-    
-    # Model arguments
-    parser.add_argument("--model_name", type=str, default="llava-hf/llava-1.5-7b-hf", help="Name or path of the model")
-    parser.add_argument("--use_vllm", action="store_true", help="Use VLLM for generation")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run on (cuda or cpu)")
-    parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Number of GPUs for tensor parallelism")
-    parser.add_argument("--quantization", type=str, choices=[None, "int8", "int4"], help="Quantization method")
-    
-    # Generation arguments
-    parser.add_argument("--max_length", type=int, default=512, help="Maximum length of generated text")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Temperature for sampling")
-    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p probability threshold for sampling")
-    parser.add_argument("--prompt_template", type=str, default="Question: {question}\nAnswer:", 
-                        help="Template for formatting the prompt")
-    
-    # Other arguments
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing")
-    
-    args = parser.parse_args()
-    
-    # Load examples
-    if args.input_file:
-        logger.info(f"Loading examples from {args.input_file}")
-        examples = load_examples_from_json(args.input_file)
-    else:
-        logger.error("No input file specified")
-        return
-    
-    # Update image paths if image_dir is provided
+    args = parse_args()
+    examples = load_examples(args.input_file)
     if args.image_dir:
-        for example in examples:
-            if not os.path.isabs(example.image_path):
-                example.image_path = os.path.join(args.image_dir, example.image_path)
-    
-    # Initialize model
-    model_wrapper = VLLMWrapper(
-        model_name=args.model_name,
-        device=args.device,
-        max_length=args.max_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size
+        for ex in examples:
+            if not os.path.isabs(ex.image_path):
+                ex.image_path = os.path.join(args.image_dir, ex.image_path)
+    if args.use_vllm:
+        model = VLLMWrapper(
+            args.model_name,
+            device=args.device,
+            max_length=args.max_length,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            tensor_parallel_size=args.tensor_parallel_size,
+        )
+    else:
+        model = HFVLModel(
+            args.model_name,
+            device=args.device,
+            max_length=args.max_length,
+            temperature=args.temperature,
+            top_p=args.top_p,
+        )
+    results = run_vqa(
+        examples,
+        model,
+        out_json=args.output_file,
+        prompt_tpl=args.prompt_template,
+        batch_size=args.batch_size,
+        max_qpi=args.max_questions_per_image,
+        max_imgs=args.max_images,
     )
-    
-    # Run VQA
-    results = run_vqa_batch(
-        examples=examples,
-        model_wrapper=model_wrapper,
-        output_file=args.output_file,
-        prompt_template=args.prompt_template,
-        batch_size=args.batch_size
-    )
-    
-    # Evaluate results
-    metrics = evaluate_vqa_results(results)
-    logger.info(f"Evaluation metrics: {metrics}")
-    
-    # Save metrics
-    metrics_file = os.path.splitext(args.output_file)[0] + "_metrics.json"
-    with open(metrics_file, 'w') as f:
-        json.dump(metrics, f, indent=2)
-    
-    logger.info(f"Saved metrics to {metrics_file}")
+    metrics = evaluate(results)
+    if metrics:
+        metrics_path = os.path.splitext(args.output_file)[0] + "_metrics.json"
+        with open(metrics_path, "w", encoding="utf-8") as fp:
+            json.dump(metrics, fp, indent=2, ensure_ascii=False)
+        logger.info("Metrics saved to %s: %s", metrics_path, metrics)
 
 if __name__ == "__main__":
     main()
-

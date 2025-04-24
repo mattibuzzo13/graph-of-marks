@@ -936,7 +936,7 @@ def main():
             label_mode="original",
             show_confidence=False,
             draw_relationships=True,
-            display_labels=True,
+            display_labels=False,
             show_segmentation=True,
             fill_segmentation=False,
             save_path=out_path
