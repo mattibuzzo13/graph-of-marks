@@ -20,4 +20,5 @@ qwen-vl-utils[torchcodec]==0.0.10
 packaging==23.2
 peft
 backoff
-huggingface_hub
+huggingface_hub[hf_xet]
+num2words
