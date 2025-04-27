@@ -938,7 +938,7 @@ def main():
             draw_relationships=True,
             display_labels=False,
             show_segmentation=True,
-            fill_segmentation=False,
+            fill_segmentation=True,
             save_path=out_path
         )
 

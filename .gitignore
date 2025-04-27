@@ -17,6 +17,9 @@ __pycache__/
 *.pt
 *.json
 *.jpg
+*.ipynb
 
 **/data/
 **/data1/
+**/VQA_SoM/
+**/images/

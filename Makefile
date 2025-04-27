@@ -80,7 +80,7 @@ preprocess: check_input
 		--points-per-side "$(POINTS_PER_SIDE)" \
 		--pred-iou-thresh "$(PRED_IOU_THRESH)" \
 		--stability-thresh "$(STABILITY_SCORE_THRESH)" \
-		--min-mask-area "$(MIN_MASK_REGION_AREA)"
+		--min-mask-area "$(MIN_MASK_REGION_AREA)" 
 
 # Specialized preprocessing targets
 preprocess_owlvit: check_input
@@ -103,7 +103,7 @@ preprocess_owlvit: check_input
 		--points-per-side "$(POINTS_PER_SIDE)" \
 		--pred-iou-thresh "$(PRED_IOU_THRESH)" \
 		--stability-thresh "$(STABILITY_SCORE_THRESH)" \
-		--min-mask-area "$(MIN_MASK_REGION_AREA)"
+		--min-mask-area "$(MIN_MASK_REGION_AREA)" 
 
 preprocess_yolo: check_input
 	./scripts/run_preprocessing.sh \
@@ -125,7 +125,7 @@ preprocess_yolo: check_input
 		--points-per-side "$(POINTS_PER_SIDE)" \
 		--pred-iou-thresh "$(PRED_IOU_THRESH)" \
 		--stability-thresh "$(STABILITY_SCORE_THRESH)" \
-		--min-mask-area "$(MIN_MASK_REGION_AREA)"
+		--min-mask-area "$(MIN_MASK_REGION_AREA)" 
 
 preprocess_detectron2: check_input
 	./scripts/run_preprocessing.sh \
@@ -147,13 +147,14 @@ preprocess_detectron2: check_input
 		--points-per-side "$(POINTS_PER_SIDE)" \
 		--pred-iou-thresh "$(PRED_IOU_THRESH)" \
 		--stability-thresh "$(STABILITY_SCORE_THRESH)" \
-		--min-mask-area "$(MIN_MASK_REGION_AREA)"
+		--min-mask-area "$(MIN_MASK_REGION_AREA)" 
 
 # Target for preprocessing a batch of images
 batch_preprocess:
 	python3 src/image_graph_preprocessor.py \
 		--input_path "$(INPUT_PATH)" \
-		--output_folder "$(OUTPUT_FOLDER)"
+		--output_folder "$(OUTPUT_FOLDER)" \
+		--num_instances "$(NUM_INSTANCES)" 
 
 # Visual Question Answering targets
 run_vqa: check_vqa_input

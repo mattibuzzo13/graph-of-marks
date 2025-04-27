@@ -1,65 +1,65 @@
+# Base image with CUDA 12.2 and Ubuntu 22.04
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 LABEL maintainer="UniboNLP"
 
-# Zero interaction
+# Non-interactive APT installs
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Set work directory
+# Working directory setup
 WORKDIR /workdir
 ENV APP_PATH=/workdir
 
-# Install system deps
-RUN apt-get update -y && \
-    apt-get install -y \
-      curl git bash wget nano zip unzip \
-      python3.11 python3.11-dev python3-pip \
-      libopenblas-dev liblapack-dev \
-      libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
-      libgl1-mesa-glx libglib2.0-0 && \
-    apt-get autoremove -y && \
-    apt-get clean -y && \
-    rm -rf /var/lib/apt/lists/*
+# Install system packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3.11-venv python3-pip \
+    build-essential cmake \
+    curl git wget unzip zip nano bash \
+    libopenblas-dev liblapack-dev \
+    libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
+    libgl1-mesa-glx libglib2.0-0 \
+ && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip3 install --upgrade pip wrapt --upgrade --ignore-installed gdown
+# Create and activate virtual environment
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy over requirements and code
-COPY /build/requirements.txt /workdir/
-COPY Makefile              /workdir/
-COPY .                     /workdir/
+# Upgrade pip and install core utils
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir gdown wrapt
 
-# Install all other Python deps
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Copy in project files
+COPY /build/requirements.txt .
+COPY Makefile .
+COPY . .
 
-# Install the bleeding‑edge Transformers directly from GitHub
-RUN python3 -m pip install --upgrade \
-        sentence-transformers huggingface_hub torch torchvision timm
-        
-RUN pip install --no-cache-dir \
-        git+https://github.com/huggingface/transformers.git@main
+# Install core project requirements (should not include torch)
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Other git‑based installs
-RUN python3 -m pip install git+https://github.com/deepseek-ai/Janus.git
-RUN python3 -m pip install git+https://github.com/Dao-AILab/flash-attention.git
-RUN pip3 install flash-attn==2.7.4.post1 --no-build-isolation
+# Install PyTorch & compatible packages early
+RUN pip install --no-cache-dir torch==2.6.0 torchvision==0.21.0 timm
 
-RUN python3 -m pip install --upgrade -q git+https://github.com/huggingface/transformers
-RUN python3 -m pip install --upgrade transformers sentence-transformers huggingface_hub torch torchvision timm
+# Install sentence-transformers and huggingface utilities
+RUN pip install --no-cache-dir sentence-transformers==3.4.1 huggingface_hub
 
-# Preprocessing utilities
-RUN python3 -m spacy download en_core_web_md
-RUN python3 -m nltk.downloader wordnet
+# GitHub packages (installed in order, with torch already present)
+RUN pip install --no-cache-dir git+https://github.com/huggingface/transformers.git@main
+RUN pip install --no-cache-dir git+https://github.com/deepseek-ai/Janus.git
+RUN pip install --no-cache-dir --no-build-isolation git+https://github.com/Dao-AILab/flash-attention.git
+RUN pip install --no-cache-dir flash-attn==2.7.4.post1
+RUN pip install --no-cache-dir git+https://github.com/facebookresearch/segment-anything.git
+RUN pip install --no-cache-dir git+https://github.com/facebookresearch/fvcore
+RUN pip install --no-cache-dir git+https://github.com/facebookresearch/detectron2.git
 
-# Facebook research repos
-RUN pip3 install 'git+https://github.com/facebookresearch/segment-anything.git'
-RUN pip3 install 'git+https://github.com/facebookresearch/fvcore'
-RUN pip3 install 'git+https://github.com/facebookresearch/detectron2.git'
+# NLP model downloads
+RUN python -m spacy download en_core_web_md && \
+    python -m nltk.downloader wordnet
 
-# Download SAM weights
-RUN wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
-     -O $APP_PATH/sam_vit_h_4b8939.pth
+# Download pretrained SAM weights
+ADD https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth ${APP_PATH}/sam_vit_h_4b8939.pth
 
-ENTRYPOINT ["make", "-f", "/workdir/Makefile"]
+# Default entry
+ENTRYPOINT ["make"]
+CMD ["-f", "/workdir/Makefile"]
 
-# Restore interactive frontend
+# Reset APT frontend mode
 ENV DEBIAN_FRONTEND=dialog
