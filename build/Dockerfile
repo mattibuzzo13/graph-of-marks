@@ -55,7 +55,9 @@ RUN python -m spacy download en_core_web_md && \
     python -m nltk.downloader wordnet
 
 # Download pretrained SAM weights
-ADD https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth ${APP_PATH}/sam_vit_h_4b8939.pth
+# RUN mkdir -p ${APP_PATH}/src && \
+#    wget -q https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
+#        -O ${APP_PATH}/src/sam_vit_h_4b8939.pth
 
 # Default entry
 ENTRYPOINT ["make"]

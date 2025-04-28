@@ -494,7 +494,7 @@ def visualize_detections_and_relationships_with_auto_masks(
                     if fill_segmentation:
                         polygon = largest_contour.reshape(-1, 2)
                         ax.fill(polygon[:,0], polygon[:,1],
-                                color=color, alpha=0.3, zorder=1)
+                                color=color, alpha=0.2, zorder=1)
                     # Outline
                     ax.plot(largest_contour[:,0], largest_contour[:,1],
                             color=color, linewidth=2, zorder=2)
@@ -595,7 +595,7 @@ def visualize_detections_and_relationships_with_auto_masks(
                     fontsize=8, color=color,
                     rotation=angle_deg,
                     rotation_mode='anchor',
-                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'),  # More transparent label background
+                    bbox=dict(facecolor='black', alpha=0.8, edgecolor='none'),  # More transparent label background
                     zorder=5
                 )
 
@@ -603,8 +603,8 @@ def visualize_detections_and_relationships_with_auto_masks(
     for (pt, text, color) in detection_labels_info:
         ax.text(
             pt[0], pt[1], text,
-            fontsize=10, color=color,
-            bbox=dict(facecolor='white', alpha=0.4, edgecolor='none'),  # More transparent label background
+            fontsize=8, color=color,
+            bbox=dict(facecolor='black', alpha=0.8, edgecolor='none'),  # More transparent label background
             zorder=7
         )
 
@@ -783,8 +783,36 @@ def main():
     print(f"[INFO] Running on device: {device}")
 
     # ----------------- Load SAM model -----------------
+
+    from pathlib import Path
+    from torch.hub import download_url_to_file   
+    import hashlib
+
+    SAM_CKPT_URL = (
+        "https://dl.fbaipublicfiles.com/segment_anything/"
+        "sam_vit_h_4b8939.pth"
+    )
+    SAM_LOCAL_PATH = Path("src") / "sam_vit_h_4b8939.pth"
+    SAM_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    if not SAM_LOCAL_PATH.exists():
+        print(f"[INFO] Checkpoint SAM non trovato, lo scarico in {SAM_LOCAL_PATH} …")
+        try:
+            download_url_to_file(
+                url=SAM_CKPT_URL,
+                dst=str(SAM_LOCAL_PATH),
+                hash_prefix=None,    
+                progress=True
+            )
+            print("[INFO] Download completato.")
+        except Exception as e:
+            print(f"[ERROR] Impossibile scaricare SAM: {e}")
+            sys.exit(1)
+    else:
+        print(f"[INFO] Checkpoint SAM già presente in {SAM_LOCAL_PATH}")
+        
     print("[INFO] Loading SAM model ...")
-    sam_checkpoint = "src/sam_vit_h_4b8939.pth"
+    sam_checkpoint = str(SAM_LOCAL_PATH)
     model_type = "vit_h"
     sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint)
     sam_model.to(device)
@@ -936,7 +964,7 @@ def main():
             label_mode="original",
             show_confidence=False,
             draw_relationships=True,
-            display_labels=False,
+            display_labels=True,
             show_segmentation=True,
             fill_segmentation=True,
             save_path=out_path
