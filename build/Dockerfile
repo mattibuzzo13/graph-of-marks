@@ -50,6 +50,8 @@ RUN pip install --no-cache-dir git+https://github.com/facebookresearch/segment-a
 RUN pip install --no-cache-dir git+https://github.com/facebookresearch/fvcore
 RUN pip install --no-cache-dir git+https://github.com/facebookresearch/detectron2.git
 
+RUN pip install --upgrade transformers huggingface_hub
+
 # NLP model downloads
 RUN python -m spacy download en_core_web_md && \
     python -m nltk.downloader wordnet

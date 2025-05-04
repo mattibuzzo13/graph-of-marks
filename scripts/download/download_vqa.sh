@@ -19,23 +19,23 @@ cd "$OUTPUT_DIR/images"
 
 # Download COCO images (VQA uses COCO images)
 echo "Downloading COCO 2014 training images (train2014)..."
-wget -c http://images.cocodataset.org/zips/train2014.zip
+#wget -c http://images.cocodataset.org/zips/train2014.zip
 echo "Downloading COCO 2014 validation images (val2014)..."
 wget -c http://images.cocodataset.org/zips/val2014.zip
 echo "Downloading COCO 2015 test images (test2015)..."
-wget -c http://images.cocodataset.org/zips/test2015.zip
+#wget -c http://images.cocodataset.org/zips/test2015.zip
 
 # Unzip the downloaded files
 echo "Extracting image archives..."
-unzip -q train2014.zip
+#unzip -q train2014.zip
 unzip -q val2014.zip
-unzip -q test2015.zip
+#unzip -q test2015.zip
 
 # Remove zip files to conserve space
 echo "Cleaning up image archives..."
-rm train2014.zip
+#rm train2014.zip
 rm val2014.zip
-rm test2015.zip
+#rm test2015.zip
 
 # Navigate to the annotations directory
 cd "../annotations"
