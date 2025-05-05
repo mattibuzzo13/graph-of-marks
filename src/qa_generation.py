@@ -382,24 +382,38 @@ def run_vqa(
     skip_preproc: bool = False
 ) -> List[Dict[str, Any]]:
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
+
+    # 1) Carico eventuali risultati già salvati
+    if os.path.exists(out_json):
+        with open(out_json, "r", encoding="utf-8") as f:
+            results = json.load(f)
+    else:
+        results = []
+
+    # 2) Costruisco un set di chiavi già elaborate (image_path + question)
+    processed = {(r["image_path"], r["question"]) for r in results}
+
+    # 3) Raggruppo gli esempi per immagine
     grouped: Dict[str, List[VQAExample]] = {}
     for ex in examples:
         grouped.setdefault(ex.image_path, []).append(ex)
 
     img_paths = list(grouped)[:max_imgs] if max_imgs > 0 else list(grouped)
-    results: List[Dict[str, Any]] = []
 
     for img in img_paths:
         qs = grouped[img][:max_qpi] if max_qpi > 0 else grouped[img]
         for i in tqdm(range(0, len(qs), batch_size), desc=os.path.basename(img)):
             batch = qs[i : i + batch_size]
             for ex in batch:
-                # Se skip_preproc, passo la raw image direttamente
+                # Se questa coppia è già processata, skip
+                key = (ex.image_path, ex.question)
+                if key in processed:
+                    continue
+
+                # 4) Preprocessing (salta se skip_preproc)
                 if skip_preproc:
                     processed_img = ex.image_path
                 else:
-                    # Altrimenti faccio sempre il preprocessing completo,
-                    # ma disabilito solo il question-filter se richiesto
                     processed_img = preprocess_for_qa(
                         ex.image_path,
                         ex.question,
@@ -407,24 +421,31 @@ def run_vqa(
                         apply_question_filter=not disable_q_filter,
                         preproc_cli_args=preproc_args
                     )
+
+                # 5) Generazione della risposta
                 prompt = prompt_tpl.format(question=ex.question)
                 t0 = time.time()
                 ans = model.generate(prompt, image_path=processed_img)
-                # Clear CUDA cache to reduce fragmentation
                 torch.cuda.empty_cache()
+
                 if "Answer:" in ans:
                     ans = ans.rsplit("Answer:", 1)[-1].strip().strip('"')
-                results.append({
+
+                # 6) Aggiungo ai risultati e segno come processato
+                out_record = {
                     **ex.to_dict(),
                     "generated_answer": ans,
                     "processing_time": time.time() - t0
-                })
+                }
+                results.append(out_record)
+                processed.add(key)
 
-        # Save interim results
+        # Salvo i risultati intermedi
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
 
     return results
+
 
 # ---------------------------------------------------------------------------
 # Metrics
