@@ -18,9 +18,6 @@ from collections import defaultdict
 import argparse
 from pathlib import Path
 from torch.hub import download_url_to_file
-from spacy.matcher import PhraseMatcher
-from adjustText import adjust_text
-
 
 # YOLOv8
 from ultralytics import YOLO
@@ -36,7 +33,7 @@ from detectron2.data import MetadataCatalog
 from transformers import Owlv2Processor, Owlv2ForObjectDetection
 
 # Segment Anything (SAM)
-from segment_anything import SamAutomaticMaskGenerator, sam_model_registry, SamPredictor
+from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
 # For optional Hugging Face dataset usage
 try:
@@ -78,19 +75,17 @@ class ImageGraphPreprocessor:
 
         # Detectors & thresholds
         self.detectors_to_use = config.get("detectors_to_use", ["owlvit", "yolov8", "detectron2"])
-        self.threshold_owl = config.get("threshold_owl", 0.5)
-        self.threshold_yolo = config.get("threshold_yolo", 0.5)
-        self.threshold_detectron = config.get("threshold_detectron", 0.5)
+        self.threshold_owl = config.get("threshold_owl", 0.8)
+        self.threshold_yolo = config.get("threshold_yolo", 0.8)
+        self.threshold_detectron = config.get("threshold_detectron", 0.8)
 
         # Relationship settings
-        self.max_relations = config.get("max_relations", 10)
-        self.proportional_relations = config.get("proportional_relations", False)
+        self.max_relations = config.get("max_relations", 30)
+        self.proportional_relations = config.get("proportional_relations", True)
         self.relation_ratio = config.get("relation_ratio", 1.0)
-        self.max_relations_per_object = config.get("max_relations_per_object", 1)
+        self.max_relations_per_object = config.get("max_relations_per_object", 3)
         self.min_relations_per_object = config.get("min_relations_per_object", 1)
         self.filter_relations_by_question = config.get("filter_relations_by_question", True)
-        self.threshold_object_similarity   = config.get("threshold_object_similarity", 0.5)
-        self.threshold_relation_similarity = config.get("threshold_relation_similarity", 0.5)
 
         # Label & visualization settings
         self.question = config.get("question", "")
@@ -99,7 +94,7 @@ class ImageGraphPreprocessor:
         self.display_labels = config.get("display_labels", True)
         self.display_relationships = config.get("display_relationships", True)
         self.show_segmentation = config.get("show_segmentation", True)
-        self.fill_segmentation = config.get("fill_segmentation", True)
+        self.fill_segmentation = config.get("fill_segmentation", False)
 
         # Additional toggles
         self.show_confidence = config.get("show_confidence", False)
@@ -112,7 +107,7 @@ class ImageGraphPreprocessor:
 
         # Overlap & NMS thresholds
         self.label_nms_threshold = config.get("label_nms_threshold", 0.5)
-        self.seg_iou_threshold = config.get("seg_iou_threshold", 0.5)
+        self.seg_iou_threshold = config.get("seg_iou_threshold", 0.8)
 
         # Relationship inference geometry
         self.margin = config.get("margin", 20)
@@ -121,8 +116,8 @@ class ImageGraphPreprocessor:
 
         # SAM parameters
         self.points_per_side = config.get("points_per_side", 32)
-        self.pred_iou_thresh = config.get("pred_iou_thresh", 0.7)
-        self.stability_score_thresh = config.get("stability_score_thresh", 0.85)
+        self.pred_iou_thresh = config.get("pred_iou_thresh", 0.9)
+        self.stability_score_thresh = config.get("stability_score_thresh", 0.95)
         self.min_mask_region_area = config.get("min_mask_region_area", 100)
 
         # Dataset indexing
@@ -140,11 +135,14 @@ class ImageGraphPreprocessor:
         # Load SpaCy for question or text-based processing
         print("[INFO] Loading SpaCy 'en_core_web_md' model ...")
         self.nlp = spacy.load("en_core_web_md")
-        self.question_doc = self.nlp(self.question) if self.question.strip() else None
 
-        # Build matchers per relazioni
-        self.relation_matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
-        self._build_relation_matcher()
+        # If you haven't previously:
+        # nltk.download("wordnet")
+
+        # Build question-based sets in advance (object terms, relationship terms)
+        self._parsed_question_object_terms = set()
+        self._parsed_question_relation_terms = set()
+        self._build_question_semantics()
 
         # ---------------------------------------------------------
         # 3) Load Segment Anything (SAM) model
@@ -161,92 +159,36 @@ class ImageGraphPreprocessor:
         self.d2_metadata = None
         self._init_detectors()
 
-        owl_queries = [
-                "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
-                "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
-                "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella",
-                "handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat",
-                "baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork",
-                "knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza",
-                "donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
-                "remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock",
-                "vase","scissors","teddy bear","hair drier","toothbrush","fence","grass","table","house","plate",
-                "lamp","street lamp","sign","glass","plant","hedge","sofa","light","window","curtain","candle","tree",
-                "sky","cloud","road","hat","glove","helmet","mountain","snow","sunglasses","bow tie","picture",
-                "printer","monitor","picture", "pillow","stone","glasses","wheel","building","bridge","tomato"
-        ]
-
-        self.detectors_label_list = []
-        # Se OWL-ViT è stato caricato, aggiungo le sue label
-        if self.owlvit_model:
-            self.detectors_label_list.extend(owl_queries)
-
-        # Se YOLOv8 è stato caricato, prendo le sue names
-        if self.yolo_model:
-            # results.names è dict[int,str], quindi ne estraggo i valori
-            self.detectors_label_list.extend(list(self.yolo_model.names.values()))
-
-        # Se Detectron2 è stato caricato, prendo thing_classes
-        if self.d2_metadata:
-            self.detectors_label_list.extend(self.d2_metadata.thing_classes)
-
-        self.label_matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
-        patterns = [self.nlp(lbl.lower()) for lbl in self.detectors_label_list]
-        self.label_matcher.add("LABEL", None, *patterns)
-
-        # —––––––––––––––––––––––––––––––––––––––––––––––—
-        # 4) ORA posso ricostruire i termini della domanda
-        # —––––––––––––––––––––––––––––––––––––––––––––––—
-
-        # Reset dei set (utile se __init__ viene richiamato due volte)
-        self._parsed_question_object_terms   = set()
-        self._parsed_question_relation_terms = set()
-
-        # Ed ecco la chiamata che ora funziona correttamente:
-        self._build_question_semantics()
-
     ###########################################################################
     # QUESTION SEMANTICS
     ###########################################################################
-    def _build_relation_matcher(self):
-        base_map = {
-            "above":   ["above"],
-            "below":   ["below", "under"],
-            "left_of": ["left of", "to the left of"],
-            "right_of":["right of", "to the right of"]
-        }
-        for label, terms in base_map.items():
-            patterns = [self.nlp(term) for term in terms]
-            self.relation_matcher.add(label, None, *patterns)
-
-
     def _build_question_semantics(self):
-        # reset
-        self._parsed_question_object_terms = set()
+        """
+        Parse the question text to figure out which nouns and relationships
+        might be relevant. We'll gather synonyms for each object-like term
+        (nouns) and also parse relationship words (above, below, left_of, etc.).
+
+        If the question yields no recognized object terms, we effectively
+        won't do object-level question filtering. Similarly, if the question
+        yields no recognized relationship synonyms, we skip relation filtering.
+        """
         if not self.apply_question_filter or not self.question.strip():
             return
 
-        doc = self.nlp(self.question)
+        # Extract object terms (candidate nouns)
+        object_terms = self._extract_query_terms(self.question)
 
-        # a) exact phrase‐matches of detector labels
-        for _, start, end in self.label_matcher(doc):
-            self._parsed_question_object_terms.add(doc[start:end].text.lower())
+        # Gather synonyms
+        obj_synonyms = set()
+        for term in object_terms:
+            obj_synonyms.update(self._get_wordnet_synonyms(term))
+            obj_synonyms.add(term.lower())
 
-        # b) fallback to nouns+WordNet if no labels matched
-        if not self._parsed_question_object_terms:
-            nouns = {
-                tok.lemma_.lower()
-                for tok in doc
-                if tok.pos_ in {"NOUN","PROPN"} and not tok.is_stop
-            }
-            for term in list(nouns):
-                for syn in wordnet.synsets(term):
-                    nouns |= {lem.name().lower().replace("_"," ")
-                              for lem in syn.lemmas()}
-            self._parsed_question_object_terms = nouns
+        self._parsed_question_object_terms = obj_synonyms
 
-
-
+        # Extract relationship synonyms (above, below, left_of, right_of)
+        relation_terms = self._extract_relation_terms(self.question)
+        self._parsed_question_relation_terms = set(relation_terms)
 
     def _extract_query_terms(self, text: str) -> list:
         """
@@ -270,7 +212,6 @@ class ImageGraphPreprocessor:
         """
         Identify which of 'above/below/left_of/right_of' are in the question (including synonyms).
         """
-
         base_map = {
             "above":   ["above"],
             "below":   ["below", "under"],
@@ -310,17 +251,17 @@ class ImageGraphPreprocessor:
 
         # Se il percorso non è assoluto, considera il file nella cartella di output
         checkpoint_path = (Path(self.output_folder) / sam_checkpoint) if not Path(sam_checkpoint).is_absolute() else Path(sam_checkpoint)
-
+        
         # Controlla se il file esiste, altrimenti scaricalo
         SAM_CKPT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
         if not checkpoint_path.exists():
             print("[INFO] Scarico checkpoint SAM …")
             download_url_to_file(SAM_CKPT_URL, str(checkpoint_path))
-
+        
         self.sam_model = sam_model_registry[sam_model_type](checkpoint=str(checkpoint_path))
         # self.sam_model.to(self.device)
-        self.sam_model.to(self.device)
-
+        self.sam_model.to("cpu")
+        
         self.mask_generator = SamAutomaticMaskGenerator(
             self.sam_model,
             points_per_side=self.points_per_side,
@@ -328,7 +269,6 @@ class ImageGraphPreprocessor:
             stability_score_thresh=self.stability_score_thresh,
             min_mask_region_area=self.min_mask_region_area
         )
-        self.sam_predictor = SamPredictor(self.sam_model)
 
     def _init_detectors(self):
         if "owlvit" in self.detectors_to_use:
@@ -347,9 +287,9 @@ class ImageGraphPreprocessor:
         processor = Owlv2Processor.from_pretrained("google/owlv2-large-patch14-ensemble")
         model = Owlv2ForObjectDetection.from_pretrained(
             "google/owlv2-large-patch14-ensemble",
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True
-        )
+            torch_dtype=torch.float16,        
+            low_cpu_mem_usage=True          
+        )        
         model.to(self.device)
         model.eval()
         return processor, model
@@ -454,55 +394,32 @@ class ImageGraphPreprocessor:
     def _run_detectron2_detection(self, image_pil: Image.Image):
         if not (self.d2_predictor and self.d2_metadata):
             return []
-
-        # 1) run the model
         image_np = np.array(image_pil)
-        outputs  = self.d2_predictor(image_np)
+        outputs = self.d2_predictor(image_np)
         instances = outputs["instances"].to("cpu")
 
-        # 2) extract all the fields
-        boxes   = instances.pred_boxes.tensor.cpu().numpy().tolist()   # list of [x1,y1,x2,y2]
-        scores  = instances.scores.cpu().numpy().tolist()             # list of floats
-        classes = instances.pred_classes.cpu().tolist()               # list of ints
-        masks   = instances.pred_masks.cpu().numpy()                  # array (N, H, W) of bool
+        boxes = instances.pred_boxes
+        scores = instances.scores
+        classes = instances.pred_classes
+        if boxes is None or scores is None or classes is None:
+            return []
 
         detections = []
-        for box, sc, cls_idx, mask in zip(boxes, scores, classes, masks):
-            if sc < self.threshold_detectron:
+        for box_xyxy, sc, cls_idx in zip(boxes, scores, classes):
+            x_min, y_min, x_max, y_max = box_xyxy.tolist()
+            label_name = self.d2_metadata.thing_classes[cls_idx]
+            if float(sc) < self.threshold_detectron:
                 continue
-
-            label = self.d2_metadata.thing_classes[cls_idx]
             detections.append({
-                "box":       box,
-                "score":     float(sc),
-                "label":     label,
-                "det2_mask": mask.astype(bool)   # full‐size binary mask
+                "box": [x_min, y_min, x_max, y_max],
+                "label": label_name,
+                "score": float(sc)
             })
-
         return detections
-
 
     ###########################################################################
     # BOX / SEGMENTATION / RELATIONSHIP UTILS
     ###########################################################################
-    def _mask_iou(self, m1: np.ndarray, m2: np.ndarray) -> float:
-      inter = np.logical_and(m1, m2).sum()
-      union = np.logical_or(m1, m2).sum()
-      return inter / union if union > 0 else 0.0
-
-    def _fuse_masks(self, sam_mask: np.ndarray, det2_mask: np.ndarray,
-                    method="union", iou_thresh=0.5) -> np.ndarray:
-        iou = self._mask_iou(sam_mask, det2_mask)
-        if method == "iou_union" and iou >= iou_thresh:
-            return np.logical_or(sam_mask, det2_mask)
-        if method == "union":
-            return np.logical_or(sam_mask, det2_mask)
-        if method == "intersection":
-            return np.logical_and(sam_mask, det2_mask)
-        # fallback to SAM
-        return sam_mask
-
-
     def _compute_iou(self, box1: list, box2: list) -> float:
         x1, y1, x2, y2 = box1
         xA, yA, xB, yB = box2
@@ -556,65 +473,28 @@ class ImageGraphPreprocessor:
         x, y, w, h = cv2.boundingRect(contour)
         return [x, y, x + w, y + h]
 
-    def _filter_segmentation_duplicates(self, boxes, labels, scores, all_masks):
-        """
-        Refine SAM masks to detection bboxes and remove duplicates via NMS.
-
-        Args:
-            boxes: list of [x1, y1, x2, y2]
-            labels: list of str
-            scores: list of float
-            all_masks: list of dict con chiavi 'segmentation' (H×W bool) e 'bbox' originale
-
-        Returns:
-            new_boxes, new_labels, new_scores, new_masks
-              - new_masks è una list di dict identici a all_masks ma con 'bbox' aggiornato
-        """
-
-        refined_boxes   = []
-        refined_labels  = []
-        refined_scores  = []
-        refined_masks   = []
-
-        # 1) Per ogni detection, scegli la maschera migliore e ricalcola il bbox
-        for box, lab, sc, m in zip(boxes, labels, scores, all_masks):
-            best = self._get_best_mask_for_box(box, [m])
-            if best is not None:
-                # Estraggo la maschera e i contorni
-                mask_uint8 = (best["segmentation"] * 255).astype(np.uint8)
-                contours, _ = cv2.findContours(mask_uint8,
-                                              cv2.RETR_EXTERNAL,
-                                              cv2.CHAIN_APPROX_SIMPLE)
+    def _filter_segmentation_duplicates(self, boxes: list, labels: list, scores: list,
+                                        all_masks: list):
+        seg_boxes = []
+        for box in boxes:
+            mask = self._get_best_mask_for_box(box, all_masks)
+            if mask is not None:
+                mask_uint8 = (mask['segmentation'] * 255).astype(np.uint8)
+                contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
-                    c = max(contours, key=cv2.contourArea)
-                    refined_box = self._bbox_from_contour(c)
-                    # aggiorno anche il campo 'bbox' della maschera
-                    best["bbox"] = refined_box
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    refined_box = self._bbox_from_contour(largest_contour)
                 else:
                     refined_box = box
             else:
                 refined_box = box
-                best = m  # uso la maschera originale
+            seg_boxes.append(refined_box)
 
-            refined_boxes.append(refined_box)
-            refined_labels.append(lab)
-            refined_scores.append(sc)
-            refined_masks.append(best)
-
-        # 2) Non‐Maximum Suppression sui bbox rifiniti
-        keep = self._non_maximum_suppression(refined_boxes,
-                                            refined_scores,
-                                            self.seg_iou_threshold)
-
-        # 3) Ricostruisco le liste “filtrate”
-        new_boxes  = [refined_boxes[i]   for i in keep]
-        new_labels = [refined_labels[i]  for i in keep]
-        new_scores = [refined_scores[i]  for i in keep]
-        new_masks  = [refined_masks[i]   for i in keep]
-
-        return new_boxes, new_labels, new_scores, new_masks
-
-
+        keep_idx = self._non_maximum_suppression(seg_boxes, scores, self.seg_iou_threshold)
+        new_boxes  = [boxes[i]  for i in keep_idx]
+        new_labels = [labels[i] for i in keep_idx]
+        new_scores = [scores[i] for i in keep_idx]
+        return new_boxes, new_labels, new_scores
 
     ###########################################################################
     # RELATIONSHIP INFERENCE
@@ -735,69 +615,41 @@ class ImageGraphPreprocessor:
         return new_boxes, new_labels, new_scores
 
     def _filter_by_question(self, boxes, labels, scores):
-        if not self.apply_question_filter:
+        """
+        If the question yields recognized object synonyms, filter objects.
+        If not, skip object filtering as if no question was provided.
+        """
+        if not self.apply_question_filter or not self.question.strip():
             return boxes, labels, scores
 
-        new_b, new_l, new_s = [], [], []
+        # If the question synonyms set is empty => skip filtering
+        if not self._parsed_question_object_terms:
+            return boxes, labels, scores
+
+        # Otherwise, filter by recognized synonyms
+        new_boxes, new_labels, new_scores = [], [], []
         for b, lab, sc in zip(boxes, labels, scores):
-            lab_low = lab.lower()
+            label_lower = lab.lower()
+            if label_lower in self._parsed_question_object_terms:
+                new_boxes.append(b)
+                new_labels.append(lab)
+                new_scores.append(sc)
 
-            if lab_low in self._parsed_question_object_terms:
-                keep = True
-            else:
-                sims = [
-                    self.nlp(lab_low).similarity(self.nlp(term))
-                    for term in self._parsed_question_object_terms
-                ]
-                keep = sims and max(sims) >= self.threshold_object_similarity
+        return new_boxes, new_labels, new_scores
 
-            if keep:
-                new_b.append(b)
-                new_l.append(lab)
-                new_s.append(sc)
-
-        return new_b, new_l, new_s
-
-
-    def _filter_relationships_by_question(self, relationships):
+    def _filter_relationships_by_question(self, relationships: list) -> list:
         """
-        Filters a list of relationship dicts based on question-specified relation terms
-        and a spaCy similarity threshold.
+        If the question yields recognized relationship synonyms, filter them;
+        otherwise skip as if no question was provided.
         """
-        # If filtering is disabled, return all relationships
-        if not self.filter_relations_by_question:
+        if not self.filter_relations_by_question or not self._parsed_question_relation_terms:
             return relationships
 
-        filtered = []
-        question_terms = self._parsed_question_relation_terms
-
+        new_list = []
         for r in relationships:
-            rel_label = r["relation"]
-
-            # 1) Exact match against parsed question terms
-            if rel_label in question_terms:
-                filtered.append(r)
-                continue
-
-            # 2) If no question terms, skip similarity check
-            if not question_terms:
-                continue
-
-            # 3) Compute spaCy similarity between the relation label and each question term
-            rel_doc = self.nlp(rel_label.replace("_", " "))
-            similarities = [
-                rel_doc.similarity(self.nlp(term))
-                for term in question_terms
-            ]
-            best_sim = max(similarities) if similarities else 0.0
-
-            # 4) Keep the relation if similarity exceeds threshold
-            if best_sim >= self.threshold_relation_similarity:
-                filtered.append(r)
-
-        return filtered
-
-
+            if r["relation"] in self._parsed_question_relation_terms:
+                new_list.append(r)
+        return new_list
 
     ###########################################################################
     # VISUALIZATION
@@ -1005,28 +857,18 @@ class ImageGraphPreprocessor:
                         fontsize=8, color=color,
                         rotation=angle_deg,
                         rotation_mode='anchor',
-                        bbox=dict(facecolor='white', alpha=0.8, edgecolor=color),
+                        bbox=dict(facecolor='white', alpha=0.5, edgecolor=color),
                         zorder=5
                     )
 
-        texts = []
-        for i, (pt, text, color) in enumerate(detection_labels_info):
-            t = ax.text(
-                pt[0], pt[1], text,
+        for (pt, text, color) in detection_labels_info:
+            ax.text(
+                pt[0], pt[1],
+                text,
                 fontsize=10, color=color,
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor=color),
+                bbox=dict(facecolor='white', alpha=0.4, edgecolor=color),
                 zorder=7
             )
-            texts.append(t)
-
-        adjust_text(
-            texts,
-            ax=ax,
-            only_move={'points':'y', 'text':'xy'},
-            expand_text=(1.1, 1.1),
-            force_text=0.5,
-            arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5)
-        )
 
         plt.tight_layout()
         if save_path:
@@ -1035,78 +877,6 @@ class ImageGraphPreprocessor:
             print(f"[INFO] Saved output to {save_path}")
         else:
             plt.show()
-
-    def _refine_mask_with_point(self, image_np: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """
-        Given an initial binary mask, sample its centroid as a positive prompt
-        and run SAM’s point‐prompt to get a tighter mask.
-        """
-        # 1) Compute centroid of the mask
-        ys, xs = np.where(mask)
-        if len(xs) == 0:
-            return mask  # empty or invalid
-        cx, cy = int(xs.mean()), int(ys.mean())
-
-        # 2) Prompt SAM
-        self.sam_predictor.set_image(image_np)
-        point_coords  = np.array([[cx, cy]])
-        point_labels  = np.array([1])  # 1 = “foreground”
-        masks_pts, scores_pts, _ = self.sam_predictor.predict(
-            point_coords=point_coords,
-            point_labels=point_labels,
-            multimask_output=False
-        )
-        # 3) Return the single refined mask
-        return masks_pts[0]
-
-    @torch.inference_mode()
-    def _run_sam_combined_segmentation(self, image_pil: Image.Image, boxes: list[list[float]]):
-        image_np = np.array(image_pil)
-
-        # ——— Stage 1: Global masks ——————————————————————
-        global_masks = self.mask_generator.generate(image_np)
-
-        # Prepare SAM predictor once
-        self.sam_predictor.set_image(image_np)
-
-        refined_masks = []
-        for box in boxes:
-            # ——— Stage 2: Box‐prompt multimask ——————————————
-            box_arr = np.array(box, dtype=float)[None, :]
-            masks_box, scores_box, _ = self.sam_predictor.predict(
-                box=box_arr,
-                multimask_output=True
-            )
-            # pick the highest‐scoring box mask
-            best_idx = int(np.argmax(scores_box))
-            mask_box = masks_box[best_idx]
-
-            # optionally compare to global: take whichever has better coverage
-            # (here we just use the box mask as our “initial” mask)
-            initial_mask = mask_box
-
-            # ——— Stage 3: Point‐prompt refinement ————————————
-            final_mask = self._refine_mask_with_point(image_np, initial_mask)
-
-            # Post‐process (morphology, blur, etc.) if you already do that:
-            # e.g., close → open → blur → binarize
-            kernel = np.ones((7, 7), np.uint8)
-            m_uint8 = (final_mask.astype(np.uint8) * 255)
-            m_closed  = cv2.morphologyEx(m_uint8, cv2.MORPH_CLOSE,  kernel)
-            m_opened  = cv2.morphologyEx(m_closed,  cv2.MORPH_OPEN,   kernel)
-            m_blurred = cv2.GaussianBlur(m_opened, (7, 7), 0)
-            mask_refined = (m_blurred > 127)
-
-            refined_masks.append({
-                "segmentation": mask_refined,
-                "bbox":         box,
-                # you can store score if you like, e.g. scores_box[best_idx]
-                "predicted_iou": float(scores_box[best_idx])
-            })
-
-        return refined_masks
-
-
 
     ###########################################################################
     # PROCESS A SINGLE IMAGE
@@ -1150,60 +920,50 @@ class ImageGraphPreprocessor:
         labels = [d["label"] for d in all_detections]
         scores = [d["score"] for d in all_detections]
 
-        # ————————————————
-        # 2) QUESTION-DRIVEN FILTERING
-        # ————————————————
-        # First infer all possible relations over the unfiltered set
+        # 2) Infer *all* relations once up front
         rels_all = self._infer_relationships_improved(boxes)
 
-        if self.apply_question_filter and self._parsed_question_object_terms:
-            # 2a) Find the indices of detections whose label matches the question
-            question_idxs = {
+        # 3) Decide if we actually have any question terms
+        use_qf = self.apply_question_filter and bool(self._parsed_question_object_terms)
+        if self.apply_question_filter and not use_qf:
+            print("[INFO] Nessun termine rilevante dalla domanda: salto question-filtering.")
+
+        # 4) Perform question-based object filtering to get seed indices
+        if use_qf:
+            seed_idxs = {
                 i for i, lab in enumerate(labels)
                 if lab.lower() in self._parsed_question_object_terms
             }
+            # 5) Extend seeds with any neighbors in rels_all
+            for r in rels_all:
+                if r["src_idx"] in seed_idxs:
+                    seed_idxs.add(r["tgt_idx"])
+                if r["tgt_idx"] in seed_idxs:
+                    seed_idxs.add(r["src_idx"])
 
-            if question_idxs:
-                # 2b) Gather direct neighbours of those question-objects
-                neighbor_idxs = set()
-                for r in rels_all:
-                    if r["src_idx"] in question_idxs:
-                        neighbor_idxs.add(r["tgt_idx"])
-                    if r["tgt_idx"] in question_idxs:
-                        neighbor_idxs.add(r["src_idx"])
-
-                # 2c) Our filtered objects are only the question ones + their immediate neighbours
-                filtered_idxs = sorted(question_idxs | neighbor_idxs)
-
-                # 2d) And the only relations we keep are those directly connecting a question object ↔ neighbour
-                filtered_rels = [
-                    {
-                        "src_idx": filtered_idxs.index(r["src_idx"]),
-                        "tgt_idx": filtered_idxs.index(r["tgt_idx"]),
-                        "relation": r["relation"],
-                        "distance": r["distance"],
-                    }
-                    for r in rels_all
-                    if (r["src_idx"] in question_idxs and r["tgt_idx"] in neighbor_idxs)
-                    or (r["tgt_idx"] in question_idxs and r["src_idx"] in neighbor_idxs)
-                ]
-                filtered_rels = self._limit_relationships_per_object(filtered_rels, boxes)
-                # filtered_rels = sorted(filtered_rels, key=lambda r: r["distance"])[: self.max_relations]
-
-            else:
-                # nothing matched the question → fallback to no question-filtering
-                print("[INFO] Matched terms but no seeds—falling back to full set.")
+            if not seed_idxs:
+                print("[INFO] Matched terms but no seeds—fall-back to full set.")
                 filtered_idxs = list(range(len(boxes)))
-                filtered_rels = []
+            else:
+                filtered_idxs = sorted(seed_idxs)
         else:
-            # question-filter disabled or no question terms → full set
+            # no question filtering: keep everything
             filtered_idxs = list(range(len(boxes)))
-            filtered_rels = []
 
-        # rebuild our detection lists to only include filtered objects
+        # Rebuild filtered lists
         boxes  = [boxes[i]   for i in filtered_idxs]
         labels = [labels[i]  for i in filtered_idxs]
         scores = [scores[i]  for i in filtered_idxs]
+
+        # 6) Area filter always applies
+        boxes, labels, scores = self._filter_by_area(boxes, labels, scores)
+
+        # If area filter killed everything, fall back to original full set
+        if not boxes:
+            print("[INFO] Area filter ha rimosso tutto—fall-back al preproc completo.")
+            boxes  = [d["box"]   for d in all_detections]
+            labels = [d["label"] for d in all_detections]
+            scores = [d["score"] for d in all_detections]
 
         # 7) Label-wise NMS
         by_label = defaultdict(list)
@@ -1222,54 +982,39 @@ class ImageGraphPreprocessor:
         labels = [labels[i]  for i in keep]
         scores = [scores[i]  for i in keep]
 
-        image_np = np.array(image_pil)
-        auto_masks = self.mask_generator.generate(image_np)
-
         # 8) SAM segmentation refinement
-        refined_masks = self._run_sam_combined_segmentation(image_pil, boxes)
+        masks = self.mask_generator.generate(np.array(image_pil))
+        boxes, labels, scores = self._filter_segmentation_duplicates(boxes, labels, scores, masks)
 
-        # now align and fuse per-box:
-        fused_masks = []
-        for det, sam_dict in zip(all_detections, refined_masks):
-            sam_mask = sam_dict["segmentation"]  # H×W bool
-            det2_mask = det.get("det2_mask")     # might be None for non-Detectron2
-            if det2_mask is not None:
-                fused = self._fuse_masks(
-                    sam_mask,
-                    det2_mask,
-                    method="iou_union",
-                    iou_thresh=0.5
-                )
-                sam_dict["segmentation"] = fused
-            fused_masks.append(sam_dict)
-
-        all_masks_global = auto_masks + fused_masks
-
-        #boxes, labels, scores, kept_masks = self._filter_segmentation_duplicates(
-        #      boxes, labels, scores, all_masks_global
-        #)
-
-        # 9) Use our already‐computed filtered_rels (or fallback to full set if empty)
-        rels = filtered_rels if filtered_rels else [
-            {
-                "src_idx": r["src_idx"],
-                "tgt_idx": r["tgt_idx"],
-                "relation": r["relation"],
-                "distance": r["distance"],
-            }
-            for r in rels_all
-            if r["src_idx"] in filtered_idxs and r["tgt_idx"] in filtered_idxs
-        ]
-
-
-        # —————————————————————————————————————————
-        # 10) Enforce global cap on number of relations
-        #    (and optionally re-apply per-object cap)
-        # first, limit per object if you want:
+        # 9) Relationship inference on the *filtered* set
+        rels = self._infer_relationships_improved(boxes)
+        # trim down by distance/count as before...
+        if self.proportional_relations:
+            maxr = int(len(boxes) * self.relation_ratio)
+        else:
+            maxr = self.max_relations
+        rels = sorted(rels, key=lambda r: r["distance"])[:maxr]
         rels = self._limit_relationships_per_object(rels, boxes)
-        # then, keep only the closest max_relations overall:
-        #rels = sorted(rels, key=lambda r: r["distance"])[: self.max_relations]
-        # —————————————————————————————————————————
+        rels = self._unify_pair_relations(rels)
+
+        # 10) Inject any cross-edges from rels_all that connect our seeds to neighbors
+        if use_qf and seed_idxs:
+            # map original idx→new index in filtered list
+            idx_map = {orig: new for new, orig in enumerate(filtered_idxs)}
+            for r in rels_all:
+                if r["src_idx"] in seed_idxs or r["tgt_idx"] in seed_idxs:
+                    s, t = r["src_idx"], r["tgt_idx"]
+                    if s in idx_map and t in idx_map:
+                        rels.append({"src_idx": idx_map[s], "tgt_idx": idx_map[t],
+                                     "relation": r["relation"], "distance": r["distance"]})
+            # dedupe
+            rels = self._unify_pair_relations(rels)
+
+        # 11) Finally, if you also want to filter relationships by question-type:
+        if self.filter_relations_by_question:
+            rels = self._filter_relationships_by_question(rels)
+            if not self._parsed_question_relation_terms:
+                print("[INFO] Nessun termine di relazione dalla domanda: salto filtro relazioni.")
 
         # 12) Visualize & save
         out_path = os.path.join(self.output_folder, f"{image_name}_output.jpg")
@@ -1279,7 +1024,7 @@ class ImageGraphPreprocessor:
             labels=labels,
             scores=scores,
             relationships=rels,
-            all_masks=all_masks_global,
+            all_masks=masks,
             save_path=out_path
         )
 
@@ -1306,7 +1051,7 @@ class ImageGraphPreprocessor:
                 name = os.path.splitext(os.path.basename(img_p))[0]
                 self.process_single_image(img, name, q)
             return
-
+        
         if self.dataset_name:
             if not HAVE_DATASETS:
                 print("[ERROR] 'datasets' library not installed, cannot load a dataset.")
@@ -1383,80 +1128,57 @@ class ImageGraphPreprocessor:
 
 
 def parse_preproc_args():
-        parser = argparse.ArgumentParser(description="Image Graph Preprocessor (dict-based)")
+    parser = argparse.ArgumentParser(description="Image Graph Preprocessor (dict-based)")
 
-        # I/O
-        parser.add_argument("--input_path",    type=str, default=None,
-                            help="Path to image or folder")
-        parser.add_argument("--json_file",     type=str, default="",
-                            help="Se non vuoto, processa batch JSON")
-        parser.add_argument("--output_folder", type=str, default="output_images")
-        parser.add_argument("--dataset",       type=str, default=None)
-        parser.add_argument("--split",         type=str, default="train")
-        parser.add_argument("--image_column",  type=str, default="image")
+    # I/O
+    parser.add_argument("--input_path",    type=str, default=None,
+                        help="Path to image or folder")
+    parser.add_argument("--json_file",     type=str, default="",
+                        help="Se non vuoto, processa batch JSON")
+    parser.add_argument("--output_folder", type=str, default="output_images")
+    parser.add_argument("--dataset",       type=str, default=None)
+    parser.add_argument("--split",         type=str, default="train")
+    parser.add_argument("--image_column",  type=str, default="image")
 
-        # Batch limit
-        parser.add_argument("--num_instances", type=int, default=-1,
-                            help="Se >0, process only le prime N istanze")
+    # Batch limit
+    parser.add_argument("--num_instances", type=int, default=-1,
+                        help="Se >0, process only le prime N istanze")
 
-        # Question filtering
-        parser.add_argument("--question",                 type=str, default="")
-        parser.add_argument("--disable_question_filter", action="store_true")
+    # Question filtering
+    parser.add_argument("--question",                 type=str, default="")
+    parser.add_argument("--disable_question_filter", action="store_true")
 
-        # Detectors & relazioni
-        parser.add_argument("--detectors",     type=str,
-                            default="owlvit,yolov8,detectron2",
-                            help="Lista separata da virgola")
-        parser.add_argument("--max_relations", type=int, default=10)
-        parser.add_argument(
-            "--max_relations_per_object",
-            type=int,
-            default=1,
-            help="Maximum number of relations to keep for each object"
-        )
-        parser.add_argument(
-            "--min_relations_per_object",
-            type=int,
-            default=1,
-            help="Minimum number of relations to guarantee for each object"
-        )
+    # Detectors & relazioni
+    parser.add_argument("--detectors",     type=str,
+                        default="owlvit,yolov8,detectron2",
+                        help="Lista separata da virgola")
+    parser.add_argument("--max_relations", type=int, default=8)
 
-        # Soglie detectors
-        parser.add_argument("--owl_threshold",       type=float, default=0.5)
-        parser.add_argument("--yolo_threshold",      type=float, default=0.5)
-        parser.add_argument("--detectron_threshold", type=float, default=0.5)
-        parser.add_argument("--fill_segmentation",   action="store_true")
-        parser.add_argument(
-            "--label_mode",
-            type=str,
-            choices=["original","numeric","alphabetic"],
-            default="original",
-            help="Label style: original names, numeric indexes, or alphabetic"
-        )
-        parser.add_argument("--display_labels", action="store_true")
-        parser.add_argument("--display_relationships", action="store_true")
-        parser.add_argument("--show_segmentation", action="store_true")
+    # Soglie detectors
+    parser.add_argument("--owl_threshold",       type=float, default=0.5)
+    parser.add_argument("--yolo_threshold",      type=float, default=0.5)
+    parser.add_argument("--detectron_threshold", type=float, default=0.5)
 
-        # NMS e segmentazione
-        parser.add_argument("--label_nms_threshold", type=float, default=0.5)
-        parser.add_argument("--seg_iou_threshold",   type=float, default=0.5)
+    # NMS e segmentazione
+    parser.add_argument("--label_nms_threshold", type=float, default=0.5)
+    parser.add_argument("--seg_iou_threshold",   type=float, default=0.8)
 
-        # Relazioni geometriche
-        parser.add_argument("--overlap_thresh", type=float, default=0.3)
-        parser.add_argument("--margin",         type=int,   default=20)
-        parser.add_argument("--min_distance",   type=float, default=90)
-        parser.add_argument("--max_distance",   type=float, default=20000)
+    # Relazioni geometriche
+    parser.add_argument("--overlap_thresh", type=float, default=0.3)
+    parser.add_argument("--margin",         type=int,   default=20)
+    parser.add_argument("--min_distance",   type=float, default=90)
+    parser.add_argument("--max_distance",   type=float, default=20000)
 
-        # SAM
-        parser.add_argument("--points_per_side",        type=int,   default=32)
-        parser.add_argument("--pred_iou_thresh",        type=float, default=0.7)
-        parser.add_argument("--stability_score_thresh", type=float, default=0.85)
-        parser.add_argument("--min_mask_region_area",   type=int,   default=300)
+    # SAM
+    parser.add_argument("--points_per_side",        type=int,   default=32)
+    parser.add_argument("--pred_iou_thresh",        type=float, default=0.9)
+    parser.add_argument("--stability_score_thresh", type=float, default=0.95)
+    parser.add_argument("--min_mask_region_area",   type=int,   default=100)
 
-        # Dispositivo
-        parser.add_argument("--preproc_device", type=str, default=None)
+    # Dispositivo
+    parser.add_argument("--preproc_device", type=str, default=None)
 
-        return parser.parse_known_args()[0]
+    return parser.parse_known_args()[0]
 
 
 if __name__ == "__main__":
@@ -1474,17 +1196,10 @@ if __name__ == "__main__":
         "question":           args.question,
         "apply_question_filter": not args.disable_question_filter,
         "detectors_to_use":   [d.strip() for d in args.detectors.split(",")],
-        "max_relations": args.max_relations,
-        "max_relations_per_object": args.max_relations_per_object,
-        "min_relations_per_object": args.min_relations_per_object,
+        "max_relations":      args.max_relations,
         "threshold_owl":      args.owl_threshold,
         "threshold_yolo":     args.yolo_threshold,
         "threshold_detectron":args.detectron_threshold,
-        "label_mode":         args.label_mode,
-        "display_labels":     args.display_labels,
-        "display_relationships": args.display_relationships,
-        "show_segmentation":  args.show_segmentation,
-        "fill_segmentation":  args.fill_segmentation,
         "label_nms_threshold":args.label_nms_threshold,
         "seg_iou_threshold":  args.seg_iou_threshold,
         "overlap_thresh":     args.overlap_thresh,

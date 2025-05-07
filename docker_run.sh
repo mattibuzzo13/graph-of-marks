@@ -88,7 +88,7 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 #    ENABLE_Q_FILTER=false
 
 # Full VQA run on one image, but with all questions 
-docker run --rm ${GPU_FLAG} \
+docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_TOKEN=$HF_TOKEN \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \

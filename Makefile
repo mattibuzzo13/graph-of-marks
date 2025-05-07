@@ -22,14 +22,17 @@ DETECTORS               ?= owlvit,yolov8,detectron2
 # Relationship extraction settings
 RELATIONSHIP_TYPE       ?= all
 MAX_RELATIONS           ?= 10
+MAX_RELATIONS_PER_OBJECT ?= 1
+MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
 NUM_INSTANCES           ?= -1
+LABEL_MODE			 ?= original
 
 # Detection thresholds
-OWL_THRESHOLD           ?= 0.9
-YOLO_THRESHOLD          ?= 0.9
-DETECTRON_THRESHOLD     ?= 0.9
+OWL_THRESHOLD           ?= 0.3
+YOLO_THRESHOLD          ?= 0.5
+DETECTRON_THRESHOLD     ?= 0.5
 
 # NMS parameters
 LABEL_NMS_THRESHOLD     ?= 0.5
@@ -160,8 +163,18 @@ run_vqa:
 	  --prompt_template "$(PROMPT_TEMPLATE)" \
 	  $(if $(filter true,$(SKIP_PREPROCESSING)),--skip-preprocessing) \
 	  $(if $(filter true,$(USE_VLLM)),--use_vllm) \
-	  $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter)
-
+	  $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
+	  --owl_threshold $(OWL_THRESHOLD) \
+	  --yolo_threshold $(YOLO_THRESHOLD) \
+	  --detectron_threshold $(DETECTRON_THRESHOLD) \
+	  --max_relations $(MAX_RELATIONS) \
+	  --max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
+	  --min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
+	  --fill_segmentation \
+	  --label_mode "$(LABEL_MODE)" \
+	  --display_labels \
+	  --display_relationships \
+	  --show_segmentation
 
 #------------------------------------------------------------------------------
 # Dataset download targets

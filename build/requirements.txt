@@ -22,3 +22,4 @@ peft
 backoff
 huggingface_hub[hf_xet]
 num2words
+adjustText
