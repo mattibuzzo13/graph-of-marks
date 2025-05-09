@@ -1,0 +1,100 @@
+# --------------------
+# STAGE 1: builder
+# --------------------
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
+LABEL maintainer="UniboNLP"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /build
+
+# 1) Dev tools (cmake, gcc, nvcc, Python dev headers, ninja)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3.11 python3.11-dev python3.11-venv python3-pip \
+      build-essential git cmake curl unzip zip ninja-build && \
+    rm -rf /var/lib/apt/lists/*
+
+# 2) Crea virtualenv & aggiorna pip
+RUN python3.11 -m venv /opt/venv && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# 3) Genera wheel per torch & co. e installa nella venv
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels \
+      torch==2.6.0 torchvision==0.21.0 timm && \
+    pip install --no-index --no-cache-dir --find-links=/wheels \
+      torch==2.6.0 torchvision==0.21.0 timm
+
+# 4) Genera wheel per tutti i pure-Python e git-packages, inclusi datasets e colorlog
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels \
+      sentence-transformers==3.4.1 \
+      huggingface_hub \
+      datasets==3.3.1 \
+      colorlog==6.9.0 \
+      git+https://github.com/huggingface/transformers.git@main \
+      git+https://github.com/deepseek-ai/Janus.git \
+      git+https://github.com/Dao-AILab/flash-attention.git \
+      flash-attn==2.7.4.post1 \
+      git+https://github.com/facebookresearch/segment-anything.git
+
+# 5) Genera wheel di fvcore (PyPI) e detectron2
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels \
+      fvcore==0.1.5.post20210518 && \
+    pip wheel --no-cache-dir --wheel-dir=/wheels \
+      git+https://github.com/facebookresearch/detectron2.git
+
+# --------------------
+# STAGE 2: runtime
+# --------------------
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+LABEL maintainer="UniboNLP"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:$PATH" \
+    APP_PATH=/workdir
+
+WORKDIR /workdir
+
+# 6) Solo Python runtime e librerie di sistema minime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3-pip \
+      curl unzip zip libgl1-mesa-glx libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+# 7) Importa virtualenv e cache di wheel dal builder
+COPY --from=builder /opt/venv  /opt/venv
+COPY --from=builder /wheels    /wheels
+
+# 8) Installa tutte le dipendenze offline
+COPY build/requirements.txt .
+RUN pip install --no-index --no-cache-dir \
+      --find-links=/wheels \
+      -r requirements.txt && \
+    pip install --no-index --no-cache-dir \
+      --find-links=/wheels \
+      torch==2.6.0 \
+      torchvision==0.21.0 \
+      timm \
+      sentence-transformers==3.4.1 \
+      huggingface_hub \
+      transformers \
+      Janus \
+      flash-attn==2.7.4.post1 \
+      segment-anything \
+      fvcore==0.1.5.post20210518 \
+      detectron2
+
+# 9) Copia sorgenti e Makefile
+COPY . .
+
+# 10) NLP model downloads
+RUN python -m spacy download en_core_web_md && \
+    python -m nltk.downloader wordnet
+
+# --------------------
+# Entrypoint
+# --------------------
+ENTRYPOINT ["make"]
+CMD ["-f", "/workdir/Makefile"]

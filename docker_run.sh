@@ -4,7 +4,8 @@ set -e
 # Nome dell'immagine costruita in precedenza
 IMAGE_NAME="gom"
 HF_TOKEN="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"
-
+HOST_HF_CACHE="$HOME/.cache/huggingface"
+mkdir -p "$HOST_HF_CACHE"
 
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
@@ -91,9 +92,10 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_TOKEN=$HF_TOKEN \
-  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  -e HF_HUB_DISABLE_THREADS=1 \
+  -e HF_HOME=/root/.cache/huggingface \
+  -e HF_HOME=/root/.cache/huggingface/transformers \
   -v "$(pwd)":/workdir \
+  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
   -v "$(pwd)/data/val2014":/input_images \
   -v "$(pwd)/vqa_out":/workdir/vqa_out \

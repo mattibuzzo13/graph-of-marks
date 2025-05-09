@@ -501,7 +501,9 @@ def parse_args():
         help="If set, do not run preprocess_for_qa on the images; pass raw images to the model"
     )
     
-    return ap.parse_args()
+    args, _ = ap.parse_known_args()
+    
+    return args
 
 def main():
     args = parse_args()
