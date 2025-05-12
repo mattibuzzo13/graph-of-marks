@@ -19,6 +19,7 @@ from torch.amp import autocast
 from PIL import Image
 from tqdm import tqdm
 from huggingface_hub import login as hf_login
+from huggingface_hub import snapshot_download
 
 # import the image preprocessor
 from image_graph_preprocessor import ImageGraphPreprocessor, parse_preproc_args
@@ -240,9 +241,20 @@ class HFVLModel:
                 model_name, device_map="auto", torch_dtype=dtype, trust_remote_code=True
             )
         elif self.is_qwen:
-            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            repo_dir = snapshot_download(
+                repo_id=model_name,
+                cache_dir=os.path.join(os.path.expanduser("~"), ".cache/huggingface", "models"),
+                local_files_only=False,
+                resume_download=True
+            )
+            model_path = repo_dir
+            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_name, config=cfg, device_map="auto", torch_dtype=torch.float16, low_cpu_mem_usage=True
+                model_path,
+                config=AutoConfig.from_pretrained(model_path, trust_remote_code=True),
+                device_map="auto",
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True
             )
         elif self.is_phi4:
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
