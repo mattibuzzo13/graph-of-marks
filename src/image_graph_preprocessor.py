@@ -136,6 +136,14 @@ class ImageGraphPreprocessor:
         os.makedirs(self.output_folder, exist_ok=True)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[INFO] Running on device: {self.device}")
+        
+        os.makedirs(self.output_folder, exist_ok=True)
+        # se specificato in config, usiamo quel device (es. 'cpu')
+        if self.config.get("preproc_device"):
+            self.device = self.config["preproc_device"]
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[INFO] Running preprocessor on device: {self.device}")
 
         # Load SpaCy for question or text-based processing
         print("[INFO] Loading SpaCy 'en_core_web_md' model ...")
@@ -318,7 +326,6 @@ class ImageGraphPreprocessor:
             download_url_to_file(SAM_CKPT_URL, str(checkpoint_path))
 
         self.sam_model = sam_model_registry[sam_model_type](checkpoint=str(checkpoint_path))
-        # self.sam_model.to(self.device)
         self.sam_model.to(self.device)
 
         self.mask_generator = SamAutomaticMaskGenerator(

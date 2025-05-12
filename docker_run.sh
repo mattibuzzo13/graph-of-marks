@@ -93,7 +93,7 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_TOKEN=$HF_TOKEN \
   -e HF_HOME=/root/.cache/huggingface \
-  -e HF_HOME=/root/.cache/huggingface/transformers \
+  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
   -v "$(pwd)":/workdir \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
