@@ -355,7 +355,7 @@ class ImageGraphPreprocessor:
         model = Owlv2ForObjectDetection.from_pretrained(
             "google/owlv2-large-patch14-ensemble",
             torch_dtype=torch.float16,
-            low_cpu_mem_usage=True
+            #low_cpu_mem_usage=False
         )
         model.to(self.device)
         model.eval()
@@ -417,9 +417,13 @@ class ImageGraphPreprocessor:
         res = results[0]
 
         # 7) Pull out boxes, scores, labels
-        boxes  = res["boxes"].cpu()
-        scores = res["scores"].cpu()
-        labels = res["labels"].cpu()
+        # boxes  = res["boxes"].cpu()
+        # scores = res["scores"].cpu()
+        # labels = res["labels"].cpu()
+        
+        boxes  = res["boxes"]
+        scores = res["scores"]
+        labels = res["labels"]
 
         # 8) Filter by your threshold and package
         detections = []
@@ -465,13 +469,14 @@ class ImageGraphPreprocessor:
         # 1) run the model
         image_np = np.array(image_pil)
         outputs  = self.d2_predictor(image_np)
-        instances = outputs["instances"].to("cpu")
+        # instances = outputs["instances"].to("cpu")
+        instances = outputs["instances"]
 
         # 2) extract all the fields
-        boxes   = instances.pred_boxes.tensor.cpu().numpy().tolist()   # list of [x1,y1,x2,y2]
-        scores  = instances.scores.cpu().numpy().tolist()             # list of floats
-        classes = instances.pred_classes.cpu().tolist()               # list of ints
-        masks   = instances.pred_masks.cpu().numpy()                  # array (N, H, W) of bool
+        boxes   = instances.pred_boxes.tensor.numpy().tolist()   # list of [x1,y1,x2,y2]
+        scores  = instances.scores.numpy().tolist()             # list of floats
+        classes = instances.pred_classes.numpy().tolist()               # list of ints
+        masks   = instances.pred_masks.numpy()                  # array (N, H, W) of bool
 
         detections = []
         for box, sc, cls_idx, mask in zip(boxes, scores, classes, masks):

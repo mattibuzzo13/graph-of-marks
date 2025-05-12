@@ -253,8 +253,7 @@ class HFVLModel:
                 model_path,
                 config=AutoConfig.from_pretrained(model_path, trust_remote_code=True),
                 device_map="auto",
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True
+                torch_dtype=torch.float16
             )
         elif self.is_phi4:
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -265,10 +264,8 @@ class HFVLModel:
             from transformers import LlavaProcessor  # type: ignore
             self.processor = LlavaProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = LlavaForConditionalGeneration.from_pretrained(
-                model_name, config=cfg, device_map="auto", torch_dtype=dtype,
-                low_cpu_mem_usage=True
+                model_name, config=cfg, device_map="auto", torch_dtype=dtype
             )
-            self.model.to(self.device)
         elif "blip" in name:
             self.processor = BlipProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = Blip2ForConditionalGeneration.from_pretrained(
@@ -289,6 +286,8 @@ class HFVLModel:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, config=cfg, torch_dtype=dtype
             )
+        if not getattr(self.model, "hf_device_map", None):
+            self.model.to(self.device)
         self.model.eval()
 
     def _chat(self, messages: List[Dict[str, Any]]) -> str:
