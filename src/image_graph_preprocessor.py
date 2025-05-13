@@ -120,9 +120,9 @@ class ImageGraphPreprocessor:
         self.max_distance = config.get("max_distance", 20000)
 
         # SAM parameters
-        self.points_per_side = config.get("points_per_side", 32)
-        self.pred_iou_thresh = config.get("pred_iou_thresh", 0.7)
-        self.stability_score_thresh = config.get("stability_score_thresh", 0.85)
+        self.points_per_side = config.get("points_per_side", 16)
+        self.pred_iou_thresh = config.get("pred_iou_thresh", 0.9)
+        self.stability_score_thresh = config.get("stability_score_thresh", 0.92)
         self.min_mask_region_area = config.get("min_mask_region_area", 100)
 
         # Dataset indexing
@@ -325,17 +325,20 @@ class ImageGraphPreprocessor:
             print("[INFO] Scarico checkpoint SAM …")
             download_url_to_file(SAM_CKPT_URL, str(checkpoint_path))
 
-        self.sam_model = sam_model_registry[sam_model_type](checkpoint=str(checkpoint_path))
-        self.sam_model.to(self.device)
+        self.sam_model_gpu = sam_model_registry[sam_model_type](checkpoint=str(checkpoint_path))
+        self.sam_model_gpu.to(self.device).half().eval() 
+        self.sam_model_cpu = sam_model_registry[sam_model_type](checkpoint=str(checkpoint_path)).eval()
+
 
         self.mask_generator = SamAutomaticMaskGenerator(
-            self.sam_model,
+            self.sam_model_cpu,
             points_per_side=self.points_per_side,
             pred_iou_thresh=self.pred_iou_thresh,
             stability_score_thresh=self.stability_score_thresh,
-            min_mask_region_area=self.min_mask_region_area
+            min_mask_region_area=self.min_mask_region_area,
+            crop_n_layers=0
         )
-        self.sam_predictor = SamPredictor(self.sam_model)
+        self.sam_predictor = SamPredictor(self.sam_model_cpu)
 
     def _init_detectors(self):
         if "owlvit" in self.detectors_to_use:
@@ -351,19 +354,19 @@ class ImageGraphPreprocessor:
             self.d2_predictor, self.d2_metadata = self._load_detectron2_detector()
 
     def _load_owlvit_detector(self):
-        processor = Owlv2Processor.from_pretrained("google/owlv2-large-patch14-ensemble")
+        processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16")
         model = Owlv2ForObjectDetection.from_pretrained(
-            "google/owlv2-large-patch14-ensemble",
+            "google/owlv2-base-patch16",
             torch_dtype=torch.float16,
-            #low_cpu_mem_usage=False
-        )
+            low_cpu_mem_usage=True
+        ).half()
         model.to(self.device)
         model.eval()
         return processor, model
 
     def _load_yolov8_detector(self, model_path="yolov8x.pt"):
         model = YOLO(model_path)
-        model.to(self.device)
+        model.to(self.device).eval()
         return model
 
     def _load_detectron2_detector(self, model_config="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"):
@@ -417,13 +420,9 @@ class ImageGraphPreprocessor:
         res = results[0]
 
         # 7) Pull out boxes, scores, labels
-        # boxes  = res["boxes"].cpu()
-        # scores = res["scores"].cpu()
-        # labels = res["labels"].cpu()
-        
-        boxes  = res["boxes"]
-        scores = res["scores"]
-        labels = res["labels"]
+        boxes  = res["boxes"].cpu()
+        scores = res["scores"].cpu()
+        labels = res["labels"].cpu()
 
         # 8) Filter by your threshold and package
         detections = []
@@ -469,8 +468,7 @@ class ImageGraphPreprocessor:
         # 1) run the model
         image_np = np.array(image_pil)
         outputs  = self.d2_predictor(image_np)
-        # instances = outputs["instances"].to("cpu")
-        instances = outputs["instances"]
+        instances = outputs["instances"].to("cpu")
 
         # 2) extract all the fields
         boxes   = instances.pred_boxes.tensor.numpy().tolist()   # list of [x1,y1,x2,y2]
@@ -1076,47 +1074,53 @@ class ImageGraphPreprocessor:
         image_np = np.array(image_pil)
 
         # ——— Stage 1: Global masks ——————————————————————
-        global_masks = self.mask_generator.generate(image_np)
+        # global_masks = self.mask_generator.generate(image_np)
 
         # Prepare SAM predictor once
         self.sam_predictor.set_image(image_np)
 
-        refined_masks = []
-        for box in boxes:
-            # ——— Stage 2: Box‐prompt multimask ——————————————
-            box_arr = np.array(box, dtype=float)[None, :]
-            masks_box, scores_box, _ = self.sam_predictor.predict(
-                box=box_arr,
-                multimask_output=True
-            )
-            # pick the highest‐scoring box mask
-            best_idx = int(np.argmax(scores_box))
-            mask_box = masks_box[best_idx]
+        try:
+            refined_masks = []
+            for box in boxes:
+                # ——— Stage 2: Box‐prompt multimask ——————————————
+                box_arr = np.array(box, dtype=float)[None, :]
+                masks_box, scores_box, _ = self.sam_predictor.predict(
+                    box=box_arr,
+                    multimask_output=True
+                )
+                # pick the highest‐scoring box mask
+                best_idx = int(np.argmax(scores_box))
+                mask_box = masks_box[best_idx]
 
-            # optionally compare to global: take whichever has better coverage
-            # (here we just use the box mask as our “initial” mask)
-            initial_mask = mask_box
+                # optionally compare to global: take whichever has better coverage
+                # (here we just use the box mask as our “initial” mask)
+                initial_mask = mask_box
 
-            # ——— Stage 3: Point‐prompt refinement ————————————
-            final_mask = self._refine_mask_with_point(image_np, initial_mask)
+                # ——— Stage 3: Point‐prompt refinement ————————————
+                final_mask = self._refine_mask_with_point(image_np, initial_mask)
 
-            # Post‐process (morphology, blur, etc.) if you already do that:
-            # e.g., close → open → blur → binarize
-            kernel = np.ones((7, 7), np.uint8)
-            m_uint8 = (final_mask.astype(np.uint8) * 255)
-            m_closed  = cv2.morphologyEx(m_uint8, cv2.MORPH_CLOSE,  kernel)
-            m_opened  = cv2.morphologyEx(m_closed,  cv2.MORPH_OPEN,   kernel)
-            m_blurred = cv2.GaussianBlur(m_opened, (7, 7), 0)
-            mask_refined = (m_blurred > 127)
+                # Post‐process (morphology, blur, etc.) if you already do that:
+                # e.g., close → open → blur → binarize
+                kernel = np.ones((7, 7), np.uint8)
+                m_uint8 = (final_mask.astype(np.uint8) * 255)
+                m_closed  = cv2.morphologyEx(m_uint8, cv2.MORPH_CLOSE,  kernel)
+                m_opened  = cv2.morphologyEx(m_closed,  cv2.MORPH_OPEN,   kernel)
+                m_blurred = cv2.GaussianBlur(m_opened, (7, 7), 0)
+                mask_refined = (m_blurred > 127)
 
-            refined_masks.append({
-                "segmentation": mask_refined,
-                "bbox":         box,
-                # you can store score if you like, e.g. scores_box[best_idx]
-                "predicted_iou": float(scores_box[best_idx])
-            })
+                refined_masks.append({
+                    "segmentation": mask_refined,
+                    "bbox":         box,
+                    # you can store score if you like, e.g. scores_box[best_idx]
+                    "predicted_iou": float(scores_box[best_idx])
+                })
 
-        return refined_masks
+            return refined_masks
+        finally:
+            self.sam_predictor.reset_image()
+            if hasattr(self.sam_predictor, "features"):
+                del self.sam_predictor.features
+            torch.cuda.empty_cache()
 
 
 
@@ -1235,7 +1239,19 @@ class ImageGraphPreprocessor:
         scores = [scores[i]  for i in keep]
 
         image_np = np.array(image_pil)
-        auto_masks = self.mask_generator.generate(image_np)
+        
+        long_side = max(image_np.shape[:2])
+        if long_side > 1024:                         # 720 o 768 se vuoi più stretto
+            scale = 1024 / long_side
+            h, w  = image_np.shape[:2]
+            image_small = cv2.resize(
+                image_np, (int(w*scale), int(h*scale)),
+                interpolation=cv2.INTER_AREA
+            )
+            auto_masks = self.mask_generator.generate(image_small)
+            # correggi i bbox delle maschere:  dividi per scale in seguito
+        else:
+            auto_masks = self.mask_generator.generate(image_np)
 
         # 8) SAM segmentation refinement
         refined_masks = self._run_sam_combined_segmentation(image_pil, boxes)

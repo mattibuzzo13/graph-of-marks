@@ -12,6 +12,9 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # Usa la variabile CUDA_VISIBLE_DEVICES assegnata da SLURM
 GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
+
+
 echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 
 # Avvia il container in modo 'usa e getta' (--rm) e lancia batch_preprocess con i parametri specificati

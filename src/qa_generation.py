@@ -118,33 +118,61 @@ def load_examples(fp: str) -> List[VQAExample]:
 # ---------------------------------------------------------------------------
 # Image preprocessing per QA pair
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Image preprocessing per QA pair – RIUTILIZZA un preproc già caricato
+# ---------------------------------------------------------------------------
 def preprocess_for_qa(
     image_path: str,
     question: str,
+    *,
     output_folder: str = "preprocessed",
     apply_question_filter: bool = True,
-    preproc_cli_args: Optional[Dict[str, Any]] = None
+    preproc_obj: Optional[ImageGraphPreprocessor] = None,
+    preproc_cli_args: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Runs the ImageGraphPreprocessor on a single image with optional
-    question-based filtering. Returns the path to the preprocessed output image.
+    Restituisce il path dell’immagine annotata.
+    - Se `preproc_obj` è fornito, ri-usa quella stessa istanza (niente reload pesi!).
+    - Genera SEMPRE un file nuovo per (immagine, domanda) usando l’hash della domanda.
     """
-    img = load_image(image_path)
-    os.makedirs(output_folder, exist_ok=True)
-    
-    cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
-    cfg.update({
-        "input_path": None,
-        "output_folder": output_folder,
-        "question": question,
-        "disable_question_filter": not apply_question_filter,
-        "preproc_device": "cpu"
-    })
+    import hashlib, os
 
-    preproc = ImageGraphPreprocessor(cfg)
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    preproc.process_single_image(img, base_name)
-    return os.path.join(output_folder, f"{base_name}_output.jpg")
+    # 0) Carica (o ri-usa) il PIL
+    img_pil = load_image(image_path)
+
+    # 1) Nome file unico  [nomeImg]_[hash8].jpg
+    base   = os.path.splitext(os.path.basename(image_path))[0]
+    qhash  = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
+    out_fn = f"{base}_{qhash}_output.jpg"
+    os.makedirs(output_folder, exist_ok=True)
+    out_path = os.path.join(output_folder, out_fn)
+
+    # 2) Ottieni / costruisci il pre-processor
+    if preproc_obj is None:
+        # compatibilità: crea un nuovo ImageGraphPreprocessor, MA solo se serve
+        cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
+        cfg.update({
+            "input_path": None,
+            "output_folder": output_folder,
+            "preproc_device": "cuda",
+        })
+        preproc_obj = ImageGraphPreprocessor(cfg)
+    else:
+        preproc_obj.output_folder = output_folder
+        os.makedirs(output_folder, exist_ok=True)
+        
+        
+
+    # 3) Aggiorna domanda e filtri
+    preproc_obj.config["question"] = question
+    preproc_obj.config["disable_question_filter"] = not apply_question_filter
+    preproc_obj._build_question_semantics()
+
+    # 4) Esegui realmente il preprocessing (rigenera sempre)
+    preproc_obj.process_single_image(img_pil, f"{base}_{qhash}")
+
+    return out_path
+
 
 # ---------------------------------------------------------------------------
 # vLLM wrapper
@@ -390,7 +418,8 @@ def run_vqa(
     preproc_folder: str = "preprocessed",
     disable_q_filter: bool = False,
     preproc_args: Optional[Dict[str, Any]] = None,
-    skip_preproc: bool = False
+    skip_preproc: bool = False,
+    preproc_obj: Optional[ImageGraphPreprocessor] = None
 ) -> List[Dict[str, Any]]:
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
 
@@ -430,9 +459,9 @@ def run_vqa(
                         ex.question,
                         output_folder=preproc_folder,
                         apply_question_filter=not disable_q_filter,
-                        preproc_cli_args=preproc_args
+                        preproc_obj=preproc_obj,          # 💡 usa l’istanza globale
+                        preproc_cli_args=preproc_args     # serve solo se preproc_obj è None
                     )
-
                 # 5) Generazione della risposta
                 prompt = prompt_tpl.format(question=ex.question)
                 t0 = time.time()
@@ -519,6 +548,12 @@ def parse_args():
 def main():
     args = parse_args()
     preproc_args = parse_preproc_args()
+    preproc_cfg = preproc_args.__dict__.copy()
+    preproc_cfg.update({
+        "input_path": None,          # lo passiamo noi come PIL
+        "preproc_device": "cuda",    # o "cpu" se vuoi risparmiare VRAM
+    })
+    GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
     examples = load_examples(args.input_file)
     if args.image_dir:
         for e in examples:
@@ -555,7 +590,8 @@ def main():
         preproc_folder=args.preproc_folder,
         disable_q_filter=args.disable_question_filter,
         preproc_args=preproc_args,
-        skip_preproc=args.skip_preprocessing
+        skip_preproc=args.skip_preprocessing,
+        preproc_obj=GLOBAL_PREPROC
     )
 
     metrics = evaluate(res)
