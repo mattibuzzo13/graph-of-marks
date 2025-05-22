@@ -169,7 +169,7 @@ def preprocess_for_qa(
     preproc_obj._build_question_semantics()
 
     # 4) Esegui realmente il preprocessing (rigenera sempre)
-    preproc_obj.process_single_image(img_pil, f"{base}_{qhash}")
+    preproc_obj.process_single_image(img_pil, f"{base}_{qhash}", det_cache_key=base)
 
     return out_path
 
