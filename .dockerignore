@@ -1,7 +1,11 @@
 **/data
-.zip
+*.zip
 **/data1
-.log
-.ipynb
+*.log
+*.ipynb
 **/qf_preprocessing_inference_qwen
 **/vqa_out
+**/checkpoints
+**/output_images
+*.pt
+**/vqa_v2_val_data

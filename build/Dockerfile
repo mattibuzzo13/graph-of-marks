@@ -1,69 +1,53 @@
-# Base image with CUDA 12.2 and Ubuntu 22.04
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+###############################################################################
+# PyTorch 2.5.0 • CUDA 12.1 • cuDNN 9 • Ubuntu 22.04
+###############################################################################
+FROM pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
 LABEL maintainer="UniboNLP"
 
-# Non-interactive APT installs
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 \
+    TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
+    PIP_NO_BUILD_ISOLATION=1          
 
-# Working directory setup
-WORKDIR /workdir
-ENV APP_PATH=/workdir
-
-# Install system packages
+# ---------- system ----------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-dev python3.11-venv python3-pip \
-    build-essential cmake \
-    curl git wget unzip zip nano bash \
-    libopenblas-dev liblapack-dev \
-    libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
-    libgl1-mesa-glx libglib2.0-0 \
- && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+        git cmake wget curl nano \
+        libgl1-mesa-glx libglib2.0-0 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Create and activate virtual environment
-RUN python3.11 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# ---------- pip base --------------------------------------------------------
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Upgrade pip and install core utils
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
- && pip install --no-cache-dir gdown wrapt
-
-# Copy in project files
-COPY /build/requirements.txt .
-COPY Makefile .
-COPY . .
-
-# Install core project requirements (should not include torch)
+# ---------- pure-python requirements ---------------------------------------
+COPY /build/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install PyTorch & compatible packages early
-RUN pip install --no-cache-dir torch==2.6.0 torchvision==0.21.0 timm
+# ---------- Torch / CUDA extensions ----------------------------------------
+RUN TORCH_CUDA_ARCH_LIST="8.6;8.9+PTX" \
+    # 1️⃣ detectron2 (porta iopath 0.1.9)
+    pip install --no-cache-dir \
+        git+https://github.com/facebookresearch/detectron2.git@main && \
+    # 2️⃣ extra libs
+    pip install --no-cache-dir \
+        flash-attn==2.7.4.post1 \
+        git+https://github.com/openai/CLIP.git@main \
+        git+https://github.com/facebookresearch/segment-anything.git@main && \
+    # 3️⃣ sam-2  (no deps, no build isolation → niente Torch duplicato)
+    pip install --no-cache-dir --no-deps --no-build-isolation \
+        git+https://github.com/facebookresearch/sam2.git@main && \
+    # 4️⃣ PyG + Ultralytics
+    pip install --no-cache-dir \
+        torch-scatter -f https://data.pyg.org/whl/torch-2.5.0+cu121.html \
+        torch-sparse  -f https://data.pyg.org/whl/torch-2.5.0+cu121.html \
+        torch-geometric==2.5.0 \
+        ultralytics==8.3.99
 
-# Install sentence-transformers and huggingface utilities
-RUN pip install --no-cache-dir sentence-transformers==3.4.1 huggingface_hub
+# ---------- SpaCy model -----------------------------------------------------
+RUN python -m spacy download en_core_web_md
 
-# GitHub packages (installed in order, with torch already present)
-RUN pip install --no-cache-dir git+https://github.com/huggingface/transformers.git@main
-RUN pip install --no-cache-dir git+https://github.com/deepseek-ai/Janus.git
-RUN pip install --no-cache-dir --no-build-isolation git+https://github.com/Dao-AILab/flash-attention.git
-RUN pip install --no-cache-dir flash-attn==2.7.4.post1
-RUN pip install --no-cache-dir git+https://github.com/facebookresearch/segment-anything.git
-RUN pip install --no-cache-dir git+https://github.com/facebookresearch/fvcore
-RUN pip install --no-cache-dir git+https://github.com/facebookresearch/detectron2.git
+# ---------- project sources -------------------------------------------------
+WORKDIR /workdir
+COPY . .
 
-RUN pip install --upgrade transformers huggingface_hub
-
-# NLP model downloads
-RUN python -m spacy download en_core_web_md && \
-    python -m nltk.downloader wordnet
-
-# Download pretrained SAM weights
-# RUN mkdir -p ${APP_PATH}/src && \
-#    wget -q https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
-#        -O ${APP_PATH}/src/sam_vit_h_4b8939.pth
-
-# Default entry
 ENTRYPOINT ["make"]
 CMD ["-f", "/workdir/Makefile"]
-
-# Reset APT frontend mode
-ENV DEBIAN_FRONTEND=dialog

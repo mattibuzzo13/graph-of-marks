@@ -1,6 +1,11 @@
 from __future__ import annotations
 import torch.multiprocessing as mp
-mp.set_start_method("spawn", force=True)
+# Imposta solo una volta lo start method “spawn” per evitare leak di semafori e segfault
+try:
+    if mp.get_start_method(allow_none=True) != "spawn":
+        mp.set_start_method("spawn")
+except RuntimeError:
+    pass
 
 # stdlib
 import argparse
@@ -22,7 +27,7 @@ from huggingface_hub import login as hf_login
 from huggingface_hub import snapshot_download
 
 # import the image preprocessor
-from image_graph_preprocessor import ImageGraphPreprocessor, parse_preproc_args
+from image_preprocessor import ImageGraphPreprocessor, parse_preproc_args
 
 # vllm (optional)
 try:
@@ -51,6 +56,7 @@ try:
     QWEN_UTILS_OK = True
 except ImportError:
     QWEN_UTILS_OK = False
+    
 
 # ---------------------------------------------------------------------------
 # Setup & logging
@@ -118,9 +124,6 @@ def load_examples(fp: str) -> List[VQAExample]:
 # ---------------------------------------------------------------------------
 # Image preprocessing per QA pair
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Image preprocessing per QA pair – RIUTILIZZA un preproc già caricato
-# ---------------------------------------------------------------------------
 def preprocess_for_qa(
     image_path: str,
     question: str,
@@ -129,49 +132,43 @@ def preprocess_for_qa(
     apply_question_filter: bool = True,
     preproc_obj: Optional[ImageGraphPreprocessor] = None,
     preproc_cli_args: Optional[Dict[str, Any]] = None,
+    base_config: Optional[Dict[str, Any]] = None,  # 👈 NUOVO PARAMETRO
 ) -> str:
     """
-    Restituisce il path dell’immagine annotata.
-    - Se `preproc_obj` è fornito, ri-usa quella stessa istanza (niente reload pesi!).
-    - Genera SEMPRE un file nuovo per (immagine, domanda) usando l’hash della domanda.
+    Restituisce il path dell'immagine annotata.
+    SEMPRE crea un nuovo preprocessor per ogni domanda.
     """
     import hashlib, os
-
-    # 0) Carica (o ri-usa) il PIL
     img_pil = load_image(image_path)
 
-    # 1) Nome file unico  [nomeImg]_[hash8].jpg
     base   = os.path.splitext(os.path.basename(image_path))[0]
     qhash  = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
     out_fn = f"{base}_{qhash}_output.jpg"
     os.makedirs(output_folder, exist_ok=True)
     out_path = os.path.join(output_folder, out_fn)
 
-    # 2) Ottieni / costruisci il pre-processor
-    if preproc_obj is None:
-        # compatibilità: crea un nuovo ImageGraphPreprocessor, MA solo se serve
-        cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
-        cfg.update({
-            "input_path": None,
-            "output_folder": output_folder,
-            "preproc_device": "cuda",
-        })
-        preproc_obj = ImageGraphPreprocessor(cfg)
+    # -------- USA LA CONFIGURAZIONE BASE SE DISPONIBILE -------
+    if base_config:
+        cfg = base_config.copy()
     else:
-        preproc_obj.output_folder = output_folder
-        os.makedirs(output_folder, exist_ok=True)
-        
-        
-
-    # 3) Aggiorna domanda e filtri
-    preproc_obj.config["question"] = question
-    preproc_obj.config["disable_question_filter"] = not apply_question_filter
-    preproc_obj._build_question_semantics()
-
-    # 4) Esegui realmente il preprocessing (rigenera sempre)
-    preproc_obj.process_single_image(img_pil, f"{base}_{qhash}", det_cache_key=base)
-
+        cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
+    
+    # Aggiorna solo i parametri specifici per questa domanda
+    cfg.update({
+        "input_path": None,
+        "output_folder": output_folder,
+        "preproc_device": "cuda",
+        "apply_question_filter": apply_question_filter,
+        "question": question,
+    })
+    
+    # Crea SEMPRE un nuovo preprocessor
+    fresh_preproc = ImageGraphPreprocessor(cfg)
+    
+    # -------- esegui il preprocessing con la domanda corretta -----------
+    fresh_preproc.process_single_image(img_pil, f"{base}_{qhash}", det_cache_key=f"{base}_{qhash}")
     return out_path
+
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +278,11 @@ class HFVLModel:
                 model_path,
                 config=AutoConfig.from_pretrained(model_path, trust_remote_code=True),
                 device_map="auto",
-                torch_dtype=torch.float16
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                max_memory={0: "20GB"},
+                offload_folder="./offload",
+                load_in_8bit=True
             )
         elif self.is_phi4:
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -402,6 +403,54 @@ class HFVLModel:
                 top_p=self.top_p
             )
             return self.processor.decode(gen[0], skip_special_tokens=True).strip()
+
+# ---------------------------------------------------------------------------
+# Pre-processing batch runner (solo annotazione immagini)
+# ---------------------------------------------------------------------------
+def run_preprocessing(
+    examples: List[VQAExample],
+    *,
+    preproc_folder: str = "preprocessed",
+    disable_q_filter: bool = False,
+    max_imgs: int = -1,
+    max_qpi: int = -1,
+    preproc_args: Optional[argparse.Namespace] = None,
+    preproc_obj: Optional[ImageGraphPreprocessor] = None,
+    base_config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Esegue SOLO il preprocessing (segmentazione, detezione, prompt-guided masking…)
+    salvando l’immagine annotata su disco.
+
+    Non carica alcun modello linguistico.
+
+    Parametri:
+        examples        – lista di VQAExample letti dal JSON
+        preproc_folder  – directory dove salvare gli output
+        disable_q_filter– disattiva il filtro basato sulla domanda
+        max_imgs / max_qpi – limiti facoltativi
+        preproc_args    – Namespace ritornato da parse_preproc_args()
+        preproc_obj     – eventuale ImageGraphPreprocessor già istanziato
+    """
+    grouped: Dict[str, List[VQAExample]] = {}
+    for ex in examples:
+        grouped.setdefault(ex.image_path, []).append(ex)
+
+    img_paths = list(grouped)[:max_imgs] if max_imgs > 0 else list(grouped)
+
+    for img in tqdm(img_paths, desc="Preprocessing"):
+        qs = grouped[img][:max_qpi] if max_qpi > 0 else grouped[img]
+        for ex in qs:
+            preprocess_for_qa(
+                ex.image_path,
+                ex.question,
+                output_folder=preproc_folder,
+                apply_question_filter=not disable_q_filter,
+                preproc_obj=preproc_obj,
+                preproc_cli_args=preproc_args,
+                base_config=base_config,
+            )
+
 
 # ---------------------------------------------------------------------------
 # VQA runner with QA preprocessing
@@ -541,6 +590,13 @@ def parse_args():
         help="If set, do not run preprocess_for_qa on the images; pass raw images to the model"
     )
     
+    ap.add_argument(
+        "--preprocess_only",
+        action="store_true",
+        help="Esegui solo il preprocessing, senza caricare il modello e senza inference"
+    )
+
+    
     args, _ = ap.parse_known_args()
     
     return args
@@ -553,12 +609,41 @@ def main():
         "input_path": None,          # lo passiamo noi come PIL
         "preproc_device": "cuda",    # o "cpu" se vuoi risparmiare VRAM
     })
-    GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
+    
+    preproc_cfg["apply_question_filter"] = not preproc_args.disable_question_filter
+    preproc_cfg["display_legend"] = not preproc_args.no_legend
+    preproc_cfg["aggressive_pruning"] = preproc_args.aggressive_pruning
+    
+
+    
+    # GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
     examples = load_examples(args.input_file)
     if args.image_dir:
         for e in examples:
             if not os.path.isabs(e.image_path):
                 e.image_path = os.path.join(args.image_dir, e.image_path)
+
+
+    # ------------------------------------------------------------------ #
+    #                           SOLO PREPROCESSING                       #
+    # ------------------------------------------------------------------ #
+    if args.preprocess_only:
+        run_preprocessing(
+            examples,
+            preproc_folder=args.preproc_folder,
+            disable_q_filter=args.disable_question_filter,
+            max_imgs=args.max_images,
+            max_qpi=args.max_questions_per_image,
+            preproc_args=preproc_args,
+            preproc_obj=None,
+            base_config=preproc_cfg,  
+        )
+        logger.info("Preprocessing completato: immagini in «%s»", args.preproc_folder)
+        return 
+    
+    # ------------------------------------------------------------------ #
+    #                   Caricamento modello + inference normale          #
+    # ------------------------------------------------------------------ #
 
     model = (
         VLLMWrapper(

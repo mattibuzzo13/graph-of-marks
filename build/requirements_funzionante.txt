@@ -1,4 +1,3 @@
-# deps “puri” (nessuna estensione CUDA)
 datasets==3.3.1
 colorlog==6.9.0
 wandb==0.19.7
@@ -16,11 +15,13 @@ matplotlib==3.10.1
 opencv-python==4.11.0.86
 qwen-vl-utils[torchcodec]==0.0.10
 packaging==23.2
-peft==0.9.0
-backoff==2.2.1
-huggingface_hub[hf_xet]==0.31.1
-num2words==0.5.13
-adjustText==0.8
-ensemble-boxes==1.0.7
-sentencepiece==0.2.0
-timm==0.9.12
+peft
+backoff
+huggingface_hub[hf_xet]
+num2words
+adjustText
+git+https://github.com/openai/CLIP.git
+ensemble-boxes
+torch-geometric
+sentencepiece
+git+https://github.com/facebookresearch/sam2.git

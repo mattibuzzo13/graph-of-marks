@@ -92,11 +92,42 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 #    ENABLE_Q_FILTER=false
 
 # Full VQA run on one image, but with all questions 
+#docker run --rm ${GPU_FLAG} --memory=20g --shm-size=8g \
+#  -e CUDA_LAUNCH_BLOCKING=1 \
+#  -e HF_TOKEN=$HF_TOKEN \
+#  -e HF_HOME=/root/.cache/huggingface \
+#  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 \
+#  -e OMP_NUM_THREADS=4 \
+#  -v "$(pwd)":/workdir \
+#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
+#  -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
+#  -v "$(pwd)/data/val2014":/input_images \
+#  -v "$(pwd)/vqa_out":/workdir/vqa_out \
+#  -w /workdir \
+#  "$IMAGE_NAME" \
+#  run_vqa \
+#    VQA_INPUT_FILE=data.json \
+#    IMAGE_DIR=/input_images \
+#    VQA_OUTPUT_FILE=vqa_out/results.json \
+#    USE_VLLM=false \
+#    MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
+#    TEMPERATURE=0.3 \
+#    MAX_LENGTH=32 \
+#   TOP_P=0.9 \
+#    MAX_IMAGES=-1 \
+#    MAX_QUESTIONS_PER_IMAGE=-1 \
+#    PREPROC_FOLDER=/workdir/qf_preprocessing_inference_qwen \
+#    SKIP_PREPROCESSING=false \
+#    ENABLE_Q_FILTER=true
+
+
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_TOKEN=$HF_TOKEN \
   -e HF_HOME=/root/.cache/huggingface \
   -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 \
   -v "$(pwd)":/workdir \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
@@ -107,17 +138,12 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   run_vqa \
     VQA_INPUT_FILE=data.json \
     IMAGE_DIR=/input_images \
-    VQA_OUTPUT_FILE=vqa_out/results.json \
-    USE_VLLM=false \
-    MODEL_NAME=llava-hf/llava-1.5-7b-hf \
-    TEMPERATURE=0.3 \
-    MAX_LENGTH=32 \
-    TOP_P=0.9 \
     MAX_IMAGES=-1 \
     MAX_QUESTIONS_PER_IMAGE=-1 \
     PREPROC_FOLDER=/workdir/qf_preprocessing_inference_qwen \
     SKIP_PREPROCESSING=false \
-    ENABLE_Q_FILTER=true
+    ENABLE_Q_FILTER=true \
+    PREPROCESS_ONLY=true
 
 echo "Docker preprocessing container has exited."
 

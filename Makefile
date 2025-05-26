@@ -49,6 +49,7 @@ POINTS_PER_SIDE         ?= 32
 PRED_IOU_THRESH         ?= 0.9
 STABILITY_SCORE_THRESH  ?= 0.95
 MIN_MASK_REGION_AREA    ?= 100
+SAM_VERSION             ?= 2
 
 # Inference toggle: if true, run `make run_vqa` after preprocessing
 RUN_INFERENCE           ?= false
@@ -152,6 +153,7 @@ batch_preprocess:
 # VQA target
 #------------------------------------------------------------------------------
 run_vqa:
+	python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU memory: {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f}GB' if torch.cuda.is_available() else 'No CUDA')"
 	python3 src/qa_generation.py \
 	  --input_file $(VQA_INPUT_FILE) \
 	  --image_dir $(IMAGE_DIR) \
@@ -174,7 +176,12 @@ run_vqa:
 	  --label_mode "$(LABEL_MODE)" \
 	  --display_labels \
 	  --display_relationships \
-	  --show_segmentation
+	  --show_segmentation \
+	  --sam_version $(SAM_VERSION) \
+	  --no_legend \
+	  --aggressive_pruning \
+	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
+
 
 #------------------------------------------------------------------------------
 # Dataset download targets
