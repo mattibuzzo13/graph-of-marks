@@ -132,7 +132,8 @@ def preprocess_for_qa(
     apply_question_filter: bool = True,
     preproc_obj: Optional[ImageGraphPreprocessor] = None,
     preproc_cli_args: Optional[Dict[str, Any]] = None,
-    base_config: Optional[Dict[str, Any]] = None,  # 👈 NUOVO PARAMETRO
+    base_config: Optional[Dict[str, Any]] = None,
+    force_reprocess: bool = False,
 ) -> str:
     """
     Restituisce il path dell'immagine annotata.
@@ -146,6 +147,11 @@ def preprocess_for_qa(
     out_fn = f"{base}_{qhash}_output.jpg"
     os.makedirs(output_folder, exist_ok=True)
     out_path = os.path.join(output_folder, out_fn)
+
+    # -------- CONTROLLO SE IL FILE ESISTE GIÀ --------
+    if os.path.exists(out_path) and not force_reprocess:
+        logger.info(f"Immagine preprocessata già esistente: {out_path}")
+        return out_path
 
     # -------- USA LA CONFIGURAZIONE BASE SE DISPONIBILE -------
     if base_config:

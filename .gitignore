@@ -24,3 +24,6 @@ __pycache__/
 **/VQA_SoM/
 **/images/
 **/qf_preprocessing_inference_qwen/
+**/checkpoints/
+**/vqa_out/
+**/vqa_out_*/

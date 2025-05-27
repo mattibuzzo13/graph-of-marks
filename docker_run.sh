@@ -122,6 +122,7 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 #    ENABLE_Q_FILTER=true
 
 
+# ...existing code...
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_TOKEN=$HF_TOKEN \
@@ -129,6 +130,7 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 \
   -v "$(pwd)":/workdir \
+  -v "/datasets/VisualQA_Datasets/Preprocessing/vqa/qf_preprocessing_GoM":/preproc_output \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
   -v "$(pwd)/data/val2014":/input_images \
@@ -140,7 +142,7 @@ docker run --rm ${GPU_FLAG} --memory=30g \
     IMAGE_DIR=/input_images \
     MAX_IMAGES=-1 \
     MAX_QUESTIONS_PER_IMAGE=-1 \
-    PREPROC_FOLDER=/workdir/qf_preprocessing_inference_qwen \
+    PREPROC_FOLDER=/preproc_output \
     SKIP_PREPROCESSING=false \
     ENABLE_Q_FILTER=true \
     PREPROCESS_ONLY=true

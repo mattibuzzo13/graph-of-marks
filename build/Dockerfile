@@ -43,7 +43,14 @@ RUN TORCH_CUDA_ARCH_LIST="8.6;8.9+PTX" \
         ultralytics==8.3.99
 
 # ---------- SpaCy model -----------------------------------------------------
-RUN python -m spacy download en_core_web_md
+# Fix per conflitti NumPy/SciPy e installa blis richiesto da thinc
+RUN pip install --no-cache-dir \
+        numpy>=1.25.0 \
+        scipy>=1.11.4 \
+        blis \
+        iopath>=0.1.10 && \
+    pip install --no-cache-dir --force-reinstall spacy && \
+    python -m spacy download en_core_web_md
 
 # ---------- project sources -------------------------------------------------
 WORKDIR /workdir

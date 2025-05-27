@@ -1715,18 +1715,57 @@ class ImageGraphPreprocessor:
                 arrow_counts[(s, t)] += 1
                 rad_offset = 0.2 + 0.1 * (arrow_counts[(s, t)] - 1)
 
-                ax.add_patch(
-                    patches.FancyArrowPatch(
-                        centers[s],
-                        centers[t],
-                        arrowstyle="->",
-                        color=color,
-                        linewidth=2,
-                        connectionstyle=f"arc3,rad={rad_offset}",
-                        mutation_scale=12,
-                        zorder=4,
-                    )
+                # Disegna la freccia
+                arrow = patches.FancyArrowPatch(
+                    centers[s],
+                    centers[t],
+                    arrowstyle="->",
+                    color=color,
+                    linewidth=2,
+                    connectionstyle=f"arc3,rad={rad_offset}",
+                    mutation_scale=12,
+                    zorder=4,
                 )
+                ax.add_patch(arrow)
+
+                # Aggiungi etichetta della relazione se abilitata
+                if self.display_relation_labels and rel.get('relation'):
+                    # Calcola il punto medio della freccia per posizionare il testo
+                    start_x, start_y = centers[s]
+                    end_x, end_y = centers[t]
+                    
+                    # Punto medio considerando la curvatura dell'arco
+                    mid_x = (start_x + end_x) / 2
+                    mid_y = (start_y + end_y) / 2
+                    
+                    # Sposta leggermente il testo per evitare sovrapposizioni con la freccia
+                    if rad_offset != 0:
+                        # Calcola l'offset perpendicolare per il testo curvato
+                        dx = end_x - start_x
+                        dy = end_y - start_y
+                        length = math.sqrt(dx*dx + dy*dy)
+                        if length > 0:
+                            # Vettore perpendicolare normalizzato
+                            perp_x = -dy / length
+                            perp_y = dx / length
+                            # Sposta il testo nella direzione della curvatura
+                            offset_distance = 15 * (1 if rad_offset > 0 else -1)
+                            mid_x += perp_x * offset_distance
+                            mid_y += perp_y * offset_distance
+                    
+                    # Pulisci il nome della relazione per la visualizzazione
+                    rel_text = rel['relation'].replace('_', ' ').replace('cnet_', '').title()
+                    
+                    ax.text(
+                        mid_x, mid_y,
+                        rel_text,
+                        fontsize=8,
+                        ha='center',
+                        va='center',
+                        bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.8, edgecolor=color),
+                        zorder=5,
+                        color='black'
+                    )
 
         # ---------- testo esterno (solo quelli che non stavano nel box) ----------
         texts = []
@@ -2496,6 +2535,9 @@ def parse_preproc_args():
             help="Tieni SOLO gli oggetti esplicitamente citati nella domanda \
                   e filtra le relazioni sul tipo richiesto"
         )
+        
+        parser.add_argument("--display_relation_labels", action="store_true", 
+                    help="Show relation labels on arrows/lines")
 
 
 
