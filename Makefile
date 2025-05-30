@@ -27,7 +27,7 @@ MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
 NUM_INSTANCES           ?= -1
-LABEL_MODE			 ?= original
+LABEL_MODE			 ?= numeric
 
 # Detection thresholds
 OWL_THRESHOLD           ?= 0.3
@@ -176,10 +176,12 @@ run_vqa:
 	  --label_mode "$(LABEL_MODE)" \
 	  --display_labels \
 	  --display_relationships \
+	  --display_relation_labels \
 	  --show_segmentation \
 	  --sam_version $(SAM_VERSION) \
 	  --no_legend \
 	  --aggressive_pruning \
+	  --save_image_only \
 	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
 
 

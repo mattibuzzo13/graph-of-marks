@@ -2168,21 +2168,31 @@ class ImageGraphPreprocessor:
                 if u != fallback_seed_idx and v != fallback_seed_idx
             ])
 
-            self._save_gpickle(scene_graph,
-                os.path.join(self.output_folder, f"{image_name}_graph.gpickle"))
-            with open(os.path.join(self.output_folder,
-                                  f"{image_name}_scene_prompt.txt"), "w") as fp:
-                fp.write(self._to_prompt(scene_graph))
-            with open(os.path.join(self.output_folder,
-                                  f"{image_name}_graph.json"), "w") as jf:
-                json.dump(nx.node_link_data(scene_graph), jf)
-
-            self._visualize_detections_and_relationships_with_auto_masks(
-                image=image_pil,
-                boxes=boxes, labels=labels, scores=scores,
-                relationships=rels, all_masks=masks,
-                save_path=os.path.join(self.output_folder, f"{image_name}_output.jpg"),
-            )
+            # Controlla le flag anche per il fallback
+            save_image_only = self.config.get("save_image_only", False)
+            skip_graph = self.config.get("skip_graph", False) or save_image_only
+            skip_prompt = self.config.get("skip_prompt", False) or save_image_only
+            skip_visualization = self.config.get("skip_visualization", False)
+            
+            if not skip_graph:
+                self._save_gpickle(scene_graph,
+                    os.path.join(self.output_folder, f"{image_name}_graph.gpickle"))
+                with open(os.path.join(self.output_folder,
+                                    f"{image_name}_graph.json"), "w") as jf:
+                    json.dump(nx.node_link_data(scene_graph), jf)
+            
+            if not skip_prompt:
+                with open(os.path.join(self.output_folder,
+                                    f"{image_name}_scene_prompt.txt"), "w") as fp:
+                    fp.write(self._to_prompt(scene_graph))
+            
+            if not skip_visualization or save_image_only:
+                self._visualize_detections_and_relationships_with_auto_masks(
+                    image=image_pil,
+                    boxes=boxes, labels=labels, scores=scores,
+                    relationships=rels, all_masks=masks,
+                    save_path=os.path.join(self.output_folder, f"{image_name}_output.jpg"),
+                )
 
             print(f"[DBG]  fallback → boxes:{len(boxes)}  rels:{len(rels)}")
             skip_label_nms = True
@@ -2316,28 +2326,55 @@ class ImageGraphPreprocessor:
         # ------------------------------------------------------------------
         # 3) SALVATAGGI / VISUALIZZAZIONE
         # ------------------------------------------------------------------
-        scene_graph = self._build_scene_graph(image_pil, boxes, labels, scores)
-        self._save_gpickle(
-            scene_graph,
-            os.path.join(self.output_folder, f"{image_name}_graph.gpickle")
-        )
-
-        with open(os.path.join(self.output_folder, f"{image_name}_scene_prompt.txt"), "w") as fp:
-            fp.write(self._to_prompt(scene_graph))
-
-        with open(os.path.join(self.output_folder, f"{image_name}_graph.json"), "w") as jf:
-            json.dump(nx.node_link_data(scene_graph), jf)
-
-        out_path = os.path.join(self.output_folder, f"{image_name}_output.jpg")
-        self._visualize_detections_and_relationships_with_auto_masks(
-            image=image_pil,
-            boxes=boxes,
-            labels=labels,
-            scores=scores,
-            relationships=rels,
-            all_masks=masks,
-            save_path=out_path,
-        )
+        # Controlla le flag per determinare cosa salvare
+        save_image_only = self.config.get("save_image_only", False)
+        skip_graph = self.config.get("skip_graph", False) or save_image_only
+        skip_prompt = self.config.get("skip_prompt", False) or save_image_only
+        skip_visualization = self.config.get("skip_visualization", False)
+        
+        # Salva sempre il scene graph se necessario per altri output
+        scene_graph = None
+        if not skip_graph or not skip_prompt or not skip_visualization:
+            scene_graph = self._build_scene_graph(image_pil, boxes, labels, scores)
+        
+        # Salva graph files solo se non skippato
+        if not skip_graph:
+            self._save_gpickle(
+                scene_graph,
+                os.path.join(self.output_folder, f"{image_name}_graph.gpickle")
+            )
+            with open(os.path.join(self.output_folder, f"{image_name}_graph.json"), "w") as jf:
+                json.dump(nx.node_link_data(scene_graph), jf)
+        
+        # Salva prompt solo se non skippato
+        if not skip_prompt:
+            with open(os.path.join(self.output_folder, f"{image_name}_scene_prompt.txt"), "w") as fp:
+                fp.write(self._to_prompt(scene_graph))
+        
+        # Salva visualizzazione solo se non skippata
+        if not skip_visualization:
+            out_path = os.path.join(self.output_folder, f"{image_name}_output.jpg")
+            self._visualize_detections_and_relationships_with_auto_masks(
+                image=image_pil,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=rels,
+                all_masks=masks,
+                save_path=out_path,
+            )
+        elif save_image_only:
+            # Se save_image_only è True, salva solo l'immagine processata
+            out_path = os.path.join(self.output_folder, f"{image_name}_output.jpg")
+            self._visualize_detections_and_relationships_with_auto_masks(
+                image=image_pil,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=rels,
+                all_masks=masks,
+                save_path=out_path,
+            )
 
         print(f"[DONE] {image_name} processed in {time.time() - t0:.2f}s")
 
@@ -2540,6 +2577,16 @@ def parse_preproc_args():
                     help="Show relation labels on arrows/lines")
 
 
+        parser.add_argument("--save_image_only", action="store_true",
+                    help="Save only the processed image, skip graph files")
+        parser.add_argument("--skip_graph", action="store_true", 
+                    help="Skip saving graph files (.gpickle, .json)")
+        parser.add_argument("--skip_prompt", action="store_true",
+                    help="Skip saving scene prompt file")
+        parser.add_argument("--skip_visualization", action="store_true",
+                    help="Skip saving the visualization image")
+
+
 
 
         return parser.parse_known_args()[0]
@@ -2569,6 +2616,7 @@ if __name__ == "__main__":
         "label_mode":         args.label_mode,
         "display_labels":     args.display_labels,
         "display_relationships": args.display_relationships,
+        "display_relation_labels": args.display_relation_labels,
         "show_segmentation":  args.show_segmentation,
         "fill_segmentation":  args.fill_segmentation,
         "label_nms_threshold":args.label_nms_threshold,
@@ -2585,6 +2633,14 @@ if __name__ == "__main__":
         "sam_version": args.sam_version,
         "display_legend": not args.no_legend,
         "aggressive_pruning": args.aggressive_pruning,
+        "display_legend": not args.no_legend,
+        "aggressive_pruning": args.aggressive_pruning,
+        
+        # Nuove opzioni di output
+        "save_image_only": args.save_image_only,
+        "skip_graph": args.skip_graph,
+        "skip_prompt": args.skip_prompt,
+        "skip_visualization": args.skip_visualization,
     }
 
     preproc = ImageGraphPreprocessor(config)
