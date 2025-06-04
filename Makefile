@@ -50,6 +50,7 @@ PRED_IOU_THRESH         ?= 0.9
 STABILITY_SCORE_THRESH  ?= 0.95
 MIN_MASK_REGION_AREA    ?= 100
 SAM_VERSION             ?= 2
+SAM_HQ_MODEL_TYPE       ?= vit_h
 
 # Inference toggle: if true, run `make run_vqa` after preprocessing
 RUN_INFERENCE           ?= false
@@ -179,10 +180,13 @@ run_vqa:
 	  --display_relation_labels \
 	  --show_segmentation \
 	  --sam_version $(SAM_VERSION) \
+	  --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
 	  --no_legend \
 	  --aggressive_pruning \
 	  --save_image_only \
-	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
+	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only) \
+	  --enable_detection_cache \
+      --max_cache_size 200
 
 
 #------------------------------------------------------------------------------

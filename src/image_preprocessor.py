@@ -40,6 +40,14 @@ import difflib
 import nltk
 import spacy
 
+# SAM-HQ (nuovo import)
+try:
+    from segment_anything_hq import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+    HAVE_SAM_HQ = True
+except ImportError:
+    sam_model_registry = SamPredictor = SamAutomaticMaskGenerator = None
+    HAVE_SAM_HQ = False
+
 
 try:
     from sam2.build_sam import build_sam2
@@ -63,8 +71,6 @@ from detectron2.data import MetadataCatalog
 # OWL-ViT
 from transformers import Owlv2Processor, Owlv2ForObjectDetection
 
-# Segment Anything (SAM)
-from segment_anything import SamAutomaticMaskGenerator, sam_model_registry, SamPredictor
 
 # For optional Hugging Face dataset usage
 try:
@@ -176,10 +182,18 @@ class ImageGraphPreprocessor:
         self.cnet_skip_on_fail = config.get("conceptnet_skip_on_fail", True)
 
 
-        self.sam_version = int(config.get("sam_version", 1))
+        self.sam_version = config.get("sam_version", "1")
+        self.sam_hq_model_type = config.get("sam_hq_model_type", "vit_h")
 
         # Cached detenction
         self._det_cache = {}
+
+        self._global_model_cache = {}
+        self._detection_cache = {}
+        
+        # Configurazione cache
+        self.enable_detection_cache = config.get("enable_detection_cache", True)
+        self.max_cache_size = config.get("max_cache_size", 100)  # Limite memoria
         
         if torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory
@@ -221,7 +235,12 @@ class ImageGraphPreprocessor:
         # ---------------------------------------------------------
         # 3) Load Segment Anything (SAM) model
         # ---------------------------------------------------------
-        self._load_sam_model()
+        if self.sam_version == "hq":
+            self._load_sam_hq_model()
+        elif self.sam_version == "2":
+            self._load_sam2_model()
+        else:
+            self._load_sam_model()  
 
         # --------------------------------------------------------------------------
         # 3bis)  CLIP  ‒  usato per costruire embedding dei nodi
@@ -501,7 +520,7 @@ class ImageGraphPreprocessor:
                     lbl_emb = lbl_emb / lbl_emb.norm(dim=-1, keepdim=True)
                     label_embs.append(lbl_emb)
 
-                # 👈 Clona i tensori prima del calcolo di similarità
+                # Clona i tensori prima del calcolo di similarità
                 txt_emb_clone = txt_emb.clone().detach()
                 label_embs_stack = torch.stack(label_embs).squeeze(-2)
                 label_embs_clone = label_embs_stack.clone().detach()
@@ -583,6 +602,7 @@ class ImageGraphPreprocessor:
     ###########################################################################
 
     def _load_sam_model(self):
+        from segment_anything import SamAutomaticMaskGenerator, sam_model_registry, SamPredictor
 
         if self.sam_version == 2:
             return self._load_sam2_model()
@@ -697,6 +717,58 @@ class ImageGraphPreprocessor:
             min_mask_region_area=self.min_mask_region_area,
         )
 
+    def _load_sam_hq_model(self):
+        """
+        Carica SAM-HQ con checkpoint e inizializza predictor e mask generator.
+        """
+        
+        try:
+            from segment_anything_hq import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+            HAVE_SAM_HQ = True
+        except ImportError:
+            sam_model_registry = SamPredictor = SamAutomaticMaskGenerator = None
+            HAVE_SAM_HQ = False
+
+        if not HAVE_SAM_HQ:
+            raise ImportError("SAM-HQ not available. Install with: pip install git+https://github.com/SysCV/sam-hq.git")
+        
+        print("[INFO] Loading SAM-HQ model ...")
+        
+        # URL per i checkpoint SAM-HQ
+        SAM_HQ_URLS = {
+            "vit_b": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth",
+            "vit_l": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_l.pth", 
+            "vit_h": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_h.pth"
+        }
+        
+        # Percorso checkpoint
+        checkpoint_name = f"sam_hq_{self.sam_hq_model_type}.pth"
+        checkpoint_path = Path(self.output_folder) / checkpoint_name
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Scarica se non esiste
+        if not checkpoint_path.exists():
+            print(f"[INFO] Downloading SAM-HQ checkpoint: {checkpoint_name}")
+            url = SAM_HQ_URLS.get(self.sam_hq_model_type, SAM_HQ_URLS["vit_h"])
+            download_url_to_file(url, str(checkpoint_path), progress=True)
+        
+        # Carica modello SAM-HQ
+        self.sam_model_gpu = sam_model_registry[self.sam_hq_model_type](checkpoint=str(checkpoint_path))
+        self.sam_model_gpu.to(self.device).eval()
+        self.sam_model_cpu = sam_model_registry[self.sam_hq_model_type](checkpoint=str(checkpoint_path)).eval()
+        
+        # Inizializza con SAM-HQ
+        self.mask_generator = SamAutomaticMaskGenerator(
+            self.sam_model_gpu,
+            points_per_side=self.points_per_side,
+            pred_iou_thresh=self.pred_iou_thresh,
+            stability_score_thresh=self.stability_score_thresh,
+            min_mask_region_area=self.min_mask_region_area,
+            crop_n_layers=0
+        )
+        self.sam_predictor = SamPredictor(self.sam_model_gpu)
+        
+        print(f"[INFO] SAM-HQ {self.sam_hq_model_type} loaded successfully")
 
 
 
@@ -1053,6 +1125,119 @@ class ImageGraphPreprocessor:
 
         return detections
 
+
+    @torch.inference_mode()
+    def _run_all_detectors(self, image_pil: Image.Image) -> dict:
+        """
+        Esegue tutti i detector configurati e restituisce le detection unificate.
+        """
+        all_detections = []
+        det_counts = {}
+
+        # OWL-ViT
+        if "owlvit" in self.detectors_to_use:
+            owl_queries = [
+                "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
+                "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
+                "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella",
+                "handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat",
+                "baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork",
+                "knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza",
+                "donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
+                "remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock",
+                "vase","scissors","teddy bear","hair drier","toothbrush","fence","grass","table","house","plate",
+                "lamp","street lamp","sign","glass","plant","hedge","sofa","light","window","curtain","candle","tree",
+                "sky","cloud","road","hat","glove","helmet","mountain","snow","sunglasses","bow tie","picture",
+                "printer","monitor","picture","pillow","stone","glasses","wheel","building","bridge","tomato"
+            ]
+            dets_owl = self._run_owlvit_detection(image_pil, owl_queries)
+            det_counts["OWL-ViT"] = len(dets_owl)
+            all_detections.extend(dets_owl)
+
+        # YOLOv8
+        if "yolov8" in self.detectors_to_use:
+            dets_yolo = self._run_yolov8_detection(image_pil)
+            det_counts["YOLOv8"] = len(dets_yolo)
+            all_detections.extend(dets_yolo)
+
+        # Detectron2
+        if "detectron2" in self.detectors_to_use:
+            dets_d2 = self._run_detectron2_detection(image_pil)
+            det_counts["Detectron2"] = len(dets_d2)
+            all_detections.extend(dets_d2)
+
+        return {
+            "detections": all_detections,
+            "counts": det_counts,
+            "boxes": [d["box"] for d in all_detections],
+            "labels": [d["label"] for d in all_detections],
+            "scores": [d["score"] for d in all_detections]
+        }
+
+    @torch.inference_mode()
+    def _cached_detection(self, image_pil: Image.Image, cache_key: str = None) -> dict:
+        """
+        Cache delle predizioni per evitare ricomputo.
+        
+        Args:
+            image_pil: Immagine PIL da processare
+            cache_key: Chiave univoca per la cache (es. hash dell'immagine + parametri)
+            
+        Returns:
+            Dict con detections, boxes, labels, scores
+        """
+        if not self.enable_detection_cache or not cache_key:
+            return self._run_all_detectors(image_pil)
+            
+        # Cache hit
+        if cache_key in self._detection_cache:
+            print(f"[CACHE] Detection cache hit for key: {cache_key[:16]}...")
+            return self._detection_cache[cache_key]
+            
+        # Cache miss - esegui detection
+        print(f"[CACHE] Detection cache miss for key: {cache_key[:16]}...")
+        result = self._run_all_detectors(image_pil)
+        
+        # Gestione dimensione cache
+        if len(self._detection_cache) >= self.max_cache_size:
+            # Rimuovi la voce più vecchia (FIFO)
+            oldest_key = next(iter(self._detection_cache))
+            del self._detection_cache[oldest_key]
+            print(f"[CACHE] Removed oldest cache entry: {oldest_key[:16]}...")
+        
+        # Salva in cache
+        self._detection_cache[cache_key] = result
+        print(f"[CACHE] Cached detection result for key: {cache_key[:16]}...")
+        
+        return result
+
+
+    def _generate_cache_key(self, image_pil: Image.Image, question: str = "") -> str:
+        """
+        Genera una chiave cache basata su:
+        - Hash dell'immagine
+        - Parametri dei detector
+        - Domanda (se presente)
+        """
+        import hashlib
+        
+        # Hash dell'immagine
+        img_bytes = image_pil.tobytes()
+        img_hash = hashlib.md5(img_bytes).hexdigest()[:16]
+        
+        # Parametri detector
+        detector_params = {
+            "detectors": sorted(self.detectors_to_use),
+            "owl_thresh": self.threshold_owl,
+            "yolo_thresh": self.threshold_yolo,
+            "det2_thresh": self.threshold_detectron,
+            "question": question.strip().lower()
+        }
+        
+        param_str = str(sorted(detector_params.items()))
+        param_hash = hashlib.md5(param_str.encode()).hexdigest()[:8]
+        
+        return f"{img_hash}_{param_hash}"
 
     ###########################################################################
     # BOX / SEGMENTATION / RELATIONSHIP UTILS
@@ -1822,23 +2007,27 @@ class ImageGraphPreprocessor:
     def _refine_mask_with_point(self, image_np: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
         Refina `mask` con un singolo punto centrale (foreground).
-        Funziona sia con SAM-1 sia con SAM-2 scegliendo in automatico il predictor.
-        Salta in modo sicuro se il bbox tocca il bordo o se OpenCV/SAM solleva errori.
+        Funziona con SAM-1, SAM-2 e SAM-HQ.
         """
         ys, xs = np.where(mask)
-        if len(xs) == 0:                      # maschera vuota
+        if len(xs) == 0:
             return mask
 
         H, W = image_np.shape[:2]
         if xs.min() == 0 or ys.min() == 0 or xs.max() == W - 1 or ys.max() == H - 1:
-            return mask                       # bbox aderente al bordo → skip
+            return mask
 
-        cx, cy = int(xs.mean()), int(ys.mean())          # punto centrale
+        cx, cy = int(xs.mean()), int(ys.mean())
         point_coords = np.array([[cx, cy]])
-        point_labels = np.array([1], dtype=int)          # 1 = foreground
+        point_labels = np.array([1], dtype=int)
 
         # Scegli il predictor corretto
-        predictor = self.sam2_predictor if self.sam_version == 2 else self.sam_predictor
+        if self.sam_version == "hq":
+            predictor = self.sam_predictor  # SAM-HQ usa lo stesso interface
+        elif self.sam_version == "2":
+            predictor = self.sam2_predictor
+        else:
+            predictor = self.sam_predictor  # SAM-1
 
         try:
             predictor.set_image(image_np)
@@ -1869,12 +2058,69 @@ class ImageGraphPreprocessor:
         """
 
         image_np = np.array(image_pil)
+        
+        # ══════════════════════════════════════════════════════════════
+        # ─── BRANCH SAM-HQ ────────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════
+        if self.sam_version == "hq":
+            self.sam_predictor.set_image(image_np)
+            
+            try:
+                refined_masks = []
+                for box in boxes:
+                    x1, y1, x2, y2 = map(int, box)
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+                    
+                    # Prova prima con bounding box
+                    try:
+                        box_arr = np.array([[x1, y1, x2, y2]], dtype=float)
+                        masks_box, scores_box, _ = self.sam_predictor.predict(
+                            box=box_arr, 
+                            multimask_output=False
+                        )
+                        mask = masks_box[0]
+                        score = float(scores_box[0])
+                        
+                        # Se la maschera è troppo piccola, prova con punto centrale
+                        if mask.sum() < 50:
+                            point_coords = np.array([[cx, cy]])
+                            point_labels = np.array([1])
+                            masks_pt, scores_pt, _ = self.sam_predictor.predict(
+                                point_coords=point_coords,
+                                point_labels=point_labels,
+                                multimask_output=False
+                            )
+                            mask = masks_pt[0]
+                            score = float(scores_pt[0])
+                        
+                        refined_masks.append({
+                            "segmentation": mask.astype(bool),
+                            "bbox": [x1, y1, x2 - x1, y2 - y1],
+                            "predicted_iou": score,
+                        })
+                        
+                    except Exception as e:
+                        print(f"[WARN] SAM-HQ failed on box {box}: {e}")
+                        refined_masks.append({
+                            "segmentation": np.zeros(image_np.shape[:2], dtype=bool),
+                            "bbox": [x1, y1, x2 - x1, y2 - y1],
+                            "predicted_iou": 0.0,
+                        })
+                
+                return refined_masks
+                
+            finally:
+                self.sam_predictor.reset_image()
+                if hasattr(self.sam_predictor, "features"):
+                    del self.sam_predictor.features
+                torch.cuda.empty_cache()
 
         # ══════════════════════════════════════════════════════════════
         # ─── BRANCH SAM 2 ─────────────────────────────────────────────
         # ══════════════════════════════════════════════════════════════
 
-        if self.sam_version == 2:
+        elif self.sam_version == 2:
             image_np = np.array(image_pil)
 
             # 1) carico l'immagine nel predictor una volta sola
@@ -1929,75 +2175,87 @@ class ImageGraphPreprocessor:
             return refined_masks
 
 
-
-            if hasattr(self.sam2_predictor, "features"):
-                del self.sam2_predictor.features
-            torch.cuda.empty_cache()
-            return refined_masks
-
-
         # ══════════════════════════════════════════════════════════════
         # ─── BRANCH SAM 1  (codice originale quasi invariato) ─────────
         # ══════════════════════════════════════════════════════════════
 
-        image_np = np.array(image_pil)
-        self.sam_predictor.set_image(image_np)
+        else:
+            image_np = np.array(image_pil)
+            self.sam_predictor.set_image(image_np)
 
-        H, W = image_np.shape[:2]
+            H, W = image_np.shape[:2]
 
-        try:
-            refined_masks = []
-            # ---------- 1) “clamp” iniziale dei box ----------
-            tmp_boxes = []
-            for bx in boxes:
-                x1, y1, x2, y2 = bx
-                x1 = max(0,   min(int(round(x1)), W - 2))
-                y1 = max(0,   min(int(round(y1)), H - 2))
-                x2 = max(x1 + 1, min(int(round(x2)), W - 1))
-                y2 = max(y1 + 1, min(int(round(y2)), H - 1))
-                tmp_boxes.append([x1, y1, x2, y2])
+            try:
+                refined_masks = []
+                # ---------- 1) “clamp” iniziale dei box ----------
+                tmp_boxes = []
+                for bx in boxes:
+                    x1, y1, x2, y2 = bx
+                    x1 = max(0,   min(int(round(x1)), W - 2))
+                    y1 = max(0,   min(int(round(y1)), H - 2))
+                    x2 = max(x1 + 1, min(int(round(x2)), W - 1))
+                    y2 = max(y1 + 1, min(int(round(y2)), H - 1))
+                    tmp_boxes.append([x1, y1, x2, y2])
 
-            # ---------- 2) per ogni box, tentativi shrink 0-2-4-8-… -----
-            for box0 in tmp_boxes:
-                for shrink in (0, 2, 4, 8, 12, 16):
-                    x1, y1, x2, y2 = box0
-                    xs = max(0,   x1 + shrink)
-                    ys = max(0,   y1 + shrink)
-                    xe = max(xs + 1, x2 - shrink)
-                    ye = max(ys + 1, y2 - shrink)
-                    if xe <= xs or ye <= ys:
-                        continue
-                    try:
-                        box_arr = np.asarray([xs, ys, xe, ye], dtype=float)[None, :]
-                        masks_box, scores_box, _ = self.sam_predictor.predict(
-                            box=box_arr, multimask_output=True
-                        )
-                        best = int(np.argmax(scores_box))
-                        final_mask = self._refine_mask_with_point(image_np,
-                                                                  masks_box[best])
+                # ---------- 2) per ogni box, tentativi shrink 0-2-4-8-… -----
+                for box0 in tmp_boxes:
+                    for shrink in (0, 2, 4, 8, 12, 16):
+                        x1, y1, x2, y2 = box0
+                        xs = max(0,   x1 + shrink)
+                        ys = max(0,   y1 + shrink)
+                        xe = max(xs + 1, x2 - shrink)
+                        ye = max(ys + 1, y2 - shrink)
+                        if xe <= xs or ye <= ys:
+                            continue
+                        try:
+                            box_arr = np.asarray([xs, ys, xe, ye], dtype=float)[None, :]
+                            masks_box, scores_box, _ = self.sam_predictor.predict(
+                                box=box_arr, multimask_output=True
+                            )
+                            best = int(np.argmax(scores_box))
+                            final_mask = self._refine_mask_with_point(image_np,
+                                                                    masks_box[best])
 
-                        refined_masks.append({
-                            "segmentation": final_mask.astype(bool),
-                            "bbox":         [xs, ys, xe, ye],
-                            "predicted_iou": float(scores_box[best]),
-                        })
-                        break          # → box ok, passa al prossimo
-                    except cv2.error:
-                        continue       # riprova con shrink maggiore
-                else:
-                    print(f"[WARN] SAM-1 skipped problematic box: {box0!r}")
+                            refined_masks.append({
+                                "segmentation": final_mask.astype(bool),
+                                "bbox":         [xs, ys, xe, ye],
+                                "predicted_iou": float(scores_box[best]),
+                            })
+                            break          # → box ok, passa al prossimo
+                        except cv2.error:
+                            continue       # riprova con shrink maggiore
+                    else:
+                        print(f"[WARN] SAM-1 skipped problematic box: {box0!r}")
 
-            return refined_masks
+                return refined_masks
 
-        finally:
-            self.sam_predictor.reset_image()
-            if hasattr(self.sam_predictor, "features"):
-                del self.sam_predictor.features
+            finally:
+                self.sam_predictor.reset_image()
+                if hasattr(self.sam_predictor, "features"):
+                    del self.sam_predictor.features
+                torch.cuda.empty_cache()
+
+    ###########################################################################
+    # CACHE
+    ###########################################################################   
+
+    def get_cache_stats(self) -> dict:
+        """Restituisce statistiche sulla cache"""
+        return {
+            "detection_cache_size": len(self._detection_cache),
+            "det_cache_size": len(self._det_cache),
+            "max_cache_size": self.max_cache_size,
+            "cache_enabled": self.enable_detection_cache
+        }
+    
+    def clear_caches(self):
+        """Pulisce tutte le cache"""
+        self._detection_cache.clear()
+        self._det_cache.clear()
+        self._global_model_cache.clear()
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-
-
-
+        print("[INFO] All caches cleared")
 
     ###########################################################################
     # PROCESS A SINGLE IMAGE
@@ -2009,6 +2267,10 @@ class ImageGraphPreprocessor:
             image_name: str,
             det_cache_key: str | None = None,
     ):
+    
+        if det_cache_key is None:
+            det_cache_key = self._generate_cache_key(image_pil, self.question)
+            
         cache_key = det_cache_key or image_name
         print(f"\n[PROCESS] {image_name}")
         t0 = time.time()
@@ -2031,40 +2293,9 @@ class ImageGraphPreprocessor:
             )
         else:
             # --------------------------- detector inference --------------------
-            all_detections: list[dict] = []
-            det_counts = {}
-
-            # OWL-ViT
-            if "owlvit" in self.detectors_to_use:
-                owl_queries = [
-                    "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
-                    "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
-                    "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella",
-                    "handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat",
-                    "baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork",
-                    "knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza",
-                    "donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
-                    "remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock",
-                    "vase","scissors","teddy bear","hair drier","toothbrush","fence","grass","table","house","plate",
-                    "lamp","street lamp","sign","glass","plant","hedge","sofa","light","window","curtain","candle","tree",
-                    "sky","cloud","road","hat","glove","helmet","mountain","snow","sunglasses","bow tie","picture",
-                    "printer","monitor","picture","pillow","stone","glasses","wheel","building","bridge","tomato"
-                ]
-                dets_owl = self._run_owlvit_detection(image_pil, owl_queries)
-                det_counts["OWL-ViT"] = len(dets_owl)
-                all_detections.extend(dets_owl)
-
-            # YOLOv8
-            if "yolov8" in self.detectors_to_use:
-                dets_yolo = self._run_yolov8_detection(image_pil)
-                det_counts["YOLOv8"] = len(dets_yolo)
-                all_detections.extend(dets_yolo)
-
-            # Detectron2
-            if "detectron2" in self.detectors_to_use:
-                dets_d2 = self._run_detectron2_detection(image_pil)
-                det_counts["Detectron2"] = len(dets_d2)
-                all_detections.extend(dets_d2)
+            detection_result = self._cached_detection(image_pil, cache_key)
+            all_detections = detection_result["detections"]
+            det_counts = detection_result["counts"]
 
             print("[DBG]  count per detector →", det_counts)
 
@@ -2552,11 +2783,17 @@ def parse_preproc_args():
 
         parser.add_argument(
             "--sam_version",
-            type=int,
-            choices=[1, 2],
-            default=1,
-            help="1 = Segment-Anything v1, 2 = Segment-Anything 2 (default: 1)",
+            type=str,
+            choices=["1", "2", "hq"],
+            default="1",
+            help="1 = Segment-Anything v1, 2 = Segment-Anything 2, hq = SAM-HQ (default: 1)",
         )
+        
+        parser.add_argument("--sam_hq_model_type", type=str, 
+                        choices=["vit_b", "vit_l", "vit_h"],
+                        default="vit_h",
+                        help="SAM-HQ model size (only used if sam_version=hq)")
+        
 
         parser.add_argument("--conceptnet_timeout", type=float, default=4)
         parser.add_argument("--conceptnet_max_retry", type=int, default=3)
@@ -2585,6 +2822,13 @@ def parse_preproc_args():
                     help="Skip saving scene prompt file")
         parser.add_argument("--skip_visualization", action="store_true",
                     help="Skip saving the visualization image")
+
+        parser.add_argument("--enable_detection_cache", action="store_true",
+                       help="Enable detection caching for faster reprocessing")
+        parser.add_argument("--max_cache_size", type=int, default=100,
+                          help="Maximum number of cached detection results")
+        parser.add_argument("--clear_cache", action="store_true", 
+                          help="Clear detection cache before starting")
 
 
 
@@ -2631,19 +2875,35 @@ if __name__ == "__main__":
         "min_mask_region_area":   args.min_mask_region_area,
         "preproc_device":     args.preproc_device,
         "sam_version": args.sam_version,
+        "sam_hq_model_type": getattr(args, 'sam_hq_model_type', 'vit_h'),
         "display_legend": not args.no_legend,
         "aggressive_pruning": args.aggressive_pruning,
         "display_legend": not args.no_legend,
         "aggressive_pruning": args.aggressive_pruning,
-        
-        # Nuove opzioni di output
         "save_image_only": args.save_image_only,
         "skip_graph": args.skip_graph,
         "skip_prompt": args.skip_prompt,
         "skip_visualization": args.skip_visualization,
+        "enable_detection_cache": args.enable_detection_cache,
+        "max_cache_size": args.max_cache_size,
     }
+
+
+    if args.clear_cache:
+        # Crea un'istanza temporanea per pulire la cache
+        temp_preproc = ImageGraphPreprocessor(config)
+        if hasattr(temp_preproc, '_detection_cache'):
+            temp_preproc._detection_cache.clear()
+        if hasattr(temp_preproc, '_det_cache'):
+            temp_preproc._det_cache.clear()
+        print("[INFO] Detection cache cleared")
+        del temp_preproc  # Libera la memoria
+        
+        # Se clear_cache è l'unico scopo, esci
+        if not (args.input_path or args.json_file or args.dataset):
+            print("[INFO] Cache cleared. No processing requested.")
+            exit(0)
 
     preproc = ImageGraphPreprocessor(config)
     preproc.run()
-
 

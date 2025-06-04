@@ -21,21 +21,24 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # ---------- pure-python requirements ---------------------------------------
 COPY /build/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-
+ 
 # ---------- Torch / CUDA extensions ----------------------------------------
 RUN TORCH_CUDA_ARCH_LIST="8.6;8.9+PTX" \
-    # 1️⃣ detectron2 (porta iopath 0.1.9)
+    # detectron2 (porta iopath 0.1.9)
     pip install --no-cache-dir \
         git+https://github.com/facebookresearch/detectron2.git@main && \
-    # 2️⃣ extra libs
+    # extra libs
     pip install --no-cache-dir \
         flash-attn==2.7.4.post1 \
         git+https://github.com/openai/CLIP.git@main \
         git+https://github.com/facebookresearch/segment-anything.git@main && \
-    # 3️⃣ sam-2  (no deps, no build isolation → niente Torch duplicato)
+    # SAM-HQ     
+    pip install --no-cache-dir \
+        segment-anything-hq && \
+    # sam-2  (no deps, no build isolation → niente Torch duplicato)
     pip install --no-cache-dir --no-deps --no-build-isolation \
         git+https://github.com/facebookresearch/sam2.git@main && \
-    # 4️⃣ PyG + Ultralytics
+    # PyG + Ultralytics
     pip install --no-cache-dir \
         torch-scatter -f https://data.pyg.org/whl/torch-2.5.0+cu121.html \
         torch-sparse  -f https://data.pyg.org/whl/torch-2.5.0+cu121.html \
