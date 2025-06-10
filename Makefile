@@ -27,7 +27,7 @@ MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
 NUM_INSTANCES           ?= -1
-LABEL_MODE			 ?= numeric
+LABEL_MODE			 ?= original
 
 # Detection thresholds
 OWL_THRESHOLD           ?= 0.3
@@ -49,7 +49,7 @@ POINTS_PER_SIDE         ?= 32
 PRED_IOU_THRESH         ?= 0.9
 STABILITY_SCORE_THRESH  ?= 0.95
 MIN_MASK_REGION_AREA    ?= 100
-SAM_VERSION             ?= 2
+SAM_VERSION             ?= hq
 SAM_HQ_MODEL_TYPE       ?= vit_h
 
 # Inference toggle: if true, run `make run_vqa` after preprocessing
@@ -68,7 +68,7 @@ TEMPERATURE             ?= 0.2
 TOP_P                   ?= 0.9
 TENSOR_PARALLEL_SIZE    ?= 1
 MAX_IMAGES              ?= -1
-MAX_QUESTIONS_PER_IMAGE ?= -1
+MAX_QUESTIONS_PER_IMAGE ?= 3
 SKIP_PREPROCESSING       ?= false
 
 # Dataset download defaults
@@ -175,18 +175,13 @@ run_vqa:
 	  --min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
 	  --fill_segmentation \
 	  --label_mode "$(LABEL_MODE)" \
-	  --display_labels \
-	  --display_relationships \
-	  --display_relation_labels \
 	  --show_segmentation \
 	  --sam_version $(SAM_VERSION) \
 	  --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
 	  --no_legend \
 	  --aggressive_pruning \
 	  --save_image_only \
-	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only) \
-	  --enable_detection_cache \
-      --max_cache_size 200
+	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
 
 
 #------------------------------------------------------------------------------

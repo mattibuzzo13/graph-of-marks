@@ -130,10 +130,10 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 \
   -v "$(pwd)":/workdir \
-  -v "/datasets/VisualQA_Datasets/Preprocessing/vqa/qf_preprocessing_relation_labeled_numeric":/preproc_output \
+  -v "$(pwd)/content/output_preprocessed_segmented":/preproc_output \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
-  -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
-  -v "/datasets/VisualQA_Datasets/vqa/images/val2014":/input_images \
+  -v "$(pwd)/vqa_subset_1000imgs.json":/workdir/data.json \
+  -v "$(pwd)/data/content/vqav2_imgs_1000":/input_images \
   -v "$(pwd)/vqa_out":/workdir/vqa_out \
   -w /workdir \
   "$IMAGE_NAME" \

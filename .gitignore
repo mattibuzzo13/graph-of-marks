@@ -27,3 +27,7 @@ __pycache__/
 **/checkpoints/
 **/vqa_out/
 **/vqa_out_*/
+**/content/
+**/output_images/
+**/configs/
+**/checkpoints/

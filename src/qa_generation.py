@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Union
+import gc
+import psutil
 
 # third-party
 import requests
@@ -504,6 +506,18 @@ def run_vqa(
                 key = (ex.image_path, ex.question)
                 if key in processed:
                     continue
+
+                # ---- memory cleanup periodico ----
+                # ogni 50 iterazioni, libera CPU e GPU cache
+                if len(processed) > 0 and len(processed) % 50 == 0:
+                    # raccogli il garbage Python
+                    gc.collect()
+                    # libera la GPU cache
+                    torch.cuda.empty_cache()
+                    # opzionale: log dell'utilizzo di RAM
+                    mem = psutil.virtual_memory()
+                    logger.info(f"Memory cleanup: RAM used {mem.percent}%")
+                # -----------------------------------
 
                 # 4) Preprocessing (salta se skip_preproc)
                 if skip_preproc:
