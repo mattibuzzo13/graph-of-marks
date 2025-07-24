@@ -24,3 +24,4 @@ adjustText==0.8
 ensemble-boxes==1.0.7
 sentencepiece==0.2.0
 timm==0.9.12
+transformers>=4.50

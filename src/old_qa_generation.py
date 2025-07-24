@@ -1,8 +1,6 @@
-
-
 from __future__ import annotations
 import torch.multiprocessing as mp
-# Imposta solo una volta lo start method "spawn" per evitare leak di semafori e segfault
+# Imposta solo una volta lo start method “spawn” per evitare leak di semafori e segfault
 try:
     if mp.get_start_method(allow_none=True) != "spawn":
         mp.set_start_method("spawn")
@@ -20,7 +18,6 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional, Union
 import gc
 import psutil
-import glob
 
 # third-party
 import requests
@@ -30,18 +27,9 @@ from PIL import Image
 from tqdm import tqdm
 from huggingface_hub import login as hf_login
 from huggingface_hub import snapshot_download
-from transformers import BitsAndBytesConfig
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-
 
 # import the image preprocessor
-try:
-    from image_preprocessor import ImageGraphPreprocessor, parse_preproc_args
-except ImportError:
-    # se ti interessa solo l'inference non ti serve la libreria
-    ImageGraphPreprocessor = None
-    def parse_preproc_args():
-        return argparse.Namespace()
+from image_preprocessor import ImageGraphPreprocessor, parse_preproc_args
 
 # vllm (optional)
 try:
@@ -64,78 +52,26 @@ from transformers import (
     Gemma3ForConditionalGeneration,
 )
 
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
-
-
 # qwen helper (optional)
 try:
     from qwen_vl_utils import process_vision_info  # type: ignore
     QWEN_UTILS_OK = True
 except ImportError:
     QWEN_UTILS_OK = False
-
+    
 
 # ---------------------------------------------------------------------------
 # Setup & logging
 # ---------------------------------------------------------------------------
 HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise RuntimeError("Please set HF_TOKEN environment variable with your Hugging Face access token (HF_TOKEN)." )
+hf_login(token=HF_TOKEN)
 
 torch.backends.cudnn.benchmark = True
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
 logger = logging.getLogger("vqa")
-
-
-
-
-from pathlib import Path
-from huggingface_hub import HfApi, hf_hub_download
-from tqdm.auto import tqdm
-
-from packaging import version
-from huggingface_hub import __version__ as HF_VER
-from huggingface_hub import HfApi, hf_hub_download
-from tqdm.auto import tqdm
-from pathlib import Path
-
-def download_repo_with_bar(repo_id: str, cache_dir: str) -> str:
-    api = HfApi()
-
-    # -- chiamata compatibile con tutte le versioni ------------------------
-    try:
-        info = api.model_info(repo_id, repo_type="model")   # new API (>=0.20)
-    except TypeError:
-        info = api.model_info(repo_id)                      # old API
-
-    # nelle release <0.20 il campo si chiama .siblings anziché .files
-    siblings = getattr(info, "siblings", getattr(info, "files", []))
-    files    = [s.rfilename for s in siblings]
-    total    = sum((s.size or 0) for s in siblings)
-
-    pbar = tqdm(total=total, unit="B", unit_scale=True,
-                desc=f"Downloading {repo_id}")
-
-    local_snapshot: Path | None = None
-    for f in files:
-        local_file = Path(
-            hf_hub_download(
-                repo_id,
-                filename=f,
-                cache_dir=cache_dir,
-                resume_download=True,
-            )
-        )
-        if local_snapshot is None:
-            # ~/.cache/.../models--repo--name/snapshots/<commit>
-            local_snapshot = local_file.parent
-        pbar.update(local_file.stat().st_size)
-
-    pbar.close()
-    return str(local_snapshot)
-
-
-
-
-
+ 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -151,7 +87,7 @@ class VQAExample:
     def from_dict(cls, d: Dict[str, Any]) -> "VQAExample":
         return cls(
             image_path=d["image_path"],
-            question=d.get("question", ""),
+            question=d["question"],
             answer=d.get("answer"),
             image_id=d.get("image_id"),
             metadata=d.get("metadata", {}),
@@ -224,28 +160,19 @@ def preprocess_for_qa(
         cfg = base_config.copy()
     else:
         cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
-
+    
     # Aggiorna solo i parametri specifici per questa domanda
     cfg.update({
         "input_path": None,
         "output_folder": output_folder,
-        "preproc_device": cfg.get("preproc_device", "cuda"),
+        "preproc_device": "cuda",
         "apply_question_filter": apply_question_filter,
         "question": question,
     })
-
+    
     # Crea SEMPRE un nuovo preprocessor
-    # Usa l'istanza passata (per cache e performance) o creane una nuova
-    if preproc_obj is None:
-        fresh_preproc = ImageGraphPreprocessor(cfg)
-    else:
-        fresh_preproc = preproc_obj
-        # Aggiorna i campi variabili run-time
-        fresh_preproc.config.update(cfg)
-        fresh_preproc.question = question
-        fresh_preproc._build_question_semantics()
-
-
+    fresh_preproc = ImageGraphPreprocessor(cfg)
+    
     # -------- esegui il preprocessing con la domanda corretta -----------
     fresh_preproc.process_single_image(img_pil, f"{base}_{qhash}", det_cache_key=f"{base}_{qhash}")
     return out_path
@@ -270,7 +197,7 @@ class VLLMWrapper:
             raise ImportError("Install vLLM to use this mode.")
         self.is_vl = any(
             t in model_name.lower() for t in
-            ("gemma", "smolvlm2", "qwen", "llava", "blip", "phi-4", "bagel")
+            ("gemma", "smolvlm2", "qwen", "llava", "blip", "phi-4")
         )
         self.llm = LLM(
             model=model_name,
@@ -324,9 +251,6 @@ class HFVLModel:
         self.is_qwen = "qwen2.5-vl" in name
         self.is_phi4 = "phi-4-multimodal-instruct" in name
         self.is_pixtral = "pixtral" in name
-        self.is_bagel   = "bagel" in name
-        self.is_llamav = ("llamav" in name) or ("llamav-o1" in name) or ("llamav_o1" in name)
-
 
         dtype = (
             torch.bfloat16 if torch_dtype == "auto" and torch.cuda.is_available()
@@ -339,25 +263,10 @@ class HFVLModel:
             pass
 
         # Model-specific loading with device offload
-        # ────────────────────────────────────────────────────────
-        # Gemma 3‑4B‑IT  ➜  caricamento “vanilla” da Hugging Face
-        # ────────────────────────────────────────────────────────
-        # Model-specific loading with device offload
         if self.is_gemma:
-            # Usa la stessa strategia di Qwen per Gemma
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-            local_repo = download_repo_with_bar(model_name, cache_dir)
-
-            self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                local_repo,
-                device_map="auto",
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-                max_memory={0: "20GiB", "cpu": "8GiB"},  # Gemma 3-4B richiede meno memoria
-                offload_folder="./offload",
-                offload_buffers=True,
+            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            self.model = Gemma3ForConditionalGeneration.from_pretrained(
+                model_name, device_map="auto", torch_dtype=dtype
             )
         elif self.is_smol:
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
@@ -365,146 +274,24 @@ class HFVLModel:
                 model_name, device_map="auto", torch_dtype=dtype, trust_remote_code=True
             )
         elif self.is_qwen:
-            # ①  quantizzazione (8-bit) facoltativa
-            bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
-
-            # ②  scarica lo snapshot una sola volta con barra di progresso
-            cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-            local_repo = download_repo_with_bar(model_name, cache_dir)
-
-            # ③  patch temporanea per il bug di TF 4.52 → ALL_PARALLEL_STYLES None
-            import transformers.modeling_utils as _mu
-            if not getattr(_mu, "ALL_PARALLEL_STYLES", None):
-                _mu.ALL_PARALLEL_STYLES = ["none", "tp", "rowwise", "colwise"]
-
-            # ④  carica processor e config "grezzo"
-            self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
-            raw_cfg_dict   = AutoConfig.from_pretrained(local_repo,
-                                                        trust_remote_code=True).to_dict()
-
-            # helper
-            def _as_list(v):
-                if v is None:
-                    return ["none"]          # valore esplicito valido
-                if isinstance(v, str):
-                    return [v]
-                return v
-
-            # ⑤  correzione nel dict (root / text / vision)
-            raw_cfg_dict["parallel_attn"] = _as_list(raw_cfg_dict.get("parallel_attn"))
-            if "text_config" in raw_cfg_dict:
-                raw_cfg_dict["text_config"]["parallel_attn"] = \
-                    _as_list(raw_cfg_dict["text_config"].get("parallel_attn"))
-            if "vision_config" in raw_cfg_dict:
-                raw_cfg_dict["vision_config"]["parallel_attn"] = \
-                    _as_list(raw_cfg_dict["vision_config"].get("parallel_attn"))
-
-            # ⑥  ricrea il config patchato
-            cfg = Qwen2_5_VLConfig(**raw_cfg_dict)
-
-            # ⑦  doppio-check dopo la costruzione (property text_config restituisce copia)
-            if getattr(cfg, "parallel_attn", None) is None:
-                cfg.parallel_attn = ["none"]
-            if getattr(cfg, "text_config", None) is not None and \
-               getattr(cfg.text_config, "parallel_attn", None) is None:
-                cfg.text_config.parallel_attn = ["none"]
-            if getattr(cfg, "vision_config", None) is not None and \
-               getattr(cfg.vision_config, "parallel_attn", None) is None:
-                cfg.vision_config.parallel_attn = ["none"]
-
-            # ⑧  carica finalmente il modello senza lanciare TypeError
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                local_repo,
-                config              = cfg,
-                device_map          = "auto",
-                torch_dtype         = torch.float16,
-                quantization_config = bnb_cfg,
-                low_cpu_mem_usage   = True,
-                max_memory          = {0: "15GiB", "cpu": "4GiB"},
-                offload_folder      = "./offload",
-                trust_remote_code   = True,
+            repo_dir = snapshot_download(
+                repo_id=model_name,
+                cache_dir=os.path.join(os.path.expanduser("~"), ".cache/huggingface", "models"),
+                local_files_only=False,
+                resume_download=True
             )
-
-        elif self.is_bagel:
-            # ───────────────────────────────────────────────────────────────
-            # BAGEL 7B MoT INT8 (multimodale, derivato da Qwen2.5)
-            # ───────────────────────────────────────────────────────────────
-            bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
-
-            cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-            local_repo = download_repo_with_bar(model_name, cache_dir)
-
-            # Processor + modello (può essere ImageTextToText oppure CausalLM con trust_remote_code)
-            self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
-            try:
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    local_repo,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    quantization_config=bnb_cfg,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                    max_memory={0: "20GiB", "cpu": "8GiB"},
-                    offload_folder="./offload",
-                    offload_buffers=True,
-                )
-            except Exception:
-                # fallback se la classe specifica non è disponibile
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    local_repo,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    quantization_config=bnb_cfg,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                    max_memory={0: "20GiB", "cpu": "8GiB"},
-                    offload_folder="./offload",
-                    offload_buffers=True,
-                )
-            # assicura eval mode
-            self.model.eval()
-
-        elif self.is_llamav:
-            # Quantizzazione leggera (facoltativa)
-            bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
-
-            # Scarico una sola volta con barra di progresso
-            cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-            local_repo = download_repo_with_bar(model_name, cache_dir)
-
-            # Processor + modello multimodale
-            self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
-
-            try:
-                # Molti port LLaMA-V espongono ImageTextToText
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    local_repo,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    quantization_config=bnb_cfg,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                    max_memory={0: "20GiB", "cpu": "8GiB"},
-                    offload_folder="./offload",
-                    offload_buffers=True,
-                )
-            except Exception:
-                # Fallback CausalLM
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    local_repo,
-                    config=cfg,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    quantization_config=bnb_cfg,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                    max_memory={0: "20GiB", "cpu": "8GiB"},
-                    offload_folder="./offload",
-                    offload_buffers=True,
-                )
-
-            self.model.eval()
-
+            model_path = repo_dir
+            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_path,
+                config=AutoConfig.from_pretrained(model_path, trust_remote_code=True),
+                device_map="auto",
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                max_memory={0: "20GB"},
+                offload_folder="./offload",
+                load_in_8bit=True
+            )
         elif self.is_phi4:
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -566,98 +353,6 @@ class HFVLModel:
         gen=self.model.generate(**inp, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
         trimmed=gen[:, inp.input_ids.shape[1]:]
         return self.processor.decode(trimmed[0], skip_special_tokens=True).strip()
-    def _gen_bagel(self, prompt: str, image_path: Optional[str]):
-        """
-        Generazione per BAGEL: usa il chat_template del processor e passa immagine+testo.
-        """
-        if image_path is None:
-            # solo testo
-            toks = self.processor(prompt, return_tensors="pt").to(self.device)
-            gen = self.model.generate(
-                **toks,
-                max_new_tokens=self.max_length,
-                do_sample=True,
-                temperature=self.temperature,
-                top_p=self.top_p
-            )
-            return self.processor.decode(gen[0], skip_special_tokens=True).strip()
-
-        # multimodale
-        img = load_image(image_path)
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": f"file://{image_path}"},
-                {"type": "text",  "text": prompt}
-            ]
-        }]
-
-        # Crea il testo con il template del modello (tokenize=False per gestire noi le immagini)
-        chat_txt = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        inputs = self.processor(
-            text=[chat_txt],
-            images=[img],
-            return_tensors="pt",
-            padding=True
-        ).to(self.device)
-
-        prefix = inputs["input_ids"].shape[1]
-        gen = self.model.generate(
-            **inputs,
-            max_new_tokens=self.max_length,
-            do_sample=True, temperature=self.temperature, top_p=self.top_p,
-            num_logits_to_keep=prefix
-        )
-        return self.processor.batch_decode(gen[:, prefix:], skip_special_tokens=True)[0].strip()
-        
-    def _gen_llamav(self, prompt: str, image_path: Optional[str]):
-        """Generazione per LlamaV-o1."""
-        if image_path is None:
-            toks = self.processor(prompt, return_tensors="pt").to(self.device)
-            gen = self.model.generate(
-                **toks,
-                max_new_tokens=self.max_length,
-                do_sample=True,
-                temperature=self.temperature,
-                top_p=self.top_p,
-            )
-            return self.processor.decode(gen[0], skip_special_tokens=True).strip()
-
-        img = load_image(image_path)
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": f"file://{image_path}"},
-                {"type": "text",  "text": prompt}
-            ]
-        }]
-
-        chat_txt = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        inputs = self.processor(
-            text=[chat_txt],
-            images=[img],
-            return_tensors="pt",
-            padding=True
-        ).to(self.device)
-
-        prefix = inputs["input_ids"].shape[1]
-        gen = self.model.generate(
-            **inputs,
-            max_new_tokens=self.max_length,
-            do_sample=True,
-            temperature=self.temperature,
-            top_p=self.top_p,
-        )
-        generated = gen[:, prefix:]
-        return self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
-
-
 
     # Phi‑4 helper
     def _gen_phi4(self, prompt: str, image_path: str):
@@ -673,45 +368,36 @@ class HFVLModel:
     def generate(self, prompt: str, *, image_path: Optional[str]=None) -> str:
         # Mixed-precision + no-grad for HF transformers
         with torch.inference_mode(), autocast(device_type='cuda'):
-            if self.is_gemma:
-                if image_path:
-                    # ① carica l’immagine
-                    img = load_image(image_path)
-
-                    # ② assicura il placeholder nel testo
-                    if "<start_of_image>" not in prompt:
-                        prompt = f"<start_of_image> {prompt}"
-
-                    # ③ tokenizza testo + immagine
-                    inputs = self.processor(
-                        text=prompt,
-                        images=img,
-                        return_tensors="pt"
-                    ).to(self.device)
-
-                    # ④ genera
-                    gen = self.model.generate(
-                        **inputs,
-                        max_new_tokens=self.max_length,
-                        do_sample=True,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        pad_token_id=self.processor.tokenizer.eos_token_id,
-                    )
-
-                    # ⑤ estrai solo la parte generata
-                    generated = gen[:, inputs["input_ids"].shape[1]:]
-                    return self.processor.decode(generated[0],
-                                                  skip_special_tokens=True).strip()
+            # Gemma & SmolVL
+            if self.is_gemma or self.is_smol:
+                msgs = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image" if image_path else "text", "url" if image_path else "text": image_path if image_path else prompt},
+                        {"type": "text", "text": prompt}
+                    ] if image_path else [{"type": "text", "text": prompt}]
+                }]
+                return self._chat(msgs)
 
             # Qwen2.5
             if self.is_qwen:
                 return self._gen_qwen(prompt, image_path)
-            if self.is_bagel:
-                return self._gen_bagel(prompt, image_path)
-            if self.is_llamav:
-                return self._gen_llamav(prompt, image_path)
 
+            # Phi-4 multimodal
+            if self.is_phi4 and image_path:
+                return self._gen_phi4(prompt, image_path)
+
+            # Pixtral & generic text-only
+            if self.is_pixtral or (not image_path):
+                toks = self.processor(prompt, return_tensors="pt").to(self.device)
+                gen = self.model.generate(
+                    **toks,
+                    max_new_tokens=self.max_length,
+                    do_sample=True,
+                    temperature=self.temperature,
+                    top_p=self.top_p
+                )
+                return self.processor.batch_decode(gen, skip_special_tokens=True)[0].strip()
 
             # Generic multimodal (BLIP / LLaVA)
             img = load_image(image_path)
@@ -742,7 +428,7 @@ def run_preprocessing(
 ) -> None:
     """
     Esegue SOLO il preprocessing (segmentazione, detezione, prompt-guided masking…)
-    salvando l'immagine annotata su disco.
+    salvando l’immagine annotata su disco.
 
     Non carica alcun modello linguistico.
 
@@ -775,25 +461,6 @@ def run_preprocessing(
 
 
 # ---------------------------------------------------------------------------
-# Build the path of an already–preprocessed image for a (image, question) pair
-# ---------------------------------------------------------------------------
-def get_preprocessed_path(image_path: str,
-                          question: str,
-                          output_folder: str = "preprocessed") -> str:
-    """
-    Riproduce la stessa logica di `preprocess_for_qa` per ottenere il nome
-    del file annotato SENZA rieseguire il preprocessing.
-    """
-    import hashlib, os
-
-    base  = os.path.splitext(os.path.basename(image_path))[0]
-    qhash = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
-    out_fn = f"{base}_{qhash}_output.jpg"
-    return os.path.join(output_folder, out_fn)
-
-
-
-# ---------------------------------------------------------------------------
 # VQA runner with QA preprocessing
 # ---------------------------------------------------------------------------
 def run_vqa(
@@ -808,7 +475,6 @@ def run_vqa(
     preproc_folder: str = "preprocessed",
     disable_q_filter: bool = False,
     preproc_args: Optional[Dict[str, Any]] = None,
-    image_dir: Optional[str] = None,
     skip_preproc: bool = False,
     preproc_obj: Optional[ImageGraphPreprocessor] = None
 ) -> List[Dict[str, Any]]:
@@ -854,57 +520,17 @@ def run_vqa(
                 # -----------------------------------
 
                 # 4) Preprocessing (salta se skip_preproc)
-                # ─────────────────────────────────────────────────────────────
-                #  SKIP‑PREPROCESSING: cerco *qualsiasi* immagine utilizzabile
-                # ─────────────────────────────────────────────────────────────
                 if skip_preproc:
-                    # ①  prova il file convenzionale ..._output.jpg
-                    processed_img = get_preprocessed_path(
-                        ex.image_path, ex.question, preproc_folder
-                    )
-
-                    if not os.path.exists(processed_img):
-                        # ②  prova un RAW esplicito (quello indicato nel JSON)
-                        raw_img = ex.image_path
-                        if image_dir and not os.path.isabs(raw_img):
-                            raw_img = os.path.join(image_dir, raw_img)
-
-                        # ③  se non c’è, prova qualunque <basename>_*.jpg|png
-                        if not os.path.exists(raw_img):
-                            base   = os.path.splitext(os.path.basename(ex.image_path))[0]
-                            parent = os.path.dirname(raw_img) or "."
-                            # cerca sia nella cartella originale sia in preproc_folder
-                            cand_patterns = [
-                                os.path.join(parent,        f"{base}_*.jpg"),
-                                os.path.join(parent,        f"{base}_*.png"),
-                                os.path.join(preproc_folder,f"{base}_*.jpg"),
-                                os.path.join(preproc_folder,f"{base}_*.png"),
-                            ]
-                            matches = []
-                            for p in cand_patterns:
-                                matches.extend(glob.glob(p))
-
-                            if matches:
-                                processed_img = matches[0]         # primo match
-                            else:
-                                raise FileNotFoundError(
-                                    f"Could not find an image for {ex.image_path} "
-                                    f"(looked for *_output.jpg, raw path, "
-                                    f"or generic <base>_*.jpg|png)."
-                                )
-                        else:
-                            processed_img = raw_img
-
+                    processed_img = ex.image_path
                 else:
                     processed_img = preprocess_for_qa(
-                        ex.image_path, ex.question,
+                        ex.image_path,
+                        ex.question,
                         output_folder=preproc_folder,
                         apply_question_filter=not disable_q_filter,
-                        preproc_obj=preproc_obj,
-                        preproc_cli_args=preproc_args,
-                        base_config=preproc_args.__dict__ if preproc_args else None
+                        preproc_obj=preproc_obj,          # 💡 usa l’istanza globale
+                        preproc_cli_args=preproc_args     # serve solo se preproc_obj è None
                     )
-
                 # 5) Generazione della risposta
                 prompt = prompt_tpl.format(question=ex.question)
                 t0 = time.time()
@@ -947,6 +573,7 @@ def evaluate(res: List[Dict[str, Any]]) -> Dict[str, float]:
         "exact_percent": 100 * corr / len(gold),
         "avg_time": sum(r["processing_time"] for r in gold) / len(gold)
     }
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -955,12 +582,6 @@ def parse_args():
     ap.add_argument("--input_file", required=True, help="JSON file of QA examples")
     ap.add_argument("--output_file", default="vqa_results.json", help="Where to save VQA results")
     ap.add_argument("--image_dir", help="Base directory for relative image paths")
-    ap.add_argument(
-        "--single_question",
-        type=str,
-        default=None,
-        help="Se fornita, questa domanda verrà usata per tutte le immagini, ignorando quelle nel file JSON."
-    )
     ap.add_argument("--model_name", default="google/gemma-3-4b-it", help="Hugging Face model name")
     ap.add_argument("--use_vllm", action="store_true", help="Use vLLM instead of HF transformers")
     ap.add_argument("--max_length", type=int, default=512)
@@ -988,69 +609,44 @@ def parse_args():
         action="store_true",
         help="If set, do not run preprocess_for_qa on the images; pass raw images to the model"
     )
-
+    
     ap.add_argument(
         "--preprocess_only",
         action="store_true",
         help="Esegui solo il preprocessing, senza caricare il modello e senza inference"
     )
 
-
+    
     args, _ = ap.parse_known_args()
-
+    
     return args
 
 def main():
     args = parse_args()
+    preproc_args = parse_preproc_args()
+    preproc_cfg = preproc_args.__dict__.copy()
+    preproc_cfg.update({
+        "input_path": None,          # lo passiamo noi come PIL
+        "preproc_device": "cuda",    # o "cpu" se vuoi risparmiare VRAM
+    })
+    
+    preproc_cfg["apply_question_filter"] = not preproc_args.disable_question_filter
+    preproc_cfg["display_legend"] = not preproc_args.no_legend
+    preproc_cfg["aggressive_pruning"] = preproc_args.aggressive_pruning
+    
 
-    # ------------------------------------------------------------
-    # 1️⃣  CONFIGURAZIONE PREPROCESSING (solo se serve davvero)
-    # ------------------------------------------------------------
-    if args.skip_preprocessing:
-        # ◼️ Modalità inference-only  →  nessuna dipendenza sul pre-processor
-        preproc_args  = None
-        preproc_cfg   = {}
-        GLOBAL_PREPROC = None
-    else:
-        # ◼️ Pipeline completa  →  parsiamo i flag extra e creiamo il pre-processor
-        preproc_args = parse_preproc_args()
-
-        preproc_cfg = preproc_args.__dict__.copy()
-        preproc_cfg.update({
-            "input_path": None,               # passeremo PIL, non path
-            "preproc_device": args.device,    # "cuda" o "cpu"
-            "apply_question_filter": not preproc_args.disable_question_filter,
-            "display_legend":     not preproc_args.no_legend,
-            "aggressive_pruning":  preproc_args.aggressive_pruning,
-        })
-
-        GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
-
-    # ------------------------------------------------------------
-    # 2️⃣  CARICAMENTO DEGLI ESEMPI
-    # ------------------------------------------------------------
+    
+    # GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
     examples = load_examples(args.input_file)
-
-    # Se è fornita una domanda unica, la imposta per tutti gli esempi
-    if args.single_question:
-        for ex in examples:
-            ex.question = args.single_question
-
     if args.image_dir:
-        if args.skip_preprocessing:
-            logger.warning(
-                "--image_dir è stato ignorato perché hai attivato --skip-preprocessing"
-            )
-        else:
-            # Prefissa i path relativi con la directory indicata
-            for e in examples:
-                if not os.path.isabs(e.image_path):
-                    e.image_path = os.path.join(args.image_dir, e.image_path)
+        for e in examples:
+            if not os.path.isabs(e.image_path):
+                e.image_path = os.path.join(args.image_dir, e.image_path)
 
 
-    # ------------------------------------------------------------
-    # 3️⃣  SOLO PREPROCESSING (se richiesto esplicitamente)
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------------ #
+    #                           SOLO PREPROCESSING                       #
+    # ------------------------------------------------------------------ #
     if args.preprocess_only:
         run_preprocessing(
             examples,
@@ -1059,22 +655,15 @@ def main():
             max_imgs=args.max_images,
             max_qpi=args.max_questions_per_image,
             preproc_args=preproc_args,
-            preproc_obj=GLOBAL_PREPROC,
-            base_config=preproc_cfg,
+            preproc_obj=None,
+            base_config=preproc_cfg,  
         )
         logger.info("Preprocessing completato: immagini in «%s»", args.preproc_folder)
-        return
-
-    # ------------------------------------------------------------
-    # 4️⃣  CARICAMENTO DEL MODELLO (sempre necessario)
-    # ------------------------------------------------------------
-
-    if not args.preprocess_only:
-        HF_TOKEN = os.getenv("HF_TOKEN")
-        if HF_TOKEN:
-            hf_login(token=HF_TOKEN)
-        else:
-            logger.warning("HF_TOKEN non impostato: il modello deve essere pubblico o già in cache.")
+        return 
+    
+    # ------------------------------------------------------------------ #
+    #                   Caricamento modello + inference normale          #
+    # ------------------------------------------------------------------ #
 
     model = (
         VLLMWrapper(
@@ -1084,8 +673,9 @@ def main():
             temperature=args.temperature,
             top_p=args.top_p,
             tensor_parallel_size=args.tensor_parallel_size,
-        ) if args.use_vllm else
-        HFVLModel(
+        )
+        if args.use_vllm
+        else HFVLModel(
             args.model_name,
             device=args.device,
             max_length=args.max_length,
@@ -1094,13 +684,6 @@ def main():
         )
     )
 
-
-    import gc, torch
-    gc.collect(); torch.cuda.empty_cache()
-
-    # ------------------------------------------------------------
-    # 5️⃣  INFERENCE + (eventuale) PRE-PROCESSING
-    # ------------------------------------------------------------
     res = run_vqa(
         examples,
         model,
@@ -1111,15 +694,11 @@ def main():
         max_imgs=args.max_images,
         preproc_folder=args.preproc_folder,
         disable_q_filter=args.disable_question_filter,
-        preproc_args=preproc_args,       # None se skip-preprocessing
+        preproc_args=preproc_args,
         skip_preproc=args.skip_preprocessing,
-        preproc_obj=GLOBAL_PREPROC,      # None se skip-preprocessing
-        image_dir=args.image_dir
+        preproc_obj=GLOBAL_PREPROC
     )
 
-    # ------------------------------------------------------------
-    # 6️⃣  METRICHE (opzionali)
-    # ------------------------------------------------------------
     metrics = evaluate(res)
     if metrics:
         mfile = os.path.splitext(args.output_file)[0] + "_metrics.json"
@@ -1129,4 +708,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

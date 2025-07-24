@@ -3,17 +3,17 @@ set -e
 
 # Nome dell'immagine costruita in precedenza
 IMAGE_NAME="gom"
-HF_TOKEN="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"
+HF_TOKEN="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"
 HOST_HF_CACHE="$HOME/.cache/huggingface"
 mkdir -p "$HOST_HF_CACHE"
 
+# Usa GPU 2 direttamente per debugging (senza SLURM)
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # Usa la variabile CUDA_VISIBLE_DEVICES assegnata da SLURM
 GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
-
 
 echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 
@@ -122,30 +122,25 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 #    ENABLE_Q_FILTER=true
 
 
-# ...existing code...
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
-  -e HF_TOKEN=$HF_TOKEN \
   -e HF_HOME=/root/.cache/huggingface \
   -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
   -v "$(pwd)":/workdir \
-  -v "$(pwd)/content/output_preprocessed_segmented":/preproc_output \
+  -v "/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/original_RefCOCOg":/input_images \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
-  -v "$(pwd)/vqa_subset_1000imgs.json":/workdir/data.json \
-  -v "$(pwd)/data/content/vqav2_imgs_1000":/input_images \
-  -v "$(pwd)/vqa_out":/workdir/vqa_out \
-  -w /workdir \
   "$IMAGE_NAME" \
   run_vqa \
-    VQA_INPUT_FILE=data.json \
-    IMAGE_DIR=/input_images \
+    VQA_INPUT_FILE=/workdir/RefCOCOg.json \
     MAX_IMAGES=-1 \
     MAX_QUESTIONS_PER_IMAGE=-1 \
-    PREPROC_FOLDER=/preproc_output \
-    SKIP_PREPROCESSING=false \
-    ENABLE_Q_FILTER=true \
-    PREPROCESS_ONLY=true
+    IMAGE_FOLDER=/input_images \
+    VQA_OUTPUT_FILE=/workdir/RefCOCOg_LlamaV-o1_original.json \
+    USE_VLLM=false \
+    MODEL_NAME=omkarthawakar/LlamaV-o1 \
+    SKIP_PREPROCESSING=true
 
 echo "Docker preprocessing container has exited."
 

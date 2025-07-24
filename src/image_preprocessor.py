@@ -16,12 +16,12 @@ from spacy.matcher import PhraseMatcher
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.patheffects as pe
 import string
 from collections import defaultdict
 import argparse
 from pathlib import Path
 from torch.hub import download_url_to_file
-from spacy.matcher import PhraseMatcher
 from adjustText import adjust_text
 import networkx as nx
 from transformers import CLIPProcessor, CLIPModel
@@ -32,13 +32,13 @@ from transformers import BlipProcessor, BlipForConditionalGeneration
 from torchvision.models.optical_flow import raft_large
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-from textwrap import shorten
-from pathlib import Path
 import requests, functools, urllib.parse
 from nltk.stem import WordNetLemmatizer
 import difflib
-import nltk
-import spacy
+from ensemble_boxes import weighted_boxes_fusion
+import re
+from matplotlib.transforms import Bbox
+
 
 # SAM-HQ (nuovo import)
 try:
@@ -83,6 +83,13 @@ import colorsys, random
 
 _CONCEPTNET_CACHE: dict[tuple[str,str], list[dict]] = {}
 
+BASIC_COLORS = [
+     "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
+     "#ffff33", "#a65628", "#f781bf", "#999999", "#1f78b4",
+     "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#cab2d6",
+     "#6a3d9a", "#b2df8a", "#ffed6f", "#a6cee3", "#b15928"
+]
+
 ##############################################################################
 # CLASS DEFINITION
 ##############################################################################
@@ -101,13 +108,13 @@ class ImageGraphPreprocessor:
         """
         Initialize the ImageGraphPreprocessor with models and parameters.
         """
-        
+
         # ---------------------------------------------------------
         # 0)  Ensure external resources are present
         # ---------------------------------------------------------
         self._ensure_nltk_corpora(["wordnet", "omw-1.4"])
         self._ensure_spacy_model("en_core_web_md")
-        
+
         # ---------------------------------------------------------
         # 1) Store config and parse relevant fields
         # ---------------------------------------------------------
@@ -126,6 +133,7 @@ class ImageGraphPreprocessor:
         self.threshold_yolo = config.get("threshold_yolo", 0.5)
         self.threshold_detectron = config.get("threshold_detectron", 0.5)
 
+
         # Relationship settings
         self.max_relations = config.get("max_relations", 10)
         self.proportional_relations = config.get("proportional_relations", False)
@@ -135,6 +143,8 @@ class ImageGraphPreprocessor:
         self.filter_relations_by_question = config.get("filter_relations_by_question", True)
         self.threshold_object_similarity   = config.get("threshold_object_similarity", 0.5)
         self.threshold_relation_similarity = config.get("threshold_relation_similarity", 0.5)
+        self._on_top_gap_px = 8          # tolleranza verticale in pixel
+        self._on_top_horiz_overlap = 0.35  # overlap orizzontale minimo (ratio)
 
         # Label & visualization settings
         self.question = config.get("question", "")
@@ -146,6 +156,20 @@ class ImageGraphPreprocessor:
         self.show_segmentation = config.get("show_segmentation", True)
         self.fill_segmentation = config.get("fill_segmentation", True)
         self.display_legend = config.get("display_legend", True)
+        self.text_outline_lw = config.get("text_outline_lw", 1.5)
+        self.rel_text_outline_lw = config.get("rel_text_outline_lw", 1.2)
+        self.seg_fill_alpha    = config.get("seg_fill_alpha", 0.55)    # opacità riempimento
+        self.bbox_linewidth    = config.get("bbox_linewidth", 3.0)     # spessore bordi
+        self.resolve_overlaps = config.get("resolve_overlaps", True)
+        self.show_bboxes       = config.get("show_bboxes", True)
+        self.rel_arrow_lw = config.get("rel_arrow_linewidth", 3.5)
+        self.rel_arrow_ms = config.get("rel_arrow_mutation_scale", 22)
+
+
+        self.obj_fs_in  = config.get("obj_fontsize_inside", 12)   # dentro al box
+        self.obj_fs_out = config.get("obj_fontsize_outside", 12)  # etichette esterne
+        self.rel_fs     = config.get("rel_fontsize", 10)          # relazioni
+        self.legend_fs  = config.get("legend_fontsize", 8)
 
 
         # Additional toggles
@@ -190,16 +214,16 @@ class ImageGraphPreprocessor:
 
         self._global_model_cache = {}
         self._detection_cache = {}
-        
+
         # Configurazione cache
         self.enable_detection_cache = config.get("enable_detection_cache", True)
         self.max_cache_size = config.get("max_cache_size", 100)  # Limite memoria
-        
+
         if torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory
             if total_mem < 20 * 1024**3:  # Meno di 20GB
                 print(f"[WARNING] GPU memory: {total_mem/1024**3:.1f}GB might be insufficient")
-    
+
         # Force garbage collection
         gc.collect()
         if torch.cuda.is_available():
@@ -218,7 +242,7 @@ class ImageGraphPreprocessor:
             self.device = self.config["preproc_device"]
         else:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            
+
         # Forza l'uso di un singolo thread per evitare race conditions
         torch.set_num_threads(1)
         print(f"[INFO] Running preprocessor on device: {self.device}")
@@ -240,7 +264,7 @@ class ImageGraphPreprocessor:
         elif self.sam_version == "2":
             self._load_sam2_model()
         else:
-            self._load_sam_model()  
+            self._load_sam_model()
 
         # --------------------------------------------------------------------------
         # 3bis)  CLIP  ‒  usato per costruire embedding dei nodi
@@ -316,7 +340,9 @@ class ImageGraphPreprocessor:
 
 
         self.base_cmap   = None          # 20 colori distinti
-        self._label2col  = {}                            # cache
+        self._label2col  = {}
+
+        self.curr_img_size = (0, 0)
 
         # —––––––––––––––––––––––––––––––––––––––––––––––—
         # 4) ORA posso ricostruire i termini della domanda
@@ -328,7 +354,7 @@ class ImageGraphPreprocessor:
 
         # Ed ecco la chiamata che ora funziona correttamente:
         self._build_question_semantics()
-        
+
         print(f"[DEBUG] display_legend: {self.display_legend}")
         print(f"[DEBUG] aggressive_pruning: {self.aggressive_pruning}")
         print(f"[DEBUG] apply_question_filter: {self.apply_question_filter}")
@@ -366,17 +392,63 @@ class ImageGraphPreprocessor:
             print(f"[INFO] Downloading spaCy model '{model_name}' …")
             from spacy.cli import download
             download(model_name, quiet=True)
-            
-            
+
+
+    def _wbf_fusion(self, detections, iou_thr: float = 0.55):
+        """
+        Fonde i bounding-box provenienti da più detector.
+        Ogni elemento di `detections` deve contenere:
+            { "box":[x1,y1,x2,y2], "score":float, "label":str, "from":str }
+        Ritorna tre liste allineate: boxes, labels, scores
+        """
+        if not detections:
+            return [], [], []
+
+        w, h = self.curr_img_size
+        # costruiamo la mappa label → id una sola volta
+        if not hasattr(self, "_label2id"):
+            self._label2id = {lbl: idx for idx, lbl in enumerate(self.detectors_label_list)}
+
+        list_boxes, list_scores, list_labels, list_weights = [], [], [], []
+        for det in detections:
+            lab = det["label"]
+            if lab not in self._label2id:
+                continue                       # salta subito l’intera detection
+
+            x1, y1, x2, y2 = det["box"]
+            list_boxes.append([[x1 / w, y1 / h, x2 / w, y2 / h]])
+            list_scores.append([det["score"]])
+            list_labels.append([self._label2id[lab]])
+            list_weights.append(
+                2.0 if det["from"] == "owlvit" else
+                1.5 if det["from"] == "yolo"   else 1.0
+            )
+        fused_b, fused_s, fused_l = weighted_boxes_fusion(
+            list_boxes, list_scores, list_labels,
+            weights=list_weights, iou_thr=iou_thr, skip_box_thr=0.0
+        )
+        # back-scale a pixel
+        fused_b = [ [b[0]*w, b[1]*h, b[2]*w, b[3]*h] for b in fused_b ]
+        fused_l = [ self.detectors_label_list[int(i)] for i in fused_l ]
+        fused_s = [ float(s) for s in fused_s ]
+        return fused_b, fused_l, fused_s
+
+    # ------------------------------------------------------------
+    #  utility per flip orizzontale (TTA)
+    # ------------------------------------------------------------
+    def _hflip_pil(self, pil_img: Image.Image) -> Image.Image:
+        return pil_img.transpose(Image.FLIP_LEFT_RIGHT)
+
     ###########################################################################
     # QUESTION SEMANTICS
     ###########################################################################
     def _build_relation_matcher(self):
         base_map = {
-            "above":   ["above"],
-            "below":   ["below", "under"],
-            "left_of": ["left of", "to the left of"],
-            "right_of":["right of", "to the right of"]
+            "above":      ["above"],
+            "below":      ["below", "under"],
+            "left_of":    ["left of", "to the left of"],
+            "right_of":   ["right of", "to the right of"],
+            "on_top_of":  ["on top of", "on", "onto", "resting on", "sitting on"]
         }
         for label, terms in base_map.items():
             patterns = [self.nlp(term) for term in terms]
@@ -498,12 +570,12 @@ class ImageGraphPreprocessor:
             with torch.no_grad():  # 👈 Aggiungi questo context manager
                 # Embedding del testo della domanda
                 txt_inputs = self.clip_processor(
-                    text=[self.question], 
-                    return_tensors="pt", 
-                    padding=True, 
+                    text=[self.question],
+                    return_tensors="pt",
+                    padding=True,
                     truncation=True
                 ).to(self.device)
-                
+
                 txt_emb = self.clip_model.get_text_features(**txt_inputs)
                 txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
 
@@ -511,9 +583,9 @@ class ImageGraphPreprocessor:
                 label_embs = []
                 for lbl in self.detectors_label_list:
                     lbl_inputs = self.clip_processor(
-                        text=[lbl], 
-                        return_tensors="pt", 
-                        padding=True, 
+                        text=[lbl],
+                        return_tensors="pt",
+                        padding=True,
                         truncation=True
                     ).to(self.device)
                     lbl_emb = self.clip_model.get_text_features(**lbl_inputs)
@@ -524,14 +596,14 @@ class ImageGraphPreprocessor:
                 txt_emb_clone = txt_emb.clone().detach()
                 label_embs_stack = torch.stack(label_embs).squeeze(-2)
                 label_embs_clone = label_embs_stack.clone().detach()
-                
+
                 # Calcolo similarità con tensori clonati
                 sims = torch.mm(txt_emb_clone, label_embs_clone.T).squeeze(0)
-                
+
                 # Soglia e selezione
                 threshold = 0.25
                 top_indices = (sims > threshold).nonzero(as_tuple=True)[0]
-                
+
                 for idx in top_indices:
                     self._parsed_question_object_terms.add(self.detectors_label_list[idx])
 
@@ -570,10 +642,11 @@ class ImageGraphPreprocessor:
         """
 
         base_map = {
-            "above":   ["above"],
-            "below":   ["below", "under"],
-            "left_of": ["left", "to the left of"],
-            "right_of": ["right", "to the right of"]
+            "above":      ["above"],
+            "below":      ["below", "under"],
+            "left_of":    ["left", "to the left of"],
+            "right_of":   ["right", "to the right of"],
+            "on_top_of":  ["on top of", "on", "onto", "resting on", "sitting on"]
         }
 
         # gather synonyms from WordNet
@@ -604,7 +677,7 @@ class ImageGraphPreprocessor:
     def _load_sam_model(self):
         from segment_anything import SamAutomaticMaskGenerator, sam_model_registry, SamPredictor
 
-        if self.sam_version == 2:
+        if self.sam_version == "2":
             return self._load_sam2_model()
 
         print("[INFO] Loading SAM model ...")
@@ -699,7 +772,7 @@ class ImageGraphPreprocessor:
         # ---- inizializzazione modello ------------------------------------------
         print("[INFO] Loading SAM-2.1 …")
         model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        
+
         torch.cuda.empty_cache()
         self.sam2_model = build_sam2(
             model_cfg,
@@ -721,7 +794,7 @@ class ImageGraphPreprocessor:
         """
         Carica SAM-HQ con checkpoint e inizializza predictor e mask generator.
         """
-        
+
         try:
             from segment_anything_hq import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
             HAVE_SAM_HQ = True
@@ -731,32 +804,32 @@ class ImageGraphPreprocessor:
 
         if not HAVE_SAM_HQ:
             raise ImportError("SAM-HQ not available. Install with: pip install git+https://github.com/SysCV/sam-hq.git")
-        
+
         print("[INFO] Loading SAM-HQ model ...")
-        
+
         # URL per i checkpoint SAM-HQ
         SAM_HQ_URLS = {
             "vit_b": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth",
-            "vit_l": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_l.pth", 
+            "vit_l": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_l.pth",
             "vit_h": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_h.pth"
         }
-        
+
         # Percorso checkpoint
         checkpoint_name = f"sam_hq_{self.sam_hq_model_type}.pth"
         checkpoint_path = Path(self.output_folder) / checkpoint_name
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Scarica se non esiste
         if not checkpoint_path.exists():
             print(f"[INFO] Downloading SAM-HQ checkpoint: {checkpoint_name}")
             url = SAM_HQ_URLS.get(self.sam_hq_model_type, SAM_HQ_URLS["vit_h"])
             download_url_to_file(url, str(checkpoint_path), progress=True)
-        
+
         # Carica modello SAM-HQ
         self.sam_model_gpu = sam_model_registry[self.sam_hq_model_type](checkpoint=str(checkpoint_path))
         self.sam_model_gpu.to(self.device).eval()
         self.sam_model_cpu = sam_model_registry[self.sam_hq_model_type](checkpoint=str(checkpoint_path)).eval()
-        
+
         # Inizializza con SAM-HQ
         self.mask_generator = SamAutomaticMaskGenerator(
             self.sam_model_gpu,
@@ -767,7 +840,7 @@ class ImageGraphPreprocessor:
             crop_n_layers=0
         )
         self.sam_predictor = SamPredictor(self.sam_model_gpu)
-        
+
         print(f"[INFO] SAM-HQ {self.sam_hq_model_type} loaded successfully")
 
 
@@ -822,12 +895,20 @@ class ImageGraphPreprocessor:
         """
         x1, y1, x2, y2 = map(int, box)
         crop = image_pil.crop((x1, y1, x2, y2))
+
+        # ─── Assicurati che abbia 3 canali ───────────────────────────────
+        if crop.mode != "RGB":
+            crop = crop.convert("RGB")
+
         inputs = self.clip_processor(
-            images=crop, return_tensors="pt"
+            images=crop,
+            return_tensors="pt"
         ).to(self.device)
+
         emb = self.clip_model.get_image_features(**inputs)
         emb = torch.nn.functional.normalize(emb, dim=-1)
         return emb.cpu()          # (1, 512)
+
 
 
     def _dominant_color_lab(self, image_pil, box):
@@ -873,8 +954,10 @@ class ImageGraphPreprocessor:
             vals.append(depth[y_d, x_d])
 
         vals = np.array(vals, dtype=float)
-        rng = np.ptp(vals)                          # max-min
-        if rng < 1e-6:                              # tutti uguali? fallback neutro
+        if vals.size == 0:
+            return [0.5] * len(centres)
+        rng = np.ptp(vals)
+        if rng < 1e-6:
             return [0.5] * len(vals)
 
         # 4) normalizza in [0,1]
@@ -1065,8 +1148,18 @@ class ImageGraphPreprocessor:
                 detections.append({
                     "box":   box.tolist(),
                     "label": queries[lab_idx],  # map back to your query
-                    "score": float(score)
+                    "score": float(score),
+                    "from":  "owlvit"
                 })
+        # ---------- Test-Time Augmentation FLIP ----------
+        flip_pil = self._hflip_pil(image_pil)
+        w_flip   = image_pil.size[0]
+        flip_det = self._run_owlvit_detection(flip_pil, queries) if False else []
+        # (richiamare ricorsivamente è costoso; puoi disattivare o gestire diversamente)
+        for d in flip_det:
+            x1,y1,x2,y2 = d["box"]
+            d["box"] = [ w_flip - x2, y1, w_flip - x1, y2 ]
+            detections.append(d)
         return detections
 
 
@@ -1090,7 +1183,24 @@ class ImageGraphPreprocessor:
             detections.append({
                 "box": [x_min, y_min, x_max, y_max],
                 "label": label_name,
-                "score": score_val
+                "score": score_val,
+                "from":  "yolo"
+            })
+        # ---------- TTA flip ----------
+        flip_pil = self._hflip_pil(image_pil)
+        flip_np  = np.array(flip_pil)
+        res_flip = self.yolo_model.predict(flip_np, device=self.device)[0]
+        W = image_pil.size[0]
+        for b, conf_f, cls_f in zip(res_flip.boxes.xyxy, res_flip.boxes.conf, res_flip.boxes.cls):
+            sv = float(conf_f.item())
+            if sv < threshold:
+                continue
+            x1f, y1f, x2f, y2f = b.tolist()
+            detections.append({
+                "box":   [ W - x2f, y1f, W - x1f, y2f ],
+                "label": results.names[int(cls_f.item())],
+                "score": sv,
+                "from":  "yolo"
             })
         return detections
 
@@ -1120,7 +1230,8 @@ class ImageGraphPreprocessor:
                 "box":       box,
                 "score":     float(sc),
                 "label":     label,
-                "det2_mask": mask.astype(bool)   # full‐size binary mask
+                "det2_mask": mask.astype(bool),
+                "from":      "detectron"
             })
 
         return detections
@@ -1178,37 +1289,37 @@ class ImageGraphPreprocessor:
     def _cached_detection(self, image_pil: Image.Image, cache_key: str = None) -> dict:
         """
         Cache delle predizioni per evitare ricomputo.
-        
+
         Args:
             image_pil: Immagine PIL da processare
             cache_key: Chiave univoca per la cache (es. hash dell'immagine + parametri)
-            
+
         Returns:
             Dict con detections, boxes, labels, scores
         """
         if not self.enable_detection_cache or not cache_key:
             return self._run_all_detectors(image_pil)
-            
+
         # Cache hit
         if cache_key in self._detection_cache:
             print(f"[CACHE] Detection cache hit for key: {cache_key[:16]}...")
             return self._detection_cache[cache_key]
-            
+
         # Cache miss - esegui detection
         print(f"[CACHE] Detection cache miss for key: {cache_key[:16]}...")
         result = self._run_all_detectors(image_pil)
-        
+
         # Gestione dimensione cache
         if len(self._detection_cache) >= self.max_cache_size:
             # Rimuovi la voce più vecchia (FIFO)
             oldest_key = next(iter(self._detection_cache))
             del self._detection_cache[oldest_key]
             print(f"[CACHE] Removed oldest cache entry: {oldest_key[:16]}...")
-        
+
         # Salva in cache
         self._detection_cache[cache_key] = result
         print(f"[CACHE] Cached detection result for key: {cache_key[:16]}...")
-        
+
         return result
 
 
@@ -1220,11 +1331,11 @@ class ImageGraphPreprocessor:
         - Domanda (se presente)
         """
         import hashlib
-        
+
         # Hash dell'immagine
         img_bytes = image_pil.tobytes()
         img_hash = hashlib.md5(img_bytes).hexdigest()[:16]
-        
+
         # Parametri detector
         detector_params = {
             "detectors": sorted(self.detectors_to_use),
@@ -1233,10 +1344,10 @@ class ImageGraphPreprocessor:
             "det2_thresh": self.threshold_detectron,
             "question": question.strip().lower()
         }
-        
+
         param_str = str(sorted(detector_params.items()))
         param_hash = hashlib.md5(param_str.encode()).hexdigest()[:8]
-        
+
         return f"{img_hash}_{param_hash}"
 
     ###########################################################################
@@ -1246,6 +1357,34 @@ class ImageGraphPreprocessor:
       inter = np.logical_and(m1, m2).sum()
       union = np.logical_or(m1, m2).sum()
       return inter / union if union > 0 else 0.0
+
+    def _close_mask_holes(self, mask: np.ndarray,
+                          ksize: int = 7,
+                          min_hole_area: int = 100) -> np.ndarray:
+        """
+        Chiude buchi interni alla maschera:
+          1) morph. closing per fessure sottili
+          2) riempie i componenti connessi dello sfondo più piccoli di `min_hole_area`
+        mask: bool o uint8 (0/1 o 0/255)
+        """
+        m = mask.astype(np.uint8)
+        if m.max() == 255:
+            m //= 255
+
+        # 1) closing leggero per chiudere gap sottili
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+
+        # 2) riempi i buchi veri (componenti di background racchiuse)
+        inv = 1 - m
+        num, lab = cv2.connectedComponents(inv, connectivity=4)
+        for lab_id in range(1, num):
+            area = np.sum(lab == lab_id)
+            if area < min_hole_area:          # è un buco → riempi
+                m[lab == lab_id] = 1
+
+        return m.astype(bool)
+
 
     def _fuse_masks(self, sam_mask: np.ndarray, det2_mask: np.ndarray,
                     method="union", iou_thresh=0.5) -> np.ndarray:
@@ -1275,6 +1414,140 @@ class ImageGraphPreprocessor:
         area1 = (x2 - x1) * (y2 - y1)
         area2 = (xB - xA) * (yB - yA)
         return inter_area / float(area1 + area2 - inter_area)
+
+    def _center_distance(self, b1, b2):
+        cx1, cy1 = (b1[0] + b1[2]) / 2, (b1[1] + b1[3]) / 2
+        cx2, cy2 = (b2[0] + b2[2]) / 2, (b2[1] + b2[3]) / 2
+        return math.hypot(cx2 - cx1, cy2 - cy1)
+
+    def _edge_gap(self, b1, b2):
+        # distanza minima tra i bordi dei due box (0 se si sovrappongono)
+        gap_x = max(0, max(b1[0] - b2[2], b2[0] - b1[2]))
+        gap_y = max(0, max(b1[1] - b2[3], b2[1] - b1[3]))
+        return math.hypot(gap_x, gap_y)
+
+    def _is_on_top_of(self,
+                      box_a, box_b,
+                      mask_a: np.ndarray | None = None,
+                      mask_b: np.ndarray | None = None,
+                      depth_a: float | None = None,
+                      depth_b: float | None = None) -> bool:
+        x1a,y1a,x2a,y2a = box_a
+        x1b,y1b,x2b,y2b = box_b
+
+        # 1) A deve stare sopra B (centro Y)
+        if (y1a + y2a) / 2 >= (y1b + y2b) / 2:
+            return False
+
+        # 2) gap verticale piccolo (normalizzato)
+        bottom_a, top_b = y2a, y1b
+        h_ref = min(y2a - y1a, y2b - y1b)
+        tol_px = max(self._on_top_gap_px, int(0.06 * h_ref))  # dinamico
+        # Sostituisci questo blocco in _is_on_top_of
+        gap = top_b - bottom_a
+        if gap > tol_px:
+            return False
+        # se c'è overlap verticale (gap < 0), accettalo se non è troppo grande
+        if gap < 0:
+            vert_overlap = min(y2a, y2b) - max(y1a, y1b)  # overlap verticale effettivo
+            if vert_overlap / max(1, (y2a - y1a)) > 0.35:  # >35% dell'altezza della bowl → probabilmente non è "sopra"
+                return False
+
+
+        # 3) overlap orizzontale (normalizzato sulla larghezza di A)
+        overlap_x = max(0, min(x2a, x2b) - max(x1a, x1b))
+        ratio_x = overlap_x / max(1e-6, min((x2a - x1a), (x2b - x1b)))
+        if ratio_x < self._on_top_horiz_overlap:
+            return False
+
+        # 4) contatto tra maschere (se disponibili)
+        if mask_a is not None and mask_b is not None:
+            band = max(2, int(0.02 * h_ref))
+            H = mask_a.shape[0]
+            ya0 = np.clip(int(bottom_a - band), 0, H-1)
+            ya1 = np.clip(int(bottom_a + band), 0, H-1)
+            yb0 = np.clip(int(top_b - band),    0, H-1)
+            yb1 = np.clip(int(top_b + band),    0, H-1)
+
+            band_a = mask_a[ya0:ya1, :]
+            band_b = mask_b[yb0:yb1, :]
+
+            contact = np.logical_and(band_a, band_b).any()
+            if not contact:
+                # prova con una dilatazione leggera
+                k = np.ones((3,3), np.uint8)
+                if not cv2.bitwise_and(
+                    cv2.dilate(band_a.astype(np.uint8), k),
+                    cv2.dilate(band_b.astype(np.uint8), k)
+                ).any():
+                    return False
+
+        # 5) profondità opzionale: A non deve essere molto più lontano della base
+        if depth_a is not None and depth_b is not None:
+            if depth_a > depth_b + 0.05:  # 5% della scala normalizzata
+                return False
+
+        return True
+
+    def _is_below_of(self, box_a, box_b,
+                    mask_a: np.ndarray | None = None,
+                    mask_b: np.ndarray | None = None,
+                    depth_a: float | None = None,
+                    depth_b: float | None = None) -> bool:
+        # "a is below b" ⇔ "b is on top of a"
+        return self._is_on_top_of(
+            box_b, box_a,
+            mask_b, mask_a,
+            depth_b, depth_a
+        )
+
+
+    def _orientation_label(self, dx, dy, margin=5):
+        # margin in pixel per evitare rumore
+        if abs(dx) >= abs(dy) and abs(dx) > margin:
+            return "right_of" if dx > 0 else "left_of"
+        if abs(dy) > margin:
+            return "below" if dy > 0 else "above"
+        return "near"  # fallback
+
+    def _build_precise_nearest_relation(self, i, j, boxes):
+        b1, b2 = boxes[i], boxes[j]
+        w, h = self.curr_img_size  # impostato in _wbf_fusion
+        dist_px = self._center_distance(b1, b2)
+        dist_norm = dist_px / max(w, h)
+
+        # orientamento
+        cx1, cy1 = (b1[0]+b1[2])/2, (b1[1]+b1[3])/2
+        cx2, cy2 = (b2[0]+b2[2])/2, (b2[1]+b2[3])/2
+        orient = self._orientation_label(cx2 - cx1, cy2 - cy1, margin=self.margin)
+
+        iou = self._compute_iou(b1, b2)
+        gap = self._edge_gap(b1, b2)
+
+        # classi di vicinanza (puoi tarare le soglie)
+        if iou > 0.1 or gap <= 3:
+            prox = "touching"
+        elif dist_norm < 0.05:
+            prox = "very_close"
+        elif dist_norm < 0.12:
+            prox = "close"
+        else:
+            prox = "near"
+
+        # se prox è 'near' tieni solo orient oppure solo 'near'
+        if prox == "near":
+            # Se riesci a stimare l'orientamento, usa quello. Altrimenti 'near'.
+            relation = orient if orient != "near" else "near"
+        else:
+            # per le altre prossimità puoi mantenere la combinazione (touching_left_of, etc.)
+            relation = f"{prox}_{orient}" if orient != "near" else prox
+        return {
+            "src_idx": i,
+            "tgt_idx": j,
+            "relation": relation,
+            "distance": dist_px
+        }
+
 
     def _non_maximum_suppression(self, boxes: list, scores: list,
                                  iou_threshold: float) -> list:
@@ -1402,48 +1675,150 @@ class ImageGraphPreprocessor:
 
         return new_boxes, new_labels, new_scores, new_masks
 
+    def _union_crop(
+            self,
+            image_pil: Image.Image,
+            box_a: list[float],
+            box_b: list[float],
+    ) -> Image.Image:
+        """
+        Ritorna un PIL.Image contenente l’area di bounding-box che abbraccia
+        *entrambi* i box passati.  Le coordinate sono clampate ai bordi immagine.
+        """
+        w, h = image_pil.size
+        x1 = int(max(0,   min(box_a[0], box_b[0])))
+        y1 = int(max(0,   min(box_a[1], box_b[1])))
+        x2 = int(min(w-1, max(box_a[2], box_b[2])))
+        y2 = int(min(h-1, max(box_a[3], box_b[3])))
+
+        # garantisco rettangolo valido
+        if x2 <= x1 or y2 <= y1:
+            # fallback: 1 × 1 pixel
+            return image_pil.crop((0, 0, 1, 1)).copy()
+
+        return image_pil.crop((x1, y1, x2, y2)).convert("RGB")
+
 
 
     ###########################################################################
     # RELATIONSHIP INFERENCE
     ###########################################################################
-    def _infer_relationships_improved(self, boxes: list, labels: list[str]|None=None) -> list:
-        """
-        Ritorna l’unione di:
-          • relazioni geometriche base     (above / below / left_of / right_of)
-          • relazioni semantiche ConceptNet (prefisso 'cnet_…')
-        """
+    def _infer_relationships_improved(self, image_pil, boxes, labels, masks=None, depths=None):
+        if labels is None:
+            labels = [f"obj{i}" for i in range(len(boxes))]
+
         n = len(boxes)
         centers = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
 
-        # -------- geom --------
+        # Testi per CLIP (subj/obj verranno inseriti da _clip_relation)
+        REL_TEMPLATES = [
+            "on top of",
+            "under",
+            "inside",
+            "holding",
+            "riding",
+            "touching",
+            "next to",
+            "in front of",
+            "behind",
+        ]
+
+        CANON = {
+            "on top of": "on_top_of",
+            "under": "below",
+            "inside": "inside",
+            "holding": "holding",
+            "riding": "riding",
+            "touching": "touching",
+            "next to": "next_to",
+            "in front of": "in_front_of",
+            "behind": "behind",
+        }
+
+        def canon_rel(txt: str) -> str:
+            t = re.sub(r"\s+", " ", txt.lower().strip())
+            return CANON.get(t, t.replace(" ", "_"))
+
         rels = []
+
+        # ---------- 1) geometrico: on_top_of preciso ----------
         for i in range(n):
             for j in range(n):
-                if i == j: continue
+                if i == j:
+                    continue
+                if self._is_on_top_of(
+                    boxes[i], boxes[j],
+                    mask_a=masks[i]["segmentation"] if masks else None,
+                    mask_b=masks[j]["segmentation"] if masks else None,
+                    depth_a=depths[i] if depths else None,
+                    depth_b=depths[j] if depths else None
+                ):
+                    dist_ij = self._center_distance(boxes[i], boxes[j])
+                    # on_top_of
+                    rels.append({
+                        "src_idx": i, "tgt_idx": j,
+                        "relation": "on_top_of",
+                        "distance": dist_ij
+                    })
+                    # below (speculare)
+                    rels.append({
+                        "src_idx": j, "tgt_idx": i,
+                        "relation": "below",
+                        "distance": dist_ij
+                    })
+
+
+        # ---------- 2) geometrico: above/below/left/right ----------
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
                 cx1, cy1 = centers[i]
                 cx2, cy2 = centers[j]
-                dx, dy   = cx2 - cx1, cy2 - cy1
-                dist     = math.hypot(dx, dy)
+                dx, dy = cx2 - cx1, cy2 - cy1
+                dist = math.hypot(dx, dy)
                 if dist < self.min_distance or dist > self.max_distance:
                     continue
                 if abs(dy) >= abs(dx) and abs(dy) > self.margin:
-                    relation = "above" if dy > 0 else "below"
+                    relation = "above" if dy < 0 else "below"
                 elif abs(dx) > self.margin:
-                    relation = "left_of" if dx > 0 else "right_of"
+                    relation = "right_of" if dx > 0 else "left_of"
                 else:
                     continue
-                rels.append({"src_idx": i, "tgt_idx": j,
-                            "relation": relation, "distance": dist})
+                rels.append({
+                    "src_idx": i,
+                    "tgt_idx": j,
+                    "relation": relation,
+                    "distance": dist
+                })
 
-        # -------- concept-net --------
-        if labels is None:
-            # se non passate, usa self.detectors_label_list (caso raro)
-            labels = [f"obj{i}" for i in range(n)]
+        # ---------- 3) CLIP fallback ----------
+        for i, box_i in enumerate(boxes):
+            for j, box_j in enumerate(boxes):
+                if i == j:
+                    continue
+                union = self._union_crop(image_pil, box_i, box_j)
+                lab_i = labels[i].rsplit("_", 1)[0]
+                lab_j = labels[j].rsplit("_", 1)[0]
 
+                rel_txt, score = self._clip_relation(union, lab_i, lab_j, REL_TEMPLATES)
+                if score > 0.23:
+                    dist = math.hypot(centers[j][0] - centers[i][0],
+                                      centers[j][1] - centers[i][1])
+                    rels.append({
+                        "src_idx": i,
+                        "tgt_idx": j,
+                        "relation": canon_rel(rel_txt),
+                        "relation_raw": rel_txt,
+                        "clip_sim": score,
+                        "distance": dist
+                    })
+
+        # ---------- 4) ConceptNet ----------
         for i in range(n):
             for j in range(n):
-                if i == j: continue
+                if i == j:
+                    continue
                 extra = self._conceptnet_edges(labels[i], labels[j])
                 for e in extra:
                     e.update({"src_idx": i, "tgt_idx": j})
@@ -1452,9 +1827,16 @@ class ImageGraphPreprocessor:
         return rels
 
 
+
     # ------------------------------------------------------------------
     #  RELAZIONI DA CONCEPTNET
     # ------------------------------------------------------------------
+
+
+    def _camel_to_snake(self, s: str) -> str:
+        """'PartOf' -> 'part_of'  |  'UsedFor' -> 'used_for' """
+        return re.sub(r'(?<!^)(?=[A-Z])', '_', s).lower()
+
     def _conceptnet_edges(
             self,
             label_a: str,
@@ -1508,17 +1890,24 @@ class ImageGraphPreprocessor:
         for e in edges:
             # manteniamo l’orientamento A → B
             if e["start"]["label"].lower() != label_a.lower() or \
-              e["end"]["label"].lower()   != label_b.lower():
+               e["end"]["label"].lower()   != label_b.lower():
                 continue
-            rel_type = e["rel"]["label"]        # es. "PartOf", "IsA", ...
-            weight   = e.get("weight", 1.0)
-            chosen.append((rel_type, weight))
+
+            rel_type  = e["rel"]["label"]          # es. "PartOf", "UsedFor"…
+            rel_snake = self._camel_to_snake(rel_type)  # "part_of", "used_for"
+            weight    = e.get("weight", 1.0)
+
+            chosen.append((rel_snake, rel_type, weight))
 
         # ordina per peso (più forte → prima) e taglia
-        chosen.sort(key=lambda t: -t[1])
+        chosen.sort(key=lambda t: -t[2])
         return [
-            {"relation": f"cnet_{rel}".lower(), "distance": 9_999}
-            for rel, _ in chosen[:max_edges]
+            {
+                "relation":      f"cnet_{snk}",   # usato internamente per i filtri
+                "relation_raw":  raw,             # testo originale ConceptNet
+                "distance":      9_999
+            }
+            for snk, raw, _ in chosen[:max_edges]
         ]
 
 
@@ -1549,18 +1938,21 @@ class ImageGraphPreprocessor:
                         best_j = j
                         best_d = d
                 if best_j is not None:
-                    rel_nearest = {
-                        "src_idx": i,
-                        "tgt_idx": best_j,
-                        "relation": "nearest",
-                        "distance": best_d
-                    }
+                    rel_nearest = self._build_precise_nearest_relation(i, best_j, boxes)
+
                     if all(rr["tgt_idx"] != best_j for rr in rels_by_src[i]):
                         rels_by_src[i].append(rel_nearest)
 
         final_list = []
         for src_idx, rlist in rels_by_src.items():
-            sorted_rlist = sorted(rlist, key=lambda r: r["distance"])
+            # Priorità: prima quelle citate nella domanda, poi per distanza
+            sorted_rlist = sorted(
+                rlist,
+                key=lambda r: (
+                    0 if self._is_question_relation(r["relation"]) else 1,
+                    r.get("distance", 1e9)
+                )
+            )
             final_list.extend(sorted_rlist[: self.max_relations_per_object])
         return final_list
 
@@ -1569,13 +1961,43 @@ class ImageGraphPreprocessor:
         for r in relationships:
             i = r["src_idx"]
             j = r["tgt_idx"]
-            pair = tuple(sorted((i, j)))
+            pair = (i, j)
             if pair not in best_for_pair:
                 best_for_pair[pair] = r
             else:
-                if r["distance"] < best_for_pair[pair]["distance"]:
+                if r.get("distance", 1e9) < best_for_pair[pair].get("distance", 1e9):
                     best_for_pair[pair] = r
         return list(best_for_pair.values())
+
+    def _drop_inverse_duplicates(self, relationships: list[dict]) -> list[dict]:
+        """
+        Elimina relazioni ridondanti/inverse: se esiste A->B = 'in_front_of',
+        scarta B->A = 'behind' (e viceversa), idem per left/right, above/below, ecc.
+        Tiene la prima che trova (puoi cambiare la logica di priorità se vuoi).
+        """
+        inverse = {
+            "left_of":      "right_of",
+            "right_of":     "left_of",
+            "above":        "below",
+            "below":        "above",
+            "in_front_of":  "behind",
+            "behind":       "in_front_of",
+            "on_top_of":    "below",   # opzionale, togli se non vuoi legarla a 'below'
+            "under":        "on_top_of"  # se usi 'under' da qualche parte
+        }
+
+        kept = []
+        seen = set()  # memorizza triple (src, tgt, rel)
+        for r in relationships:
+            i, j, rel = r["src_idx"], r["tgt_idx"], r["relation"]
+            inv_rel = inverse.get(rel)
+            # se esiste già l'inverso, salta
+            if inv_rel and (j, i, inv_rel) in seen:
+                continue
+            seen.add((i, j, rel))
+            kept.append(r)
+        return kept
+
 
     ###########################################################################
     # QUESTION & AREA FILTERING
@@ -1625,13 +2047,33 @@ class ImageGraphPreprocessor:
         return new_b, new_l, new_s
 
 
+    @torch.inference_mode()
+    def _clip_relation(self, crop_img, lab_i, lab_j, rel_templates):
+        # 1) encode image crop
+        inputs = self.clip_processor(images=crop_img, return_tensors="pt").to(self.device)
+        im_feat = self.clip_model.get_image_features(**inputs)
+        im_feat = im_feat / im_feat.norm(dim=-1, keepdim=True)
+
+        # 2) encode candidate texts in batch
+        texts = [tmpl.format(subj=lab_i, obj=lab_j) for tmpl in rel_templates]
+        txt_inputs = self.clip_processor(text=texts, return_tensors="pt",
+                                        padding=True).to(self.device)
+        txt_feat = self.clip_model.get_text_features(**txt_inputs)
+        txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
+
+        # 3) similarity & arg-max
+        sims = torch.matmul(im_feat, txt_feat.T).squeeze(0)   # shape [len(R)]
+        best_idx = int(sims.argmax())
+        best_sim = float(sims[best_idx])
+        return rel_templates[best_idx], best_sim
+
     def _filter_relationships_by_question(self, relationships):
         """
         Filters a list of relationship dicts based on question-specified relation terms
         and a spaCy similarity threshold.
         """
-        # If filtering is disabled, return all relationships
-        if not self.filter_relations_by_question:
+        # Se il filtro è disattivato o la domanda non contiene relazioni → non filtrare
+        if (not self.filter_relations_by_question) or (not self._parsed_question_relation_terms):
             return relationships
 
         filtered = []
@@ -1643,10 +2085,6 @@ class ImageGraphPreprocessor:
             # 1) Exact match against parsed question terms
             if rel_label in question_terms:
                 filtered.append(r)
-                continue
-
-            # 2) If no question terms, skip similarity check
-            if not question_terms:
                 continue
 
             # 3) Compute spaCy similarity between the relation label and each question term
@@ -1663,11 +2101,42 @@ class ImageGraphPreprocessor:
 
         return filtered
 
+    def _is_question_relation(self, rel_label: str) -> bool:
+        if not self._parsed_question_relation_terms:
+            return False
+        if rel_label in self._parsed_question_relation_terms:
+            return True
+        rel_doc = self.nlp(rel_label.replace("_", " "))
+        return any(
+            rel_doc.similarity(self.nlp(term)) >= self.threshold_relation_similarity
+            for term in self._parsed_question_relation_terms
+        )
+
 
 
     ###########################################################################
     # VISUALIZATION
     ###########################################################################
+
+    def _shrink_segment_px(self, p0, p1, shrink_px, ax):
+        """
+        Accorcia il segmento p0->p1 di 'shrink_px' pixel ad entrambe le estremità.
+        Ritorna due punti in coordinate dati (data coords).
+        """
+        to_px   = ax.transData.transform
+        to_data = ax.transData.inverted().transform
+
+        P0 = np.array(to_px(p0))
+        P1 = np.array(to_px(p1))
+        v  = P1 - P0
+        L  = np.linalg.norm(v)
+        if L < 1:
+            return p0, p1
+        v_norm = v / L
+        P0n = P0 + v_norm * shrink_px
+        P1n = P1 - v_norm * shrink_px
+        return tuple(to_data(P0n)), tuple(to_data(P1n))
+
 
     # --- utilities ---------------------------------
     # -------------------------------------------------------------
@@ -1703,28 +2172,44 @@ class ImageGraphPreprocessor:
     # ------------------------------------------------------------------
     #  Colori: un hue per ogni classe, distribuiti col golden-ratio
     # ------------------------------------------------------------------
-    def _color_for_label(self, lab: str, idx: int = 0):
-        """
-        Restituisce un colore esadecimale **univoco** per la classe ‘lab’.
-        Gli hue vengono estratti in sequenza con passo φ-1 (≈0.618) per
-        massimizzare la distanza percettiva fra classi diverse.
-        """
-        base_lab = lab.rsplit("_", 1)[0]
 
+    def _boost_color(self, hex_col, sat_factor=1.3, val_factor=1.15):
+        import matplotlib.colors as mcolors, colorsys
+        r, g, b = mcolors.to_rgb(hex_col)
+        h, s, v = colorsys.rgb_to_hsv(r, g, b)
+        s = min(1.0, s * sat_factor)
+        v = min(1.0, v * val_factor)
+        r, g, b = colorsys.hsv_to_rgb(h, s, v)
+        return mcolors.to_hex((r, g, b))
+
+    def _color_for_label(self, lab: str, idx: int = 0) -> str:
+        """
+        Restituisce un colore fisso per ogni classe usando BASIC_COLORS in ciclo.
+        Niente contrasti, cmap, neon, ecc.
+        """
+        base_lab = lab.rsplit("_", 1)[0].lower()  # togli suffissi tipo _1, _2
+        if not hasattr(self, "_label2col"):
+            self._label2col = {}
         if base_lab not in self._label2col:
-            # inizializzo il cursore la prima volta che entro qui
-            if not hasattr(self, "_hue_cursor"):
-                self._hue_cursor = 0.0          # parte da 0°
-            golden_step = 0.61803398875         # φ − 1  (irrazionale)
-
-            # avanzo il cursore e genero il nuovo colore
-            self._hue_cursor = (self._hue_cursor + golden_step) % 1.0
-            r, g, b = colorsys.hsv_to_rgb(self._hue_cursor, 0.9, 1.0)
-            self._label2col[base_lab] = mcolors.to_hex((r, g, b))
-
-        # per ogni occorrenza della stessa classe restituisco esattamente
-        # lo stesso colore → niente più variazioni di luminosità
+            raw = BASIC_COLORS[len(self._label2col) % len(BASIC_COLORS)]
+            sat = self.config.get("color_sat_boost", 1.3)
+            val = self.config.get("color_val_boost", 1.15)
+            self._label2col[base_lab] = self._boost_color(raw, sat, val)
         return self._label2col[base_lab]
+
+    def _text_color_for_bg(self, hex_col: str) -> str:
+        """
+        Scelta minimale: testo bianco se lo sfondo è scuro, nero se è chiaro.
+        (Niente WCAG avanzato)
+        """
+        import matplotlib.colors as mcolors
+        r, g, b = mcolors.to_rgb(hex_col)
+        luminance = 0.2126*r + 0.7152*g + 0.0722*b
+        return '#000000' if luminance > 0.6 else '#ffffff'
+
+    def _pick_obj_color(self, image_pil, box, mask_dict, label, idx):
+        """Versione minimale: usa direttamente _color_for_label."""
+        return self._color_for_label(label, idx)
 
 
     def _adjust_position(self, candidate: tuple, placed_positions: list,
@@ -1744,6 +2229,112 @@ class ImageGraphPreprocessor:
             new_candidate += displacement
         return tuple(new_candidate)
 
+    def _pixels_to_data(self, ax, dx_px, dy_px):
+        inv = ax.transData.inverted()
+        x0, y0 = inv.transform((0, 0))
+        x1, y1 = inv.transform((dx_px, dy_px))
+        return x1 - x0, y1 - y0
+
+    def _check_text_overlaps(self, ax, texts, pad_px=2):
+        """Ritorna True se ci sono overlap tra text artist."""
+        if len(texts) < 2:
+            return False
+        fig = ax.figure
+        fig.canvas.draw_idle()
+        renderer = fig.canvas.get_renderer()
+        bbs = [t.get_window_extent(renderer=renderer).expanded(1.0, 1.0) for t in texts]
+        for i in range(len(bbs)):
+            for j in range(i+1, len(bbs)):
+                if bbs[i].expanded(1.0,1.0).overlaps(bbs[j].expanded(1.0,1.0)):
+                    return True
+        return False
+
+    def _arrow_bboxes_px(self, arrows, renderer):
+        bbs = []
+        for a in arrows:
+            try:
+                path = a.get_path().transformed(a.get_transform())
+                bb = path.get_extents()
+                # bb è in data coords → converti in pixel
+                bb_px = bb.transformed(a.axes.transData + a.figure.dpi_scale_trans)
+                bbs.append(bb_px)
+            except Exception:
+                pass
+        return bbs
+
+
+    def _final_overlap_fix(self, ax, texts, anchors, rel_mask, avoid_artists=None):
+        """
+        Sistema le sovrapposizioni tra testi e (opzionalmente) altri artist (frecce).
+        avoid_artists: lista di patch/artist da evitare (es. frecce).
+        """
+        from adjustText import adjust_text
+        if avoid_artists is None:
+            avoid_artists = []
+
+        # 1) primo passaggio con adjust_text includendo le frecce
+        adjust_text(
+            texts,
+            x=[p[0] for p in anchors],
+            y=[p[1] for p in anchors],
+            ax=ax,
+            only_move={"points": "y", "text": "xy"},
+            force_text=0.8,
+            expand_text=(1.35, 1.35),
+            expand_points=(1.25, 1.25),
+            expand_objects=(1.25, 1.25),
+            add_objects=avoid_artists,
+            arrowprops=None
+        )
+
+        fig = ax.figure
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+
+        # 2) loop di micro-push: testi↔testi e testi↔frecce
+        for _ in range(60):  # max iterazioni
+            moved = False
+
+            # bbox dei testi in pixel
+            text_bbs = [t.get_window_extent(renderer=renderer).expanded(1.02, 1.08) for t in texts]
+            # bbox delle frecce
+            arrow_bbs = self._arrow_bboxes_px(avoid_artists, renderer)
+
+            # --- collisioni testo ↔ testo
+            for i in range(len(text_bbs)):
+                for j in range(i + 1, len(text_bbs)):
+                    if text_bbs[i].overlaps(text_bbs[j]):
+                        # sposta preferibilmente il testo della relazione (rel_mask=True)
+                        target = j if rel_mask[j] else i
+                        src_bb = text_bbs[i] if target == j else text_bbs[j]
+                        tgt_bb = text_bbs[target]
+
+                        dx_px = (tgt_bb.x1 - src_bb.x0) * 0.15
+                        dy_px = (tgt_bb.y1 - src_bb.y0) * 0.15
+                        dx, dy = self._pixels_to_data(ax, dx_px, dy_px)
+                        x, y = texts[target].get_position()
+                        texts[target].set_position((x + dx, y + dy))
+                        moved = True
+
+            # --- collisioni testo ↔ freccia
+            for k, bb in enumerate(text_bbs):
+                for abb in arrow_bbs:
+                    if bb.overlaps(abb):
+                        dx_px = (bb.x1 - abb.x0) * 0.12
+                        dy_px = (bb.y1 - abb.y0) * 0.12
+                        dx, dy = self._pixels_to_data(ax, dx_px, dy_px)
+                        x, y = texts[k].get_position()
+                        texts[k].set_position((x + dx, y + dy))
+                        moved = True
+
+            if not moved:
+                break
+            fig.canvas.draw_idle()
+            # ricalcola bbs aggiornati
+            text_bbs = [t.get_window_extent(renderer=renderer).expanded(1.02, 1.08) for t in texts]
+
+
+
     def _visualize_detections_and_relationships_with_auto_masks(
         self,
         image: Image.Image,
@@ -1752,18 +2343,34 @@ class ImageGraphPreprocessor:
         scores: list,
         relationships: list,
         all_masks: list,
-        save_path: str = None
+        save_path: str = None,
+        draw_background: bool = True,
+        bg_color=(1, 1, 1, 0)   # RGBA: 0 alpha = trasparente
     ):
         import matplotlib.colors as mcolors
-        from textwrap import shorten
 
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(image)
-        ax.axis("off")
+        if draw_background:
+            ax.imshow(image)
+            ax.axis("off")
+        else:
+            W, H = image.size
+            ax.set_xlim(0, W)
+            ax.set_ylim(H, 0)   # mantiene l’origine in alto a sinistra, come imshow
+            ax.axis("off")
+            ax.set_facecolor(bg_color)
+            # se alpha=0 rendo anche il fig trasparente
+            if len(bg_color) == 4 and bg_color[3] == 0:
+                fig.patch.set_alpha(0)
 
         placed_positions = []
         overlap_threshold = 30
-        obj_colors = [self._color_for_label(lab, i) for i, lab in enumerate(labels)]
+        obj_colors = [
+            self._pick_obj_color(image, boxes[i],
+                                 all_masks[i] if i < len(all_masks) else None,
+                                 labels[i], i)
+            for i in range(len(boxes))
+        ]
 
         # ---------- label style ----------
         if self.label_mode == "numeric":
@@ -1776,6 +2383,9 @@ class ImageGraphPreprocessor:
         detection_labels_info = []
         arrow_counts = defaultdict(int)
 
+        rel_texts = []
+        rel_anchor_pts = []
+
         # ---------- draw detections ----------
         for i, box in enumerate(boxes):
             color = obj_colors[i]
@@ -1783,74 +2393,89 @@ class ImageGraphPreprocessor:
             center_pt = ((x_min + x_max) // 2, (y_min + y_max) // 2)
 
             best_mask = self._get_best_mask_for_box(box, all_masks)
-            if self.show_segmentation and best_mask is not None:
-                mask_uint8 = (best_mask["segmentation"] * 255).astype(np.uint8)
-                contours, _ = cv2.findContours(
-                    mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                if contours:
-                    largest_contour = max(contours, key=cv2.contourArea).squeeze()
-                    if largest_contour.ndim >= 2:
-                        polygon = largest_contour.reshape(-1, 2)
 
-                        # --- riempimento più trasparente -----------------  # NEW -->
+            if self.show_segmentation and best_mask is not None:
+                mask_bool  = best_mask["segmentation"]
+                mask_uint8 = (mask_bool.astype(np.uint8)) * 255
+
+                # --- chiudi i buchi della maschera -----------------------------------
+                if self.config.get("close_holes", True):
+                    k = int(self.config.get("hole_kernel", 5))
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                    # small gaps
+                    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+
+                    # fill real holes with flood-fill
+                    inv = 255 - mask_uint8
+                    h, w = mask_uint8.shape
+                    flood = inv.copy()
+                    ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+                    cv2.floodFill(flood, ff_mask, (0, 0), 0)
+                    holes = cv2.bitwise_and(inv, flood)
+                    mask_uint8 = cv2.bitwise_or(mask_uint8, holes)
+
+                # --- trova contorni (interni ed esterni) ------------------------------
+                contours, hierarchy = cv2.findContours(
+                    mask_uint8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+                )
+
+                if contours and len(contours) > 0:
+                    # contorno principale per calcolare il centro e spostare il testo
+                    areas = [cv2.contourArea(c) for c in contours]
+                    idx_main = int(np.argmax(areas))
+                    main_cnt = contours[idx_main].squeeze()
+
+                    # disegna tutti i contorni
+                    for cnt in contours:
+                        cnt = cnt.squeeze()
+                        if cnt.ndim != 2 or len(cnt) < 3:
+                            continue
+
                         if self.fill_segmentation:
                             ax.fill(
-                                polygon[:, 0],
-                                polygon[:, 1],
+                                cnt[:, 0], cnt[:, 1],
                                 color=color,
-                                alpha=0.25,
-                                zorder=1,
+                                alpha=self.seg_fill_alpha,
+                                zorder=1
                             )
 
-                        # --- bordo netto ----------------------------------
                         ax.plot(
-                            polygon[:, 0],
-                            polygon[:, 1],
+                            cnt[:, 0], cnt[:, 1],
                             color=color,
-                            linewidth=1.8,
-                            alpha=0.9,
-                            zorder=2,
+                            linewidth=self.bbox_linewidth,
+                            alpha=0.95,
+                            zorder=2
                         )
 
-                        # ricalcola centro sul momento della maschera
-                        M = cv2.moments(largest_contour)
-                        if M["m00"] != 0:
-                            cx = int(M["m10"] / M["m00"])
-                            cy = int(M["m01"] / M["m00"])
-                            center_pt = (cx, cy)
-                        center_pt = self._move_point_outside_contour(
-                            center_pt, largest_contour
-                        )
-                    else:
-                        # caso raro: il contour è un punto
-                        rect = patches.Rectangle(
-                            (x_min, y_min),
-                            x_max - x_min,
-                            y_max - y_min,
-                            linewidth=2,
-                            edgecolor=color,
-                            facecolor="none",
-                            zorder=2,
-                        )
-                        ax.add_patch(rect)
+                    # centroide della maschera piena
+                    M = cv2.moments(mask_uint8, binaryImage=True)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                        center_pt = (cx, cy)
+
+                    # sposta il punto fuori dal contorno principale
+                    if main_cnt.ndim == 2 and len(main_cnt) >= 3:
+                        center_pt = self._move_point_outside_contour(center_pt, main_cnt)
+
                 else:
+                    # fallback: disegna solo il rettangolo
                     rect = patches.Rectangle(
                         (x_min, y_min),
                         x_max - x_min,
                         y_max - y_min,
-                        linewidth=2,
+                        linewidth=self.bbox_linewidth,
                         edgecolor=color,
                         facecolor="none",
                         zorder=2,
                     )
                     ax.add_patch(rect)
-            else:
+            elif self.show_bboxes:
                 rect = patches.Rectangle(
                     (x_min, y_min),
                     x_max - x_min,
                     y_max - y_min,
-                    linewidth=2,
+                    linewidth=self.bbox_linewidth,
                     edgecolor=color,
                     facecolor="none",
                     zorder=2,
@@ -1861,121 +2486,180 @@ class ImageGraphPreprocessor:
             area_px = (x_max - x_min) * (y_max - y_min)
             lbl_txt = (
                 f"{vis_labels[i]} ({scores[i]*100:.0f}%)"
-                if self.show_confidence
-                else vis_labels[i]
+                if self.show_confidence else vis_labels[i]
             )
 
-            if self.display_labels and area_px > 9000:  # NEW --> scrivi dentro al box
+            if self.display_labels and area_px > 9000:
+                font_col = self._text_color_for_bg(color)
                 ax.text(
                     (x_min + x_max) / 2,
                     (y_min + y_max) / 2,
-                    shorten(lbl_txt, 12),
-                    ha="center",
-                    va="center",
-                    fontsize=9,
-                    color="white",
+                    lbl_txt,
+                    ha="center", va="center",
+                    fontsize=self.obj_fs_in,
+                    color=font_col,
                     bbox=dict(facecolor=color, alpha=0.6, lw=0),
                     zorder=7,
                 )
             elif self.display_labels:
                 detection_labels_info.append((center_pt, lbl_txt, color))
 
-            center_pt = self._adjust_position(
-                center_pt, placed_positions, overlap_threshold
-            )
+            center_pt = self._adjust_position(center_pt, placed_positions, overlap_threshold)
             placed_positions.append(center_pt)
 
+
         # ---------- draw relationships ----------
+        # ---------- PREPARA le relazioni (NO frecce ora) ----------
+        arrow_patches = []
+        rel_draw_data = []      # info per disegnare le frecce dopo
+        rel_texts = []
+        rel_anchor_pts = []
+
         if self.display_relationships and len(relationships) > 0:
-            centers = [
-                ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes
-            ]
+            centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
+            arrow_counts = defaultdict(int)
+
+            SPATIAL_KEYS = (
+                "left_of", "right_of", "above", "below",
+                "on_top_of", "under", "in_front_of", "behind"
+            )
 
             for rel in relationships:
-                s, t = rel["src_idx"], rel["tgt_idx"]
+                # indici originali
+                s0, t0 = rel["src_idx"], rel["tgt_idx"]
+
+                # nome relazione in minuscolo
+                rel_name = rel.get("relation", "").lower()
+
+                # se è una relazione spaziale (anche se prefissata da 'touching_', 'close_', ecc.)
+                # inverti la direzione in modo che la freccia punti verso l'oggetto di riferimento
+                if any(k in rel_name for k in SPATIAL_KEYS):
+                    s, t = t0, s0
+                else:
+                    s, t = s0, t0
+
                 if s >= len(centers) or t >= len(centers):
                     continue
-                color = obj_colors[s]
 
+                color = obj_colors[s]
                 arrow_counts[(s, t)] += 1
                 rad_offset = 0.2 + 0.1 * (arrow_counts[(s, t)] - 1)
 
-                # Disegna la freccia
-                arrow = patches.FancyArrowPatch(
-                    centers[s],
-                    centers[t],
-                    arrowstyle="->",
-                    color=color,
-                    linewidth=2,
-                    connectionstyle=f"arc3,rad={rad_offset}",
-                    mutation_scale=12,
-                    zorder=4,
-                )
-                ax.add_patch(arrow)
+                # punto medio usato come anchor iniziale del testo
+                start_x, start_y = centers[s]
+                end_x, end_y     = centers[t]
+                mid_x = (start_x + end_x) / 2
+                mid_y = (start_y + end_y) / 2
 
-                # Aggiungi etichetta della relazione se abilitata
-                if self.display_relation_labels and rel.get('relation'):
-                    # Calcola il punto medio della freccia per posizionare il testo
-                    start_x, start_y = centers[s]
-                    end_x, end_y = centers[t]
-                    
-                    # Punto medio considerando la curvatura dell'arco
-                    mid_x = (start_x + end_x) / 2
-                    mid_y = (start_y + end_y) / 2
-                    
-                    # Sposta leggermente il testo per evitare sovrapposizioni con la freccia
-                    if rad_offset != 0:
-                        # Calcola l'offset perpendicolare per il testo curvato
-                        dx = end_x - start_x
-                        dy = end_y - start_y
-                        length = math.sqrt(dx*dx + dy*dy)
-                        if length > 0:
-                            # Vettore perpendicolare normalizzato
-                            perp_x = -dy / length
-                            perp_y = dx / length
-                            # Sposta il testo nella direzione della curvatura
-                            offset_distance = 15 * (1 if rad_offset > 0 else -1)
-                            mid_x += perp_x * offset_distance
-                            mid_y += perp_y * offset_distance
-                    
-                    # Pulisci il nome della relazione per la visualizzazione
-                    rel_text = rel['relation'].replace('_', ' ').replace('cnet_', '').title()
-                    
-                    ax.text(
-                        mid_x, mid_y,
-                        rel_text,
-                        fontsize=8,
-                        ha='center',
-                        va='center',
-                        bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.8, edgecolor=color),
-                        zorder=5,
-                        color='black'
-                    )
+                # offset per le curve (come avevi già)
+                if rad_offset != 0:
+                    dx = end_x - start_x
+                    dy = end_y - start_y
+                    length = math.hypot(dx, dy)
+                    if length > 0:
+                        perp_x = -dy / length
+                        perp_y =  dx / length
+                        offset_distance = 15 * (1 if rad_offset > 0 else -1)
+                        mid_x += perp_x * offset_distance
+                        mid_y += perp_y * offset_distance
+
+                # testo relazione "pulito"
+                raw = rel.get('relation_raw', rel['relation'])
+                if raw.startswith('cnet_'): raw = raw[5:]
+                if re.search(r'[A-Z]', raw):
+                    raw = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw)
+                else:
+                    raw = raw.replace('_', ' ')
+                rel_text_str = raw.strip().title()
+
+                # Creo l'oggetto testo ORA (così può essere spostato da adjust_text)
+                t_rel = ax.text(
+                    mid_x, mid_y, rel_text_str,
+                    fontsize=self.rel_fs,
+                    ha='center', va='center',
+                    color='black',
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.85,
+                              edgecolor=color, linewidth=0.6),
+                    zorder=5
+                )
+
+                rel_texts.append(t_rel)
+                rel_anchor_pts.append(((start_x + end_x) / 2, (start_y + end_y) / 2))
+
+                # Salvo tutto quello che mi serve per le frecce
+                rel_draw_data.append({
+                    "src_pt": centers[s],
+                    "tgt_pt": centers[t],
+                    "color": color,
+                    "rad": rad_offset
+                })
 
         # ---------- testo esterno (solo quelli che non stavano nel box) ----------
         texts = []
+        anchor_pts = []
         for (pt, text, color) in detection_labels_info:
-            texts.append(
-                ax.text(
-                    pt[0],
-                    pt[1],
-                    text,
-                    fontsize=10,
-                    color=color,
-                    bbox=dict(facecolor="white", alpha=0.8, edgecolor=color),
-                    zorder=7,
-                )
+            font_col = self._text_color_for_bg(color)  # testo leggibile sul colore di sfondo
+            t = ax.text(
+                pt[0], pt[1], text,
+                fontsize=self.obj_fs_out,
+                color=font_col,
+                bbox=dict(facecolor=color, alpha=0.6, lw=0),  # identico agli interni
+                zorder=7,
             )
 
-        # solo se esiste almeno un testo da regolare
-        if texts:
-            adjust_text(
-                texts,
-                ax=ax,
-                only_move={"points": "y", "text": "xy"},
-                expand_text=(1.1, 1.1),
-                force_text=0.5,
-                arrowprops=dict(arrowstyle="-", color="gray", alpha=0.5),
+            texts.append(t)
+            anchor_pts.append(pt)
+
+        # dopo aver creato texts (etichette oggetti) e rel_texts (etichette relazioni):
+        all_texts   = texts + rel_texts
+        all_anchors = anchor_pts + rel_anchor_pts
+        rel_mask    = [False]*len(texts) + [True]*len(rel_texts)
+
+        # Ordina: prima le etichette delle relazioni (True), poi quelle degli oggetti (False)
+        order     = np.argsort(rel_mask)[::-1]
+        t_fix     = [all_texts[i]   for i in order]
+        a_fix     = [all_anchors[i] for i in order]
+        rm_fix    = [rel_mask[i]    for i in order]
+
+        # Serve per avere i bbox aggiornati
+        fig.canvas.draw()   # non draw_idle
+
+        if self.resolve_overlaps:
+            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=None)
+
+        # ---------- ORA disegna le frecce ----------
+        if self.display_relationships and rel_draw_data:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+
+            # opzionale: accorcia di qualche pixel per non incollarsi ai testi
+            SHRINK_PX = 6
+
+            for d in rel_draw_data:
+                p0, p1 = d["src_pt"], d["tgt_pt"]
+                # accorcia il segmento alle estremità (evita di entrare nei box di testo)
+                p0, p1 = self._shrink_segment_px(p0, p1, SHRINK_PX, ax)
+
+                arrow = patches.FancyArrowPatch(
+                    p0, p1,
+                    arrowstyle="->",
+                    color=d["color"],
+                    linewidth=self.rel_arrow_lw,
+                    connectionstyle=f"arc3,rad={d['rad']}",
+                    mutation_scale=self.rel_arrow_ms,
+                    zorder=4
+                )
+                ax.add_patch(arrow)
+                arrow_patches.append(arrow)
+
+        # 3) ridisegna le linee che collegano posizione finale del testo al suo anchor
+        for t, pt, is_rel in zip(all_texts, all_anchors, rel_mask):
+            ax.annotate(
+                "", xy=pt, xytext=t.get_position(),
+                arrowprops=dict(arrowstyle="-", color="gray",
+                                alpha=0.45, shrinkA=4, shrinkB=4,
+                                linewidth=1, linestyle="dotted" if is_rel else "-"),
+                zorder=6,
             )
 
 
@@ -1987,12 +2671,16 @@ class ImageGraphPreprocessor:
                 for lb in uniq_base[:10]          # max 10 voci
             ]
             if handles:
-                ax.legend(handles=handles, fontsize=8, loc="upper right")
+                ax.legend(handles=handles, fontsize=self.legend_fs, loc="upper right")
 
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, bbox_inches="tight")
+            plt.savefig(
+                save_path,
+                bbox_inches="tight",
+                transparent=(not draw_background and (len(bg_color)==4 and bg_color[3]==0))
+            )
             plt.close(fig)
             print(f"[INFO] Saved output to {save_path}")
         else:
@@ -2017,7 +2705,13 @@ class ImageGraphPreprocessor:
         if xs.min() == 0 or ys.min() == 0 or xs.max() == W - 1 or ys.max() == H - 1:
             return mask
 
-        cx, cy = int(xs.mean()), int(ys.mean())
+        # centroide reale della mask
+        M = cv2.moments(mask.astype(np.uint8))
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            cx, cy = int(xs.mean()), int(ys.mean())
         point_coords = np.array([[cx, cy]])
         point_labels = np.array([1], dtype=int)
 
@@ -2058,30 +2752,30 @@ class ImageGraphPreprocessor:
         """
 
         image_np = np.array(image_pil)
-        
+
         # ══════════════════════════════════════════════════════════════
         # ─── BRANCH SAM-HQ ────────────────────────────────────────────
         # ══════════════════════════════════════════════════════════════
         if self.sam_version == "hq":
             self.sam_predictor.set_image(image_np)
-            
+
             try:
                 refined_masks = []
                 for box in boxes:
                     x1, y1, x2, y2 = map(int, box)
                     cx = (x1 + x2) // 2
                     cy = (y1 + y2) // 2
-                    
+
                     # Prova prima con bounding box
                     try:
                         box_arr = np.array([[x1, y1, x2, y2]], dtype=float)
                         masks_box, scores_box, _ = self.sam_predictor.predict(
-                            box=box_arr, 
+                            box=box_arr,
                             multimask_output=False
                         )
                         mask = masks_box[0]
                         score = float(scores_box[0])
-                        
+
                         # Se la maschera è troppo piccola, prova con punto centrale
                         if mask.sum() < 50:
                             point_coords = np.array([[cx, cy]])
@@ -2093,13 +2787,19 @@ class ImageGraphPreprocessor:
                             )
                             mask = masks_pt[0]
                             score = float(scores_pt[0])
-                        
+
+                        if self.config.get("close_holes", False):
+                            mask = self._close_mask_holes(
+                                mask,
+                                ksize=self.config.get("hole_kernel", 7),
+                                min_hole_area=self.config.get("min_hole_area", 100)
+                            )
                         refined_masks.append({
                             "segmentation": mask.astype(bool),
                             "bbox": [x1, y1, x2 - x1, y2 - y1],
                             "predicted_iou": score,
                         })
-                        
+
                     except Exception as e:
                         print(f"[WARN] SAM-HQ failed on box {box}: {e}")
                         refined_masks.append({
@@ -2107,9 +2807,9 @@ class ImageGraphPreprocessor:
                             "bbox": [x1, y1, x2 - x1, y2 - y1],
                             "predicted_iou": 0.0,
                         })
-                
+
                 return refined_masks
-                
+
             finally:
                 self.sam_predictor.reset_image()
                 if hasattr(self.sam_predictor, "features"):
@@ -2120,7 +2820,7 @@ class ImageGraphPreprocessor:
         # ─── BRANCH SAM 2 ─────────────────────────────────────────────
         # ══════════════════════════════════════════════════════════════
 
-        elif self.sam_version == 2:
+        elif self.sam_version == "2":
             image_np = np.array(image_pil)
 
             # 1) carico l'immagine nel predictor una volta sola
@@ -2154,6 +2854,14 @@ class ImageGraphPreprocessor:
                         )
                     m = masks[0]
                     bbox_xywh = [x1, y1, (x2 - x1), (y2 - y1)]
+
+                    if self.config.get("close_holes", False):
+                        m = self._close_mask_holes(
+                            m,
+                            ksize=self.config.get("hole_kernel", 7),
+                            min_hole_area=self.config.get("min_hole_area", 100)
+                        )
+
                     refined_masks.append({
                         "segmentation": m.astype(bool),
                         "bbox":         bbox_xywh,
@@ -2213,9 +2921,13 @@ class ImageGraphPreprocessor:
                                 box=box_arr, multimask_output=True
                             )
                             best = int(np.argmax(scores_box))
-                            final_mask = self._refine_mask_with_point(image_np,
-                                                                    masks_box[best])
-
+                            final_mask = self._refine_mask_with_point(image_np, masks_box[best])
+                            if self.config.get("close_holes", False):
+                                final_mask = self._close_mask_holes(
+                                    final_mask,
+                                    ksize=self.config.get("hole_kernel", 7),
+                                    min_hole_area=self.config.get("min_hole_area", 100)
+                                )
                             refined_masks.append({
                                 "segmentation": final_mask.astype(bool),
                                 "bbox":         [xs, ys, xe, ye],
@@ -2237,7 +2949,7 @@ class ImageGraphPreprocessor:
 
     ###########################################################################
     # CACHE
-    ###########################################################################   
+    ###########################################################################
 
     def get_cache_stats(self) -> dict:
         """Restituisce statistiche sulla cache"""
@@ -2247,7 +2959,7 @@ class ImageGraphPreprocessor:
             "max_cache_size": self.max_cache_size,
             "cache_enabled": self.enable_detection_cache
         }
-    
+
     def clear_caches(self):
         """Pulisce tutte le cache"""
         self._detection_cache.clear()
@@ -2260,6 +2972,11 @@ class ImageGraphPreprocessor:
     ###########################################################################
     # PROCESS A SINGLE IMAGE
     ###########################################################################
+    def _canon_label(self, lab: str) -> str:
+        base = lab.rsplit("_", 1)[0].lower()            # togli eventuale _1, _2…
+        canon = self.alias2label.get(base, base)        # alias2label già esiste
+        return canon
+
 
     def process_single_image(
             self,
@@ -2267,10 +2984,10 @@ class ImageGraphPreprocessor:
             image_name: str,
             det_cache_key: str | None = None,
     ):
-    
+
         if det_cache_key is None:
             det_cache_key = self._generate_cache_key(image_pil, self.question)
-            
+
         cache_key = det_cache_key or image_name
         print(f"\n[PROCESS] {image_name}")
         t0 = time.time()
@@ -2310,17 +3027,18 @@ class ImageGraphPreprocessor:
             labels_full = [d["label"] for d in all_detections]
             scores_full = [d["score"] for d in all_detections]
 
-            # ---------- deduplica immediata -----------------------------------
-            iou_dedup = self.config.get("early_nms_threshold", 0.5)
-            (boxes_full,
-            labels_full,
-            scores_full,
-            kept_idx) = self._deduplicate_detections(
-                            boxes_full, labels_full, scores_full, iou_dedup)
+            # ---------- Fusion via WBF ---------------------------------------
+            self.curr_img_size = image_pil.size  # (w,h) necessario in _wbf_fusion
+            boxes_full, labels_full, scores_full = self._wbf_fusion(all_detections)
 
-            all_detections = [all_detections[i] for i in kept_idx]
+            labels_full = [self._canon_label(l) for l in labels_full]
 
-            print(f"[DBG]  early-NMS dedup → {len(boxes_full)} box rimasti")
+            # ---------- riallinea la lista all_detections alla fusione ----------
+            all_detections = [
+                {"box": b, "label": l, "score": s}
+                for b, l, s in zip(boxes_full, labels_full, scores_full)
+            ]
+            print(f"[DBG]  WBF → {len(boxes_full)} box dopo fusione")
 
 
             # salviamo gli originali
@@ -2372,7 +3090,16 @@ class ImageGraphPreprocessor:
                         sam_dict["segmentation"], dmask,
                         method="iou_union", iou_thresh=0.5
                     )
+
+                if self.config.get("close_holes", False):
+                    sam_dict["segmentation"] = self._close_mask_holes(
+                        sam_dict["segmentation"],
+                        ksize=self.config.get("hole_kernel", 7),
+                        min_hole_area=self.config.get("min_hole_area", 100)
+                    )
+
             print("[DBG]  masks fused (if det2_mask present)")
+
 
             # cache
             self._det_cache[cache_key] = {
@@ -2383,13 +3110,40 @@ class ImageGraphPreprocessor:
         # ===================================================== 2) RELAZIONI GLOBALI
         boxes, labels, scores = boxes_full.copy(), labels_full.copy(), scores_full.copy()
         masks = masks_full
-        rels_all = self._unify_pair_relations(
-            self._infer_relationships_improved(boxes, labels)
-        )
 
+        # compute relative depth once for the current boxes
+        centres    = [((b[0]+b[2])/2, (b[1]+b[3])/2) for b in boxes]
+        depth_vals = self._relative_depth(image_pil, centres)
+
+        rels_all = self._unify_pair_relations(
+            self._infer_relationships_improved(image_pil, boxes, labels, masks, depth_vals)
+        )
+        rels_all = self._drop_inverse_duplicates(rels_all)
+
+        # --- NEW: filtra in base alla domanda PRIMA del taglio per-oggetto ---
+        if self.filter_relations_by_question:
+            rels_q = self._filter_relationships_by_question(rels_all)
+            # se nulla passa il filtro, tieni comunque tutte le relazioni
+            if rels_q:
+                rels_all = rels_q
+        # Ordina globalmente con la stessa priorità
+        if self._parsed_question_relation_terms:
+            rels_all = sorted(
+                rels_all,
+                key=lambda r: (
+                    0 if self._is_question_relation(r["relation"]) else 1,
+                    r.get("distance", 1e9)
+                )
+            )
         # ===================================================== 3) FALLBACK singleton
+
         if fallback_seed_idx is not None:
+            if self.filter_relations_by_question:
+                tmp = self._filter_relationships_by_question(rels_all)
+                if tmp:
+                    rels_all = tmp
             rels_all = self._limit_relationships_per_object(rels_all, boxes)
+            rels_all = self._drop_inverse_duplicates(rels_all)
             rels = [r for r in rels_all
                     if r["src_idx"] == fallback_seed_idx or r["tgt_idx"] == fallback_seed_idx]
 
@@ -2404,19 +3158,19 @@ class ImageGraphPreprocessor:
             skip_graph = self.config.get("skip_graph", False) or save_image_only
             skip_prompt = self.config.get("skip_prompt", False) or save_image_only
             skip_visualization = self.config.get("skip_visualization", False)
-            
+
             if not skip_graph:
                 self._save_gpickle(scene_graph,
                     os.path.join(self.output_folder, f"{image_name}_graph.gpickle"))
                 with open(os.path.join(self.output_folder,
                                     f"{image_name}_graph.json"), "w") as jf:
                     json.dump(nx.node_link_data(scene_graph), jf)
-            
+
             if not skip_prompt:
                 with open(os.path.join(self.output_folder,
                                     f"{image_name}_scene_prompt.txt"), "w") as fp:
                     fp.write(self._to_prompt(scene_graph))
-            
+
             if not skip_visualization or save_image_only:
                 self._visualize_detections_and_relationships_with_auto_masks(
                     image=image_pil,
@@ -2427,6 +3181,15 @@ class ImageGraphPreprocessor:
 
             print(f"[DBG]  fallback → boxes:{len(boxes)}  rels:{len(rels)}")
             skip_label_nms = True
+            if self.config.get("export_preproc_only", False):
+                overlay_path = os.path.join(self.output_folder, f"{image_name}_preproc.png")
+                self._visualize_detections_and_relationships_with_auto_masks(
+                    image=image_pil,
+                    boxes=boxes, labels=labels, scores=scores,
+                    relationships=rels, all_masks=masks,
+                    save_path=overlay_path,
+                    draw_background=False, bg_color=(1,1,1,0)
+                )
             print(f"[DONE] {image_name} (singleton fallback) in {time.time()-t0:.2f}s")
             return
 
@@ -2494,6 +3257,7 @@ class ImageGraphPreprocessor:
                         filtered_rels = self._limit_relationships_per_object(
                             filtered_rels, boxes
                         )
+                        filtered_rels = self._drop_inverse_duplicates(filtered_rels)
                 else:
                     print("[INFO] Matched terms but no seeds—falling back to full set.")
                     filtered_idxs = list(range(len(boxes)))
@@ -2534,7 +3298,8 @@ class ImageGraphPreprocessor:
         boxes  = [boxes[i]   for i in keep]
         labels = [labels[i]  for i in keep]
         scores = [scores[i]  for i in keep]
-        labels = [f"{lab}_{idx+1}" for idx, lab in enumerate(labels)]
+        labels = [f"{self._canon_label(lab)}_{idx+1}" for idx, lab in enumerate(labels)]
+
 
         masks   = [masks[i]   for i in keep]
 
@@ -2551,7 +3316,13 @@ class ImageGraphPreprocessor:
             for r in rels_all
             if r["src_idx"] in keep_set and r["tgt_idx"] in keep_set
         ]
+        # riesegui il filtro dopo il remap degli indici
+        if self.filter_relations_by_question:
+            tmp = self._filter_relationships_by_question(rels)
+            if tmp:
+                rels = tmp
         rels = self._limit_relationships_per_object(rels, boxes)
+        rels = self._drop_inverse_duplicates(rels)
 
 
         # ------------------------------------------------------------------
@@ -2562,12 +3333,12 @@ class ImageGraphPreprocessor:
         skip_graph = self.config.get("skip_graph", False) or save_image_only
         skip_prompt = self.config.get("skip_prompt", False) or save_image_only
         skip_visualization = self.config.get("skip_visualization", False)
-        
+
         # Salva sempre il scene graph se necessario per altri output
         scene_graph = None
         if not skip_graph or not skip_prompt or not skip_visualization:
             scene_graph = self._build_scene_graph(image_pil, boxes, labels, scores)
-        
+
         # Salva graph files solo se non skippato
         if not skip_graph:
             self._save_gpickle(
@@ -2576,12 +3347,12 @@ class ImageGraphPreprocessor:
             )
             with open(os.path.join(self.output_folder, f"{image_name}_graph.json"), "w") as jf:
                 json.dump(nx.node_link_data(scene_graph), jf)
-        
+
         # Salva prompt solo se non skippato
         if not skip_prompt:
             with open(os.path.join(self.output_folder, f"{image_name}_scene_prompt.txt"), "w") as fp:
                 fp.write(self._to_prompt(scene_graph))
-        
+
         # Salva visualizzazione solo se non skippata
         if not skip_visualization:
             out_path = os.path.join(self.output_folder, f"{image_name}_output.jpg")
@@ -2606,8 +3377,26 @@ class ImageGraphPreprocessor:
                 all_masks=masks,
                 save_path=out_path,
             )
+        if self.config.get("export_preproc_only", False):
+            overlay_path = os.path.join(self.output_folder, f"{image_name}_preproc.png")
+            self._visualize_detections_and_relationships_with_auto_masks(
+                image=image_pil,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=rels,
+                all_masks=masks,
+                save_path=overlay_path,
+                draw_background=False,
+                bg_color=(1, 1, 1, 0)          # trasparente; usa (1,1,1,1) per bianco
+            )
 
         print(f"[DONE] {image_name} processed in {time.time() - t0:.2f}s")
+
+        # --- pulizia memoria ---
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
 
 
@@ -2761,15 +3550,40 @@ def parse_preproc_args():
         parser.add_argument("--display_labels", action="store_true")
         parser.add_argument("--display_relationships", action="store_true")
         parser.add_argument("--show_segmentation", action="store_true")
+        parser.add_argument("--seg_fill_alpha", type=float, default=0.55,
+                            help="Opacità del riempimento delle maschere")
+        parser.add_argument("--bbox_linewidth", type=float, default=3.0,
+                            help="Spessore del bordo dei bounding box")
+
+        parser.add_argument("--obj_fontsize_inside",  type=int, default=8)
+        parser.add_argument("--obj_fontsize_outside", type=int, default=8)
+        parser.add_argument("--rel_fontsize",         type=int, default=8)
+        parser.add_argument("--legend_fontsize",      type=int, default=8)
+
+        parser.add_argument("--rel_arrow_linewidth",      type=float, default=2)
+        parser.add_argument("--rel_arrow_mutation_scale", type=float, default=22)
+
+
+        parser.add_argument("--no_bboxes", action="store_true", help="Non disegnare i bounding box")
+        parser.add_argument("--no_masks",  action="store_true", help="Non disegnare le maschere SAM")
+        parser.add_argument("--no_instances", action="store_true",
+                            help="Nascondi sia maschere che bounding box (override)")
+
 
         # NMS e segmentazione
         parser.add_argument("--label_nms_threshold", type=float, default=0.5)
         parser.add_argument("--seg_iou_threshold",   type=float, default=0.5)
+        parser.add_argument("--close_holes", action="store_true",
+                            help="Chiudi eventuali buchi interni nelle maschere SAM")
+        parser.add_argument("--hole_kernel", type=int, default=5,
+                            help="Dimensione del kernel (pixel) per il morph. closing")
+        parser.add_argument("--min_hole_area", type=int, default=500,
+                            help="Area minima del buco da riempire (pixel)")
 
         # Relazioni geometriche
         parser.add_argument("--overlap_thresh", type=float, default=0.3)
         parser.add_argument("--margin",         type=int,   default=20)
-        parser.add_argument("--min_distance",   type=float, default=90)
+        parser.add_argument("--min_distance",   type=float, default=1)
         parser.add_argument("--max_distance",   type=float, default=20000)
 
         # SAM
@@ -2788,12 +3602,12 @@ def parse_preproc_args():
             default="1",
             help="1 = Segment-Anything v1, 2 = Segment-Anything 2, hq = SAM-HQ (default: 1)",
         )
-        
-        parser.add_argument("--sam_hq_model_type", type=str, 
+
+        parser.add_argument("--sam_hq_model_type", type=str,
                         choices=["vit_b", "vit_l", "vit_h"],
                         default="vit_h",
                         help="SAM-HQ model size (only used if sam_version=hq)")
-        
+
 
         parser.add_argument("--conceptnet_timeout", type=float, default=4)
         parser.add_argument("--conceptnet_max_retry", type=int, default=3)
@@ -2809,25 +3623,30 @@ def parse_preproc_args():
             help="Tieni SOLO gli oggetti esplicitamente citati nella domanda \
                   e filtra le relazioni sul tipo richiesto"
         )
-        
-        parser.add_argument("--display_relation_labels", action="store_true", 
+
+        parser.add_argument("--display_relation_labels", action="store_true",
                     help="Show relation labels on arrows/lines")
+        parser.add_argument("--resolve_overlaps", action="store_true",
+                    help="Evita sovrapposizioni tra label di oggetti e relazioni")
+
 
 
         parser.add_argument("--save_image_only", action="store_true",
                     help="Save only the processed image, skip graph files")
-        parser.add_argument("--skip_graph", action="store_true", 
+        parser.add_argument("--skip_graph", action="store_true",
                     help="Skip saving graph files (.gpickle, .json)")
         parser.add_argument("--skip_prompt", action="store_true",
                     help="Skip saving scene prompt file")
         parser.add_argument("--skip_visualization", action="store_true",
                     help="Skip saving the visualization image")
+        parser.add_argument("--export_preproc_only", action="store_true",
+            help="Salva anche un'immagine con SOLO segmentazioni/etichette/relazioni (senza sfondo)")
 
         parser.add_argument("--enable_detection_cache", action="store_true",
                        help="Enable detection caching for faster reprocessing")
         parser.add_argument("--max_cache_size", type=int, default=100,
                           help="Maximum number of cached detection results")
-        parser.add_argument("--clear_cache", action="store_true", 
+        parser.add_argument("--clear_cache", action="store_true",
                           help="Clear detection cache before starting")
 
 
@@ -2878,16 +3697,28 @@ if __name__ == "__main__":
         "sam_hq_model_type": getattr(args, 'sam_hq_model_type', 'vit_h'),
         "display_legend": not args.no_legend,
         "aggressive_pruning": args.aggressive_pruning,
-        "display_legend": not args.no_legend,
-        "aggressive_pruning": args.aggressive_pruning,
         "save_image_only": args.save_image_only,
         "skip_graph": args.skip_graph,
         "skip_prompt": args.skip_prompt,
         "skip_visualization": args.skip_visualization,
         "enable_detection_cache": args.enable_detection_cache,
         "max_cache_size": args.max_cache_size,
+        "seg_fill_alpha":      getattr(args, "seg_fill_alpha", 0.6),
+        "bbox_linewidth":      getattr(args, "bbox_linewidth", 2.0),
+        "resolve_overlaps": args.resolve_overlaps,
+        "close_holes": args.close_holes,
+        "hole_kernel": args.hole_kernel,
+        "min_hole_area": args.min_hole_area,
+        "export_preproc_only": args.export_preproc_only,
+        "show_segmentation": False if args.no_masks or args.no_instances else args.show_segmentation,
+        "show_bboxes":       False if args.no_bboxes or args.no_instances else True,
+        "obj_fontsize_inside":  args.obj_fontsize_inside,
+        "obj_fontsize_outside": args.obj_fontsize_outside,
+        "rel_fontsize":         args.rel_fontsize,
+        "legend_fontsize":      args.legend_fontsize,
+        "rel_arrow_linewidth":      args.rel_arrow_linewidth,
+        "rel_arrow_mutation_scale": args.rel_arrow_mutation_scale,
     }
-
 
     if args.clear_cache:
         # Crea un'istanza temporanea per pulire la cache
@@ -2898,7 +3729,7 @@ if __name__ == "__main__":
             temp_preproc._det_cache.clear()
         print("[INFO] Detection cache cleared")
         del temp_preproc  # Libera la memoria
-        
+
         # Se clear_cache è l'unico scopo, esci
         if not (args.input_path or args.json_file or args.dataset):
             print("[INFO] Cache cleared. No processing requested.")

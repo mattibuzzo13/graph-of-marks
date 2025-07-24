@@ -27,7 +27,7 @@ MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
 NUM_INSTANCES           ?= -1
-LABEL_MODE			 ?= original
+LABEL_MODE			 ?= numeric
 
 # Detection thresholds
 OWL_THRESHOLD           ?= 0.3
@@ -62,6 +62,7 @@ MODEL_NAME              ?= llava-hf/llava-1.5-7b-hf
 IMAGE_DIR               ?= $(OUTPUT_FOLDER)
 USE_VLLM                ?= true
 PROMPT_TEMPLATE         ?= 'Answer with only one word.\nQuestion: {question}\nAnswer:'
+SINGLE_QUESTION         ?=
 BATCH_SIZE              ?= 1
 MAX_LENGTH              ?= 512
 TEMPERATURE             ?= 0.2
@@ -80,7 +81,7 @@ DATASET_DIR             ?=
 all: preprocess
 
 #------------------------------------------------------------------------------
-# Preconditions
+# Preconditions - aggiornati
 #------------------------------------------------------------------------------
 check_input:
 ifeq ($(strip $(JSON_FILE))$(strip $(INPUT_PATH)),)
@@ -88,8 +89,8 @@ ifeq ($(strip $(JSON_FILE))$(strip $(INPUT_PATH)),)
 endif
 
 check_vqa_input:
-ifndef VQA_INPUT_FILE
-	$(error VQA_INPUT_FILE is required for run_vqa)
+ifeq ($(strip $(VQA_INPUT_FILE))$(strip $(IMAGE_FOLDER)),)
+	$(error You must set either VQA_INPUT_FILE or IMAGE_FOLDER for run_vqa)
 endif
 
 check_dataset:
@@ -164,6 +165,7 @@ run_vqa:
 	  --max_images $(MAX_IMAGES) \
 	  --max_questions_per_image $(MAX_QUESTIONS_PER_IMAGE) \
 	  --prompt_template "$(PROMPT_TEMPLATE)" \
+	  $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
 	  $(if $(filter true,$(SKIP_PREPROCESSING)),--skip-preprocessing) \
 	  $(if $(filter true,$(USE_VLLM)),--use_vllm) \
 	  $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
@@ -174,6 +176,9 @@ run_vqa:
 	  --max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
 	  --min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
 	  --fill_segmentation \
+	  --display_labels \
+	  --display_relationships \
+	  --display_relation_labels \
 	  --label_mode "$(LABEL_MODE)" \
 	  --show_segmentation \
 	  --sam_version $(SAM_VERSION) \
@@ -182,6 +187,12 @@ run_vqa:
 	  --aggressive_pruning \
 	  --save_image_only \
 	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
+#------------------------------------------------------------------------------
+# Nuovo target per processare cartelle di immagini
+#------------------------------------------------------------------------------
+run_vqa_folder:
+	@[ -n "$(IMAGE_FOLDER)" ] || (echo "ERROR: IMAGE_FOLDER è richiesto"; exit 1)
+	$(MAKE) run_vqa IMAGE_FOLDER=$(IMAGE_FOLDER) VQA_INPUT_FILE= FIXED_PROMPT="$(FIXED_PROMPT)"
 
 
 #------------------------------------------------------------------------------
@@ -234,6 +245,11 @@ help:
 	@echo "  make preprocess_owlvit/preprocess_yolo/preprocess_detectron2"
 	@echo "  make batch_preprocess"
 	@echo "  make run_vqa VQA_INPUT_FILE=.. [ARGS]"
+	@echo "  make run_vqa_folder IMAGE_FOLDER=.. [FIXED_PROMPT=..] [ARGS]"
 	@echo "  make download_coco/download_gqa/download_refcoco/download_vqa/download_textvqa"
 	@echo "  make install_deps/install_vqa_deps"
 	@echo "  make clean"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make run_vqa_folder IMAGE_FOLDER=/path/to/images FIXED_PROMPT='Describe this image'"
+	@echo "  make run_vqa_folder IMAGE_FOLDER=/path/to/images SKIP_PREPROCESSING=true"
