@@ -203,29 +203,29 @@ def preprocess_for_qa(
 ) -> str:
     """
     Restituisce il path dell'immagine annotata.
-    SEMPRE crea un nuovo preprocessor per ogni domanda.
+    SEMPRE usa nome originale + hash domanda per il matching.
+    Ritorna il path effettivo scritto dal pre-processor se disponibile,
+    altrimenti effettua un fallback di ricerca.
     """
-    import hashlib, os
-    img_pil = load_image(image_path)
+    import hashlib, os, glob
 
-    base   = os.path.splitext(os.path.basename(image_path))[0]
-    qhash  = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
+    base  = os.path.splitext(os.path.basename(image_path))[0]
+    qhash = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
     out_fn = f"{base}_{qhash}_output.jpg"
     os.makedirs(output_folder, exist_ok=True)
     out_path = os.path.join(output_folder, out_fn)
 
-    # -------- CONTROLLO SE IL FILE ESISTE GIÀ --------
+    # 1) Cache: se già esiste e non forzo, riusa
     if os.path.exists(out_path) and not force_reprocess:
         logger.info(f"Immagine preprocessata già esistente: {out_path}")
         return out_path
 
-    # -------- USA LA CONFIGURAZIONE BASE SE DISPONIBILE -------
+    # 2) Costruisci config per il pre-processor
     if base_config:
         cfg = base_config.copy()
     else:
         cfg = preproc_cli_args.__dict__.copy() if preproc_cli_args else {}
 
-    # Aggiorna solo i parametri specifici per questa domanda
     cfg.update({
         "input_path": None,
         "output_folder": output_folder,
@@ -234,20 +234,56 @@ def preprocess_for_qa(
         "question": question,
     })
 
-    # Crea SEMPRE un nuovo preprocessor
-    # Usa l'istanza passata (per cache e performance) o creane una nuova
+    # 3) Istanzia/aggiorna pre-processor (nuovo per domanda, o riusa con stato aggiornato)
     if preproc_obj is None:
         fresh_preproc = ImageGraphPreprocessor(cfg)
     else:
         fresh_preproc = preproc_obj
-        # Aggiorna i campi variabili run-time
         fresh_preproc.config.update(cfg)
         fresh_preproc.question = question
         fresh_preproc._build_question_semantics()
 
+    # 4) Esegui preprocessing
+    img_pil = load_image(image_path)
+    ret = fresh_preproc.process_single_image(
+        img_pil, f"{base}_{qhash}", det_cache_key=f"{base}_{qhash}"
+    )
 
-    # -------- esegui il preprocessing con la domanda corretta -----------
-    fresh_preproc.process_single_image(img_pil, f"{base}_{qhash}", det_cache_key=f"{base}_{qhash}")
+    # 5) Se il pre-processor ritorna un path/dict con path valido, usalo
+    if isinstance(ret, str) and os.path.exists(ret):
+        return ret
+    if isinstance(ret, dict):
+        for k in ("output_path", "annotated_path", "output", "annotated"):
+            p = ret.get(k)
+            if p and os.path.exists(p):
+                return p
+
+    # 6) Se il path "atteso" esiste, ritorna quello
+    if os.path.exists(out_path):
+        return out_path
+
+    # 7) Fallback di ricerca (matching su nome originale + hash)
+    candidate_dirs = list({
+        output_folder,
+        fresh_preproc.config.get("output_folder", ""),
+        "output_images"  # molti pre-processor usano questo default
+    })
+    candidate_dirs = [d for d in candidate_dirs if d]
+
+    # cerca varianti di nome/estensione
+    patterns = [
+        f"{base}_{qhash}_output.*",
+        f"{base}_{qhash}*annotat*.*",   # in caso cambi suffisso
+        f"{base}_{qhash}*.*",           # ultima spiaggia
+    ]
+    for d in candidate_dirs:
+        for pat in patterns:
+            matches = glob.glob(os.path.join(d, pat))
+            if matches:
+                logger.info(f"Usato fallback: {matches[0]}")
+                return matches[0]
+
+    logger.warning(f"File annotato non trovato: atteso {out_path}. Ritorno il path atteso comunque.")
     return out_path
 
 
@@ -791,7 +827,67 @@ def get_preprocessed_path(image_path: str,
     out_fn = f"{base}_{qhash}_output.jpg"
     return os.path.join(output_folder, out_fn)
 
+def get_scene_graph_path(image_path: str, question: str, preproc_folder: str) -> str:
+    """
+    Costruisce il path al file scene_graph.json per una coppia (immagine, domanda).
+    """
+    import hashlib, os
+    
+    base = os.path.splitext(os.path.basename(image_path))[0]
+    qhash = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
+    sg_filename = f"{base}_{qhash}_graph.json"   # <— invece di _scene_graph.json
+    return os.path.join(preproc_folder, sg_filename)
 
+
+def load_scene_graph(scene_graph_path: str) -> str:
+    with open(scene_graph_path, "r", encoding="utf-8") as f:
+        sg = json.load(f)
+    nodes = sg.get("nodes", [])
+    links = sg.get("links", sg.get("edges", []))
+    id2lab = {i: n.get("label", "unknown") for i, n in enumerate(nodes)}
+    # escludi eventuale nodo 'scene'
+    scene_ids = {i for i, n in enumerate(nodes) if n.get("label") == "scene"}
+    objs = [n.get("label","unknown") for i,n in enumerate(nodes) if i not in scene_ids]
+    txt = "Scene Graph Information:\n"
+    if objs: txt += "Objects: " + ", ".join(objs) + "\n"
+    if links:
+        txt += "Spatial Relationships:\n"
+        for e in links:
+            u, v = e.get("source"), e.get("target")
+            if u in scene_ids: continue
+            # puoi derivare relazioni grezze da attributi, se presenti
+            rel = e.get("relation", "near")
+            txt += f"- {id2lab.get(u,'?')} {rel} {id2lab.get(v,'?')}\n"
+    return txt + "\n"
+
+    
+    try:
+        with open(scene_graph_path, "r", encoding="utf-8") as f:
+            sg_data = json.load(f)
+        
+        # Converte il scene graph in formato testuale
+        sg_text = "Scene Graph Information:\n"
+        
+        # Oggetti rilevati
+        if "objects" in sg_data:
+            sg_text += "Objects: "
+            objects = [obj.get("label", "unknown") for obj in sg_data["objects"]]
+            sg_text += ", ".join(objects) + "\n"
+        
+        # Relazioni spaziali
+        if "relationships" in sg_data:
+            sg_text += "Spatial Relationships:\n"
+            for rel in sg_data["relationships"]:
+                subj = rel.get("subject", "unknown")
+                pred = rel.get("predicate", "unknown")
+                obj = rel.get("object", "unknown")
+                sg_text += f"- {subj} {pred} {obj}\n"
+        
+        return sg_text + "\n"
+        
+    except Exception as e:
+        logger.warning(f"Failed to load scene graph from {scene_graph_path}: {e}")
+        return ""
 
 # ---------------------------------------------------------------------------
 # VQA runner with QA preprocessing
@@ -810,8 +906,11 @@ def run_vqa(
     preproc_args: Optional[Dict[str, Any]] = None,
     image_dir: Optional[str] = None,
     skip_preproc: bool = False,
-    preproc_obj: Optional[ImageGraphPreprocessor] = None
+    preproc_obj: Optional[ImageGraphPreprocessor] = None,
+    include_scene_graph: bool = False
 ) -> List[Dict[str, Any]]:
+    import os, glob, hashlib
+
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
 
     # 1) Carico eventuali risultati già salvati
@@ -842,59 +941,51 @@ def run_vqa(
                     continue
 
                 # ---- memory cleanup periodico ----
-                # ogni 50 iterazioni, libera CPU e GPU cache
                 if len(processed) > 0 and len(processed) % 50 == 0:
-                    # raccogli il garbage Python
                     gc.collect()
-                    # libera la GPU cache
                     torch.cuda.empty_cache()
-                    # opzionale: log dell'utilizzo di RAM
                     mem = psutil.virtual_memory()
                     logger.info(f"Memory cleanup: RAM used {mem.percent}%")
                 # -----------------------------------
 
-                # 4) Preprocessing (salta se skip_preproc)
-                # ─────────────────────────────────────────────────────────────
-                #  SKIP‑PREPROCESSING: cerco *qualsiasi* immagine utilizzabile
-                # ─────────────────────────────────────────────────────────────
+                # Precalcolo base+hash per i fallback
+                base   = os.path.splitext(os.path.basename(ex.image_path))[0]
+                qhash  = hashlib.md5(ex.question.encode("utf-8")).hexdigest()[:8]
+
+                # 4) Preprocessing (o ricerca immagine) ----------------------
                 if skip_preproc:
-                    # ①  prova il file convenzionale ..._output.jpg
+                    # ① file convenzionale ..._output.jpg in preproc_folder
                     processed_img = get_preprocessed_path(
                         ex.image_path, ex.question, preproc_folder
                     )
 
                     if not os.path.exists(processed_img):
-                        # ②  prova un RAW esplicito (quello indicato nel JSON)
+                        # ② prova RAW esplicito (dal JSON)
                         raw_img = ex.image_path
                         if image_dir and not os.path.isabs(raw_img):
                             raw_img = os.path.join(image_dir, raw_img)
 
-                        # ③  se non c’è, prova qualunque <basename>_*.jpg|png
-                        if not os.path.exists(raw_img):
-                            base   = os.path.splitext(os.path.basename(ex.image_path))[0]
+                        if os.path.exists(raw_img):
+                            processed_img = raw_img
+                        else:
+                            # ③ qualunque <basename>_*.jpg|png in orig/preproc_folder
                             parent = os.path.dirname(raw_img) or "."
-                            # cerca sia nella cartella originale sia in preproc_folder
                             cand_patterns = [
-                                os.path.join(parent,        f"{base}_*.jpg"),
-                                os.path.join(parent,        f"{base}_*.png"),
-                                os.path.join(preproc_folder,f"{base}_*.jpg"),
-                                os.path.join(preproc_folder,f"{base}_*.png"),
+                                os.path.join(parent,         f"{base}_*.jpg"),
+                                os.path.join(parent,         f"{base}_*.png"),
+                                os.path.join(preproc_folder, f"{base}_*.jpg"),
+                                os.path.join(preproc_folder, f"{base}_*.png"),
                             ]
                             matches = []
                             for p in cand_patterns:
                                 matches.extend(glob.glob(p))
-
                             if matches:
-                                processed_img = matches[0]         # primo match
+                                processed_img = matches[0]
                             else:
                                 raise FileNotFoundError(
                                     f"Could not find an image for {ex.image_path} "
-                                    f"(looked for *_output.jpg, raw path, "
-                                    f"or generic <base>_*.jpg|png)."
+                                    f"(looked for *_output.jpg, raw path, or <base>_*.jpg|png)."
                                 )
-                        else:
-                            processed_img = raw_img
-
                 else:
                     processed_img = preprocess_for_qa(
                         ex.image_path, ex.question,
@@ -905,8 +996,53 @@ def run_vqa(
                         base_config=preproc_args.__dict__ if preproc_args else None
                     )
 
-                # 5) Generazione della risposta
-                prompt = prompt_tpl.format(question=ex.question)
+                # 4b) Fallback robusto se il file non esiste dove atteso -----
+                if not os.path.exists(processed_img):
+                    patterns = [f"{base}_{qhash}_output.*", f"{base}_{qhash}*.*"]
+                    candidate_dirs = [
+                        preproc_folder,
+                        "output_images",                        # default frequente dei pre-processor
+                        os.path.dirname(processed_img) or ".",  # dove ha provato a scrivere
+                    ]
+                    found = None
+                    for d in candidate_dirs:
+                        for pat in patterns:
+                            matches = glob.glob(os.path.join(d, pat))
+                            if matches:
+                                found = matches[0]
+                                break
+                        if found:
+                            break
+                    if found:
+                        logger.info(f"Usato fallback immagine: {found}")
+                        processed_img = found
+                    else:
+                        raise FileNotFoundError(
+                            f"Preprocessed image not found for {ex.image_path} ({base}_{qhash})."
+                        )
+
+                # 5) Caricamento dello scene graph (se richiesto) ------------
+                scene_graph_text = ""
+                if include_scene_graph:
+                    # path atteso
+                    sg_path = get_scene_graph_path(ex.image_path, ex.question, preproc_folder)
+
+                    # fallback: cerca anche in output_images
+                    if not os.path.exists(sg_path):
+                        alt = get_scene_graph_path(ex.image_path, ex.question, "output_images")
+                        if os.path.exists(alt):
+                            sg_path = alt
+
+                    if os.path.exists(sg_path):
+                        scene_graph_text = load_scene_graph(sg_path)
+                    else:
+                        logger.info(f"Scene graph non trovato per {base}_{qhash} (ok, continuo senza).")
+
+                # 6) Costruzione prompt (non sovrascrivere!) ------------------
+                base_prompt = prompt_tpl.format(question=ex.question)
+                prompt = f"{scene_graph_text}{base_prompt}" if scene_graph_text else base_prompt
+
+                # 7) Generazione ----------------------------------------------
                 t0 = time.time()
                 ans = model.generate(prompt, image_path=processed_img)
                 torch.cuda.empty_cache()
@@ -914,11 +1050,12 @@ def run_vqa(
                 if "Answer:" in ans:
                     ans = ans.rsplit("Answer:", 1)[-1].strip().strip('"')
 
-                # 6) Aggiungo ai risultati e segno come processato
+                # 8) Salvataggio record ---------------------------------------
                 out_record = {
                     **ex.to_dict(),
                     "generated_answer": ans,
-                    "processing_time": time.time() - t0
+                    "processing_time": time.time() - t0,
+                    "used_scene_graph": bool(scene_graph_text)
                 }
                 results.append(out_record)
                 processed.add(key)
@@ -928,6 +1065,7 @@ def run_vqa(
             json.dump(results, f, indent=2, ensure_ascii=False)
 
     return results
+
 
 
 # ---------------------------------------------------------------------------
@@ -994,12 +1132,17 @@ def parse_args():
         action="store_true",
         help="Esegui solo il preprocessing, senza caricare il modello e senza inference"
     )
-
+    ap.add_argument(
+        "--include_scene_graph",
+        action="store_true",
+        help="Include scene graph information in the model input during inference"
+    )
 
     args, _ = ap.parse_known_args()
 
     return args
 
+    
 def main():
     args = parse_args()
 
@@ -1017,11 +1160,11 @@ def main():
 
         preproc_cfg = preproc_args.__dict__.copy()
         preproc_cfg.update({
-            "input_path": None,               # passeremo PIL, non path
-            "preproc_device": args.device,    # "cuda" o "cpu"
-            "apply_question_filter": not preproc_args.disable_question_filter,
-            "display_legend":     not preproc_args.no_legend,
-            "aggressive_pruning":  preproc_args.aggressive_pruning,
+            "input_path": None,               
+            "preproc_device": args.device,    
+            "apply_question_filter": not getattr(preproc_args, 'disable_question_filter', args.disable_question_filter),
+            "display_legend":     not getattr(preproc_args, 'no_legend', False),
+            "aggressive_pruning":  getattr(preproc_args, 'aggressive_pruning', False),
         })
 
         GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
@@ -1114,7 +1257,8 @@ def main():
         preproc_args=preproc_args,       # None se skip-preprocessing
         skip_preproc=args.skip_preprocessing,
         preproc_obj=GLOBAL_PREPROC,      # None se skip-preprocessing
-        image_dir=args.image_dir
+        image_dir=args.image_dir,
+        include_scene_graph=args.include_scene_graph
     )
 
     # ------------------------------------------------------------
@@ -1129,4 +1273,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

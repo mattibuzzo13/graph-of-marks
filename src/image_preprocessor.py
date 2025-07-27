@@ -1,4 +1,26 @@
 
+
+import gzip
+import hashlib
+import json
+import math
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import networkx as nx
+import nltk
+import numpy as np
+import os
+import pickle
+import psutil
+import re
+import requests
+import spacy
+import string
+import time
+import torch
+import urllib.parse
+import colorsys
 import os
 import gc
 import psutil
@@ -1472,15 +1494,23 @@ class ImageGraphPreprocessor:
             band_a = mask_a[ya0:ya1, :]
             band_b = mask_b[yb0:yb1, :]
 
-            contact = np.logical_and(band_a, band_b).any()
-            if not contact:
-                # prova con una dilatazione leggera
-                k = np.ones((3,3), np.uint8)
-                if not cv2.bitwise_and(
-                    cv2.dilate(band_a.astype(np.uint8), k),
-                    cv2.dilate(band_b.astype(np.uint8), k)
-                ).any():
-                    return False
+            # FIX: Assicurati che le bande abbiano la stessa altezza prima del logical_and
+            min_height = min(band_a.shape[0], band_b.shape[0])
+            if min_height > 0:
+                band_a = band_a[:min_height, :]
+                band_b = band_b[:min_height, :]
+                
+                contact = np.logical_and(band_a, band_b).any()
+                if not contact:
+                    # prova con una dilatazione leggera
+                    k = np.ones((3,3), np.uint8)
+                    dilated_a = cv2.dilate(band_a.astype(np.uint8), k)
+                    dilated_b = cv2.dilate(band_b.astype(np.uint8), k)
+                    if not cv2.bitwise_and(dilated_a, dilated_b).any():
+                        return False
+            else:
+                # Se le bande sono vuote, non possiamo verificare il contatto
+                pass
 
         # 5) profondità opzionale: A non deve essere molto più lontano della base
         if depth_a is not None and depth_b is not None:

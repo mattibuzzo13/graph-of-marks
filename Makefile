@@ -61,7 +61,7 @@ VQA_OUTPUT_FILE         ?= vqa_results.json
 MODEL_NAME              ?= llava-hf/llava-1.5-7b-hf
 IMAGE_DIR               ?= $(OUTPUT_FOLDER)
 USE_VLLM                ?= true
-PROMPT_TEMPLATE         ?= 'Answer with only one word.\nQuestion: {question}\nAnswer:'
+PROMPT_TEMPLATE         ?= 'Answer with only one word. Don't show me the reasoning but only the answer.\nQuestion: {question}\nAnswer:'
 SINGLE_QUESTION         ?=
 BATCH_SIZE              ?= 1
 MAX_LENGTH              ?= 512
@@ -71,6 +71,7 @@ TENSOR_PARALLEL_SIZE    ?= 1
 MAX_IMAGES              ?= -1
 MAX_QUESTIONS_PER_IMAGE ?= 3
 SKIP_PREPROCESSING       ?= false
+INCLUDE_SCENE_GRAPH     ?= false
 
 # Dataset download defaults
 DATASET                 ?=
@@ -158,35 +159,37 @@ run_vqa:
 	python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU memory: {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f}GB' if torch.cuda.is_available() else 'No CUDA')"
 	python3 src/qa_generation.py \
 	  --input_file $(VQA_INPUT_FILE) \
-	  --image_dir $(IMAGE_DIR) \
-	  --output_file $(VQA_OUTPUT_FILE) \
-	  --preproc_folder $(PREPROC_FOLDER) \
-	  --model_name $(MODEL_NAME) \
-	  --max_images $(MAX_IMAGES) \
-	  --max_questions_per_image $(MAX_QUESTIONS_PER_IMAGE) \
-	  --prompt_template "$(PROMPT_TEMPLATE)" \
-	  $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
-	  $(if $(filter true,$(SKIP_PREPROCESSING)),--skip-preprocessing) \
-	  $(if $(filter true,$(USE_VLLM)),--use_vllm) \
-	  $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
-	  --owl_threshold $(OWL_THRESHOLD) \
-	  --yolo_threshold $(YOLO_THRESHOLD) \
-	  --detectron_threshold $(DETECTRON_THRESHOLD) \
-	  --max_relations $(MAX_RELATIONS) \
-	  --max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
-	  --min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
-	  --fill_segmentation \
-	  --display_labels \
-	  --display_relationships \
-	  --display_relation_labels \
-	  --label_mode "$(LABEL_MODE)" \
-	  --show_segmentation \
-	  --sam_version $(SAM_VERSION) \
-	  --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
-	  --no_legend \
-	  --aggressive_pruning \
-	  --save_image_only \
-	  $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
+      --image_dir $(IMAGE_DIR) \
+      --output_file $(VQA_OUTPUT_FILE) \
+      --preproc_folder $(PREPROC_FOLDER) \
+      --model_name $(MODEL_NAME) \
+      --max_images $(MAX_IMAGES) \
+      --max_questions_per_image $(MAX_QUESTIONS_PER_IMAGE) \
+      --prompt_template "$(PROMPT_TEMPLATE)" \
+ 	  $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
+      $(if $(filter true,$(SKIP_PREPROCESSING)),--skip-preprocessing) \
+      $(if $(filter true,$(USE_VLLM)),--use_vllm) \
+      $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
+      $(if $(filter true,$(INCLUDE_SCENE_GRAPH)),--include_scene_graph) \
+      --owl_threshold $(OWL_THRESHOLD) \
+      --yolo_threshold $(YOLO_THRESHOLD) \
+      --detectron_threshold $(DETECTRON_THRESHOLD) \
+      --max_relations $(MAX_RELATIONS) \
+      --max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
+      --min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
+      --display_labels \
+      --display_relationships \
+      --display_relation_labels \
+      --label_mode "$(LABEL_MODE)" \
+      --show_segmentation \
+      --sam_version $(SAM_VERSION) \
+      --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
+      --no_legend \
+      --aggressive_pruning \
+      $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
+
+#      --save_image_only
+#       --fill_segmentation 
 #------------------------------------------------------------------------------
 # Nuovo target per processare cartelle di immagini
 #------------------------------------------------------------------------------
