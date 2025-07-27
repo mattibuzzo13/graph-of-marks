@@ -1,5 +1,4 @@
 
-
 import gzip
 import hashlib
 import json
@@ -19,7 +18,6 @@ import spacy
 import string
 import time
 import torch
-import urllib.parse
 import colorsys
 import os
 import gc
@@ -103,8 +101,6 @@ except ImportError:
 
 import colorsys, random
 
-_CONCEPTNET_CACHE: dict[tuple[str,str], list[dict]] = {}
-
 BASIC_COLORS = [
      "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
      "#ffff33", "#a65628", "#f781bf", "#999999", "#1f78b4",
@@ -186,6 +182,11 @@ class ImageGraphPreprocessor:
         self.show_bboxes       = config.get("show_bboxes", True)
         self.rel_arrow_lw = config.get("rel_arrow_linewidth", 3.5)
         self.rel_arrow_ms = config.get("rel_arrow_mutation_scale", 22)
+        # --- label inside/out ---
+        self.min_area_ratio_inside   = config.get("min_area_ratio_inside", 0.006)  # 0.6% dell’immagine
+        self.inside_label_margin_px  = config.get("inside_label_margin_px", 6)     # margine di sicurezza
+        self.min_solidity_inside     = config.get("min_solidity_inside", 0.45)     # evita oggetti sottili
+        self.measure_text_with_renderer = config.get("measure_text_with_renderer", False)
 
 
         self.obj_fs_in  = config.get("obj_fontsize_inside", 12)   # dentro al box
@@ -222,11 +223,6 @@ class ImageGraphPreprocessor:
         self.start_index = config.get("start_index", -1)
         self.end_index = config.get("end_index", -1)
         self.num_instances = config.get("num_instances", -1)
-
-        self.cnet_timeout   = config.get("conceptnet_timeout", 4)   # secondi
-        self.cnet_max_retry = config.get("conceptnet_max_retry", 3)
-        self.cnet_skip_on_fail = config.get("conceptnet_skip_on_fail", True)
-
 
         self.sam_version = config.get("sam_version", "1")
         self.sam_hq_model_type = config.get("sam_hq_model_type", "vit_h")
@@ -1844,8 +1840,11 @@ class ImageGraphPreprocessor:
                         "distance": dist
                     })
 
-
         return rels
+
+
+
+
 
 
     def _limit_relationships_per_object(self, relationships: list, boxes: list) -> list:
@@ -2052,6 +2051,92 @@ class ImageGraphPreprocessor:
     ###########################################################################
     # VISUALIZATION
     ###########################################################################
+    def _estimate_text_px(self, ax, text: str, fontsize_px: int):
+        """
+        Stima della dimensione del testo (w,h) in pixel.
+        Se self.measure_text_with_renderer=True usa una misura precisa col renderer.
+        """
+        if self.measure_text_with_renderer and ax is not None:
+            # Misura precisa creando un Text invisibile
+            t = ax.text(0, 0, text, fontsize=fontsize_px, alpha=0)
+            fig = ax.figure
+            fig.canvas.draw()  # necessario per avere un renderer valido
+            renderer = fig.canvas.get_renderer()
+            bb = t.get_window_extent(renderer=renderer)  # in pixel
+            t.remove()
+            return bb.width, bb.height
+        # Stima euristica (più veloce, nessun draw):
+        # coefficiente medio per font sans-serif: ~0.55-0.6 * fontsize per carattere
+        w_txt = 0.55 * fontsize_px * max(1, len(text))
+        h_txt = 1.6  * fontsize_px
+        return w_txt, h_txt
+
+    def _rmax_inside_mask(self, mask_bool: np.ndarray) -> float:
+        """
+        Ritorna il raggio massimo (in px) del cerchio inscritto nella maschera.
+        Implementato con cv2.distanceTransform su una maschera binaria pulita.
+        """
+        m = mask_bool.astype(np.uint8)
+        if m.max() == 255:  # tollera maschere 0/255
+            m //= 255
+        # piccolo closing per fessure (opzionale ma aiuta la stabilità)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+        # distance transform euclideo (cv2.DIST_L2)
+        dist = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+        return float(dist.max())
+
+    def is_large_enough_for_inside_label(self, image_pil, box, mask_dict, label_text, ax=None):
+        """
+        Decide se posizionare la label all'interno dell'oggetto:
+          1) area normalizzata minima (bbox o maschera);
+          2) r_max (DT) >= semidiagonale_bbox_testo + margine;
+          3) oggetti troppo sottili/seghettati (solidity) → esterno.
+        """
+        W, H = image_pil.size
+        area_img = W * H
+
+        x1, y1, x2, y2 = map(int, box)
+        w, h = x2 - x1, y2 - y1
+        area_bbox = w * h
+
+        mask_bool = None
+        area_obj = area_bbox
+        solidity = min(w, h) / max(1, max(w, h))  # proxy quando manca la maschera
+
+        if mask_dict is not None and "segmentation" in mask_dict and mask_dict["segmentation"] is not None:
+            mask_bool = mask_dict["segmentation"].astype(bool)
+            area_mask = int(mask_bool.sum())
+            if area_mask > 0:
+                area_obj = area_mask
+                # solidity = area_maschera / area_bbox
+                solidity = area_mask / max(1.0, float(area_bbox))
+
+        # 1) filtro grossolano: area normalizzata
+        area_norm = area_obj / float(area_img)
+        if area_norm < self.min_area_ratio_inside:
+            return False
+
+        # 2) stima bbox del testo e condizione geometrica su r_max
+        w_txt, h_txt = self._estimate_text_px(ax, label_text, self.obj_fs_in)
+        half_diag = 0.5 * ((w_txt ** 2 + h_txt ** 2) ** 0.5)
+        margin_px = self.inside_label_margin_px
+
+        if mask_bool is not None:
+            r_max = self._rmax_inside_mask(mask_bool)
+        else:
+            # fallback prudente senza maschera: usa min(w,h)/2 ridotto
+            r_max = 0.5 * min(w, h) * 0.7  # α=0.7 per prudenza
+
+        if r_max < (half_diag + margin_px):
+            return False
+
+        # 3) penalizza oggetti sottili/poco compatti
+        if solidity < self.min_solidity_inside:
+            return False
+
+        return True
+
 
     def _shrink_segment_px(self, p0, p1, shrink_px, ax):
         """
@@ -2424,7 +2509,17 @@ class ImageGraphPreprocessor:
                 if self.show_confidence else vis_labels[i]
             )
 
-            if self.display_labels and area_px > 9000:
+            place_inside = False
+            if self.display_labels:
+                place_inside = self.is_large_enough_for_inside_label(
+                    image_pil=image,
+                    box=box,
+                    mask_dict=best_mask,   # può essere None: gestito dal metodo
+                    label_text=lbl_txt,
+                    ax=ax
+                )
+
+            if self.display_labels and place_inside:
                 font_col = self._text_color_for_bg(color)
                 ax.text(
                     (x_min + x_max) / 2,
@@ -2500,7 +2595,6 @@ class ImageGraphPreprocessor:
 
                 # testo relazione "pulito"
                 raw = rel.get('relation_raw', rel['relation'])
-                if raw.startswith('cnet_'): raw = raw[5:]
                 if re.search(r'[A-Z]', raw):
                     raw = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw)
                 else:
@@ -3543,11 +3637,6 @@ def parse_preproc_args():
                         default="vit_h",
                         help="SAM-HQ model size (only used if sam_version=hq)")
 
-
-        parser.add_argument("--conceptnet_timeout", type=float, default=4)
-        parser.add_argument("--conceptnet_max_retry", type=int, default=3)
-        parser.add_argument("--conceptnet_skip_on_fail", action="store_true")
-
         parser.add_argument("--no_legend",
                     action="store_true",
                     help="Disabilita la legenda dei colori delle classi")
@@ -3638,8 +3727,8 @@ if __name__ == "__main__":
         "skip_visualization": args.skip_visualization,
         "enable_detection_cache": args.enable_detection_cache,
         "max_cache_size": args.max_cache_size,
-        "seg_fill_alpha":      getattr(args, "seg_fill_alpha", 0.6),
-        "bbox_linewidth":      getattr(args, "bbox_linewidth", 2.0),
+        "seg_fill_alpha":      getattr(args, "seg_fill_alpha", 0.4),
+        "bbox_linewidth":      getattr(args, "bbox_linewidth", 1.5),
         "resolve_overlaps": args.resolve_overlaps,
         "close_holes": args.close_holes,
         "hole_kernel": args.hole_kernel,
