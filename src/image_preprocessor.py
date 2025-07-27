@@ -1,4 +1,5 @@
 
+
 import gzip
 import hashlib
 import json
@@ -176,11 +177,11 @@ class ImageGraphPreprocessor:
         self.display_legend = config.get("display_legend", True)
         self.text_outline_lw = config.get("text_outline_lw", 1.5)
         self.rel_text_outline_lw = config.get("rel_text_outline_lw", 1.2)
-        self.seg_fill_alpha    = config.get("seg_fill_alpha", 0.55)    # opacità riempimento
-        self.bbox_linewidth    = config.get("bbox_linewidth", 3.0)     # spessore bordi
+        self.seg_fill_alpha    = config.get("seg_fill_alpha", 0.3)    # opacità riempimento
+        self.bbox_linewidth    = config.get("bbox_linewidth", 2.0)     # spessore bordi
         self.resolve_overlaps = config.get("resolve_overlaps", True)
         self.show_bboxes       = config.get("show_bboxes", True)
-        self.rel_arrow_lw = config.get("rel_arrow_linewidth", 3.5)
+        self.rel_arrow_lw = config.get("rel_arrow_linewidth", 2.5)
         self.rel_arrow_ms = config.get("rel_arrow_mutation_scale", 22)
         # --- label inside/out ---
         self.min_area_ratio_inside   = config.get("min_area_ratio_inside", 0.006)  # 0.6% dell’immagine
@@ -197,7 +198,7 @@ class ImageGraphPreprocessor:
 
         # Additional toggles
         self.show_confidence = config.get("show_confidence", False)
-        self.display_relation_labels = config.get("display_relation_labels", True)
+        self.display_relation_labels = config.get("display_relation_labels", False)
 
         # Area filtering
         self.enable_area_filter = config.get("enable_area_filter", False)
@@ -2601,19 +2602,20 @@ class ImageGraphPreprocessor:
                     raw = raw.replace('_', ' ')
                 rel_text_str = raw.strip().title()
 
-                # Creo l'oggetto testo ORA (così può essere spostato da adjust_text)
-                t_rel = ax.text(
-                    mid_x, mid_y, rel_text_str,
-                    fontsize=self.rel_fs,
-                    ha='center', va='center',
-                    color='black',
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.85,
-                              edgecolor=color, linewidth=0.6),
-                    zorder=5
-                )
+                # CREA IL TESTO SOLO SE ABILITATO
+                if self.display_relation_labels:
+                    t_rel = ax.text(
+                        mid_x, mid_y, rel_text_str,
+                        fontsize=self.rel_fs,
+                        ha='center', va='center',
+                        color='black',
+                        bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.85,
+                                  edgecolor=color, linewidth=0.6),
+                        zorder=5
+                    )
+                    rel_texts.append(t_rel)
+                    rel_anchor_pts.append(((start_x + end_x) / 2, (start_y + end_y) / 2))
 
-                rel_texts.append(t_rel)
-                rel_anchor_pts.append(((start_x + end_x) / 2, (start_y + end_y) / 2))
 
                 # Salvo tutto quello che mi serve per le frecce
                 rel_draw_data.append({
@@ -2640,9 +2642,14 @@ class ImageGraphPreprocessor:
             anchor_pts.append(pt)
 
         # dopo aver creato texts (etichette oggetti) e rel_texts (etichette relazioni):
-        all_texts   = texts + rel_texts
-        all_anchors = anchor_pts + rel_anchor_pts
-        rel_mask    = [False]*len(texts) + [True]*len(rel_texts)
+        if self.display_relation_labels:
+            all_texts   = texts + rel_texts
+            all_anchors = anchor_pts + rel_anchor_pts
+            rel_mask    = [False]*len(texts) + [True]*len(rel_texts)
+        else:
+            all_texts   = texts
+            all_anchors = anchor_pts
+            rel_mask    = [False]*len(texts)
 
         # Ordina: prima le etichette delle relazioni (True), poi quelle degli oggetti (False)
         order     = np.argsort(rel_mask)[::-1]
@@ -3727,7 +3734,7 @@ if __name__ == "__main__":
         "skip_visualization": args.skip_visualization,
         "enable_detection_cache": args.enable_detection_cache,
         "max_cache_size": args.max_cache_size,
-        "seg_fill_alpha":      getattr(args, "seg_fill_alpha", 0.4),
+        "seg_fill_alpha":      getattr(args, "seg_fill_alpha", 0.3),
         "bbox_linewidth":      getattr(args, "bbox_linewidth", 1.5),
         "resolve_overlaps": args.resolve_overlaps,
         "close_holes": args.close_holes,
