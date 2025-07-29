@@ -1,5 +1,4 @@
 
-
 import gzip
 import hashlib
 import json
@@ -59,6 +58,9 @@ import difflib
 from ensemble_boxes import weighted_boxes_fusion
 import re
 from matplotlib.transforms import Bbox
+from huggingface_hub import download_url_to_file
+from nltk.corpus import wordnet
+from spacy.matcher import PhraseMatcher
 
 
 # SAM-HQ (nuovo import)
@@ -374,6 +376,11 @@ class ImageGraphPreprocessor:
         # Ed ecco la chiamata che ora funziona correttamente:
         self._build_question_semantics()
 
+        # Estrai e memorizza quale oggetto è il soggetto della domanda
+        self.question_subject = self._extract_question_subject()
+        # container degli indici corrispondenti a quel soggetto nell’immagine
+        self._question_subject_idxs = set()
+
         print(f"[DEBUG] display_legend: {self.display_legend}")
         print(f"[DEBUG] aggressive_pruning: {self.aggressive_pruning}")
         print(f"[DEBUG] apply_question_filter: {self.apply_question_filter}")
@@ -688,6 +695,21 @@ class ImageGraphPreprocessor:
                     break
 
         return list(found_rel_types)
+
+    def _extract_question_subject(self):
+        """
+        Estrae il nominal subject (nsubj / nsubjpass) dalla domanda
+        e lo canonicalizza via alias2label.
+        """
+        if not self.question.strip():
+            return None
+        doc = self.nlp(self.question)
+        for tok in doc:
+            if tok.dep_ in ("nsubj", "nsubjpass") and tok.pos_ in ("NOUN", "PROPN"):
+                base = tok.lemma_.lower()
+                return self.alias2label.get(base, base)
+        return None
+
 
     ###########################################################################
     # MODEL LOADING
@@ -1278,7 +1300,7 @@ class ImageGraphPreprocessor:
                 "vase","scissors","teddy bear","hair drier","toothbrush","fence","grass","table","house","plate",
                 "lamp","street lamp","sign","glass","plant","hedge","sofa","light","window","curtain","candle","tree",
                 "sky","cloud","road","hat","glove","helmet","mountain","snow","sunglasses","bow tie","picture",
-                "printer","monitor","picture","pillow","stone","glasses","wheel","building","bridge","tomato"
+                "printer","monitor","picture","pillow","stone","glasses","wheel","building","bridge","tomato", "phone"
             ]
             dets_owl = self._run_owlvit_detection(image_pil, owl_queries)
             det_counts["OWL-ViT"] = len(dets_owl)
@@ -1906,32 +1928,61 @@ class ImageGraphPreprocessor:
 
     def _drop_inverse_duplicates(self, relationships: list[dict]) -> list[dict]:
         """
-        Elimina relazioni ridondanti/inverse: se esiste A->B = 'in_front_of',
-        scarta B->A = 'behind' (e viceversa), idem per left/right, above/below, ecc.
-        Tiene la prima che trova (puoi cambiare la logica di priorità se vuoi).
+        Elimina relazioni inverse ridondanti. Se in conflitto, preferisce
+        quelle che coinvolgono il soggetto della domanda (se esistente)
+        e applica anche i vincoli min/max per oggetto.
         """
         inverse = {
-            "left_of":      "right_of",
-            "right_of":     "left_of",
-            "above":        "below",
-            "below":        "above",
-            "in_front_of":  "behind",
-            "behind":       "in_front_of",
-            "on_top_of":    "below",   # opzionale, togli se non vuoi legarla a 'below'
-            "under":        "on_top_of"  # se usi 'under' da qualche parte
+            "left_of": "right_of", "right_of": "left_of",
+            "above": "below",    "below": "above",
+            "in_front_of": "behind", "behind": "in_front_of",
+            "on_top_of": "below", "under": "on_top_of",
         }
-
         kept = []
-        seen = set()  # memorizza triple (src, tgt, rel)
+        from collections import defaultdict
+        count_per_src = defaultdict(int)
+        subj_idxs = getattr(self, "_question_subject_idxs", set())
+
         for r in relationships:
             i, j, rel = r["src_idx"], r["tgt_idx"], r["relation"]
             inv_rel = inverse.get(rel)
-            # se esiste già l'inverso, salta
-            if inv_rel and (j, i, inv_rel) in seen:
+            # trova esistente inverso
+            existing = None
+            if inv_rel:
+                for rr in kept:
+                    if rr["src_idx"] == j and rr["tgt_idx"] == i and rr["relation"] == inv_rel:
+                        existing = rr
+                        break
+            if existing:
+                # priorità al soggetto
+                r_hits = (i in subj_idxs) or (j in subj_idxs)
+                e_hits = (existing["src_idx"] in subj_idxs) or (existing["tgt_idx"] in subj_idxs)
+                if r_hits and not e_hits:
+                    kept.remove(existing)
+                    count_per_src[existing["src_idx"]] -= 1
+                    kept.append(r)
+                    count_per_src[i] += 1
+                elif e_hits and not r_hits:
+                    pass  # scarta r
+                else:
+                    # applica regole min/max
+                    cnt_i, cnt_j = count_per_src[i], count_per_src[j]
+                    min_r, max_r = self.min_relations_per_object, self.max_relations_per_object
+                    if cnt_i >= max_r and cnt_j < max_r:
+                        pass
+                    elif cnt_j >= max_r and cnt_i < max_r:
+                        kept.remove(existing)
+                        count_per_src[existing["src_idx"]] -= 1
+                        kept.append(r)
+                        count_per_src[i] += 1
+                    # else lascia existing
                 continue
-            seen.add((i, j, rel))
+            # nessun conflitto, tieni r
             kept.append(r)
+            count_per_src[i] += 1
+
         return kept
+
 
 
     ###########################################################################
@@ -2661,7 +2712,7 @@ class ImageGraphPreprocessor:
         fig.canvas.draw()   # non draw_idle
 
         if self.resolve_overlaps:
-            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=None)
+            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=arrow_patches)
 
         # ---------- ORA disegna le frecce ----------
         if self.display_relationships and rel_draw_data:
@@ -3032,6 +3083,19 @@ class ImageGraphPreprocessor:
         fallback_seed_idx: int | None = None
         skip_label_nms = False                     # <- inizializziamo subito
 
+
+        # Individua quali box (nelle future labels_full) corrispondono al soggetto
+        # estratto dalla domanda, se presente
+        if self.question_subject:
+            subj = self.question_subject
+            # labels_full verrà popolato poco sotto; per ora teniamo il soggetto
+            # in attesa di riallinearlo dopo WBF
+            # segnaliamo che dovremo filtrarli: il mapping verrà rifatto più avanti
+            self._question_subject_idxs = set()
+        else:
+            self._question_subject_idxs = set()
+
+
         # ===================================================== 1) DETECTION + SAM
         if cache_key in self._det_cache and not self.config.get("aggressive_pruning"):
             print("[DBG]  using cached detections")
@@ -3068,6 +3132,15 @@ class ImageGraphPreprocessor:
             boxes_full, labels_full, scores_full = self._wbf_fusion(all_detections)
 
             labels_full = [self._canon_label(l) for l in labels_full]
+
+            # Ora che labels_full è canonizzato, calcola gli indici del soggetto
+            if self.question_subject:
+                base = self.question_subject
+                self._question_subject_idxs = {
+                    i for i, lab in enumerate(labels_full)
+                    if lab.split("_")[0].lower() == base
+                }
+
 
             # ---------- riallinea la lista all_detections alla fusione ----------
             all_detections = [
@@ -3768,4 +3841,3 @@ if __name__ == "__main__":
 
     preproc = ImageGraphPreprocessor(config)
     preproc.run()
-

@@ -61,7 +61,7 @@ VQA_OUTPUT_FILE         ?= vqa_results.json
 MODEL_NAME              ?= llava-hf/llava-1.5-7b-hf
 IMAGE_DIR               ?= $(OUTPUT_FOLDER)
 USE_VLLM                ?= true
-PROMPT_TEMPLATE         ?= 'Answer with only one word. Don't show me the reasoning but only the answer.\nQuestion: {question}\nAnswer:'
+PROMPT_TEMPLATE         ?= 'Answer with only one word. Consider that the graph given in input is the same that is reported in the image. Refer to it beyond the image preprocessed to answer to the question. \nQuestion: {question}\nAnswer:'
 SINGLE_QUESTION         ?=
 BATCH_SIZE              ?= 1
 MAX_LENGTH              ?= 512
@@ -161,6 +161,7 @@ run_vqa:
 	  --input_file $(VQA_INPUT_FILE) \
       --image_dir $(IMAGE_DIR) \
       --output_file $(VQA_OUTPUT_FILE) \
+	  --output_folder $(OUTPUT_FOLDER) \
       --preproc_folder $(PREPROC_FOLDER) \
       --model_name $(MODEL_NAME) \
       --max_images $(MAX_IMAGES) \
@@ -180,6 +181,9 @@ run_vqa:
       --display_labels \
       --display_relationships \
       --display_relation_labels \
+	  --resolve_overlaps \
+	  --close_holes \
+	  --hole_kernel 1 \
       --label_mode "$(LABEL_MODE)" \
       --show_segmentation \
       --sam_version $(SAM_VERSION) \

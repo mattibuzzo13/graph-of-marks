@@ -177,12 +177,13 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   run_vqa \
     VQA_INPUT_FILE=/workdir/VQAV2.json \
     IMAGE_DIR=/input_images \
+    OUTPUT_FOLDER=/output_preprocessed \
     MAX_IMAGES=-1 \
     MAX_QUESTIONS_PER_IMAGE=-1 \
     PREPROC_FOLDER=/output_preprocessed \
     VQA_OUTPUT_FILE=/workdir/VQAV2_GoM_with_scene_graph.json \
     USE_VLLM=false \
-    MODEL_NAME=omkarthawakar/LlamaV-o1 \
+    MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
     TEMPERATURE=0.3 \
     MAX_LENGTH=512 \
     TOP_P=0.9 \

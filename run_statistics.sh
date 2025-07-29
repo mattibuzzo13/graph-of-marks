@@ -8,10 +8,10 @@ HOST_HF_CACHE="$HOME/.cache/huggingface"
 GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 
 # Dataset e modello
-DATASET="RefCOCOg"
-MODEL_NAME="omkarthawakar/LlamaV-o1"
-INPUT_IMAGES="/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/GoM"
-OUTPUT_BASE="/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg"
+DATASET="VQAV2"
+MODEL_NAME="google/gemma-3-4b-it"
+INPUT_IMAGES="/datasets/VisualQA_Datasets/Preprocessing/VQAV2/GoM_relation_labeled"
+OUTPUT_BASE="/datasets/VisualQA_Datasets/Preprocessing/VQAV2"
 
 # Parametri di sampling per diversi run
 declare -a TEMPERATURES=(0.1 0.3 0.5)

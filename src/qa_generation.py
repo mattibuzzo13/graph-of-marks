@@ -1155,6 +1155,12 @@ def main():
         preproc_cfg   = {}
         GLOBAL_PREPROC = None
     else:
+        if ImageGraphPreprocessor is None:
+            raise ImportError(
+                "ImageGraphPreprocessor non disponibile. "
+                "Usa --skip-preprocessing per saltare il preprocessing o "
+                "verifica che il modulo image_preprocessor sia installato correttamente."
+            )
         # ◼️ Pipeline completa  →  parsiamo i flag extra e creiamo il pre-processor
         preproc_args = parse_preproc_args()
 
