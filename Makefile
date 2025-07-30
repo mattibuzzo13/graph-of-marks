@@ -22,12 +22,12 @@ DETECTORS               ?= owlvit,yolov8,detectron2
 # Relationship extraction settings
 RELATIONSHIP_TYPE       ?= all
 MAX_RELATIONS           ?= 10
-MAX_RELATIONS_PER_OBJECT ?= 1
+MAX_RELATIONS_PER_OBJECT ?= 2
 MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
 NUM_INSTANCES           ?= -1
-LABEL_MODE			 ?= numeric
+LABEL_MODE			 ?= original
 
 # Detection thresholds
 OWL_THRESHOLD           ?= 0.3
@@ -157,7 +157,7 @@ batch_preprocess:
 #------------------------------------------------------------------------------
 run_vqa:
 	python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU memory: {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f}GB' if torch.cuda.is_available() else 'No CUDA')"
-	python3 src/qa_generation.py \
+	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/qa_generation.py \
 	  --input_file $(VQA_INPUT_FILE) \
       --image_dir $(IMAGE_DIR) \
       --output_file $(VQA_OUTPUT_FILE) \
@@ -186,6 +186,8 @@ run_vqa:
 	  --hole_kernel 1 \
       --label_mode "$(LABEL_MODE)" \
       --show_segmentation \
+	  --fill_segmentation \
+	  --inference_image raw \
       --sam_version $(SAM_VERSION) \
       --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
       --no_legend \

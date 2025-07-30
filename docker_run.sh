@@ -171,17 +171,17 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
   -v "$(pwd)":/workdir \
   -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
-  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/QWEN_GoM_with_scene_output":/output_preprocessed \
+  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/QWEN_GoM_originalwith_scene_output":/output_preprocessed \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   "$IMAGE_NAME" \
   run_vqa \
     VQA_INPUT_FILE=/workdir/VQAV2.json \
     IMAGE_DIR=/input_images \
     OUTPUT_FOLDER=/output_preprocessed \
-    MAX_IMAGES=-1 \
-    MAX_QUESTIONS_PER_IMAGE=-1 \
+    MAX_IMAGES=100 \
+    MAX_QUESTIONS_PER_IMAGE=1 \
     PREPROC_FOLDER=/output_preprocessed \
-    VQA_OUTPUT_FILE=/workdir/VQAV2_GoM_with_scene_graph.json \
+    VQA_OUTPUT_FILE=/workdir/VQAV2_GoM_related_Baseline_with_scene_graph.json \
     USE_VLLM=false \
     MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
     TEMPERATURE=0.3 \

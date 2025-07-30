@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # ---------- pure-python requirements ---------------------------------------
 COPY /build/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade numba
  
 # ---------- Torch / CUDA extensions ----------------------------------------
 RUN TORCH_CUDA_ARCH_LIST="8.6;8.9+PTX" \
@@ -48,16 +49,20 @@ RUN TORCH_CUDA_ARCH_LIST="8.6;8.9+PTX" \
 # ---------- SpaCy model -----------------------------------------------------
 # Fix per conflitti NumPy/SciPy e installa blis richiesto da thinc
 RUN pip install --no-cache-dir \
-        numpy>=1.25.0 \
         scipy>=1.11.4 \
         blis \
         iopath>=0.1.10 && \
     pip install --no-cache-dir --force-reinstall spacy && \
     python -m spacy download en_core_web_md
 
+RUN pip install --no-cache-dir numpy==2.2.0 numba && \
+    pip install --no-cache-dir --upgrade bitsandbytes
+
 # ---------- project sources -------------------------------------------------
 WORKDIR /workdir
 COPY . .
+
+ENV PYTHONPATH=/workdir/src:/workdir:${PYTHONPATH}
 
 ENTRYPOINT ["make"]
 CMD ["-f", "/workdir/Makefile"]

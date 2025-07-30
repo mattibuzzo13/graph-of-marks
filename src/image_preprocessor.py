@@ -58,7 +58,6 @@ import difflib
 from ensemble_boxes import weighted_boxes_fusion
 import re
 from matplotlib.transforms import Bbox
-from huggingface_hub import download_url_to_file
 from nltk.corpus import wordnet
 from spacy.matcher import PhraseMatcher
 
@@ -1120,6 +1119,66 @@ class ImageGraphPreprocessor:
 
         return "; ".join(nodes_txt + edges_txt)
 
+    def _fmt_triple(self, s: str, rel: str, t: str) -> str:
+        return f"{s} ---> ({rel}) --> {t}"
+
+
+    def _graph_to_triples_text(self, G: nx.DiGraph) -> str:
+        """
+        Restituisce un blocco 'Triples:' con una tripla per riga,
+        invertendo l’ordine (target ← relation ← source) per le
+        relazioni puramente spaziali - esattamente come fa il
+        rendering delle frecce.
+        """
+        # ──────────────────────────────────────────────────────────────
+        #  nodi “scene” da ignorare
+        # ──────────────────────────────────────────────────────────────
+        scene_ids = {n for n, d in G.nodes(data=True) if d.get("label") == "scene"}
+
+        def lab(i: int) -> str:               # helper etichetta nodo
+            return G.nodes[i].get("label", "unknown")
+
+        # relazioni che richiedono inversione (stessa logica del drawing)
+        SPATIAL_KEYS = (
+            "left_of", "right_of", "above", "below",
+            "on_top_of", "under", "in_front_of", "behind"
+        )
+
+        lines: list[str] = []
+
+        for u, v, e in G.edges(data=True):
+            # salta gli archi collegati al nodo 'scene'
+            if u in scene_ids or v in scene_ids:
+                continue
+
+            # ───── ricava / ricostruisci la relazione ─────
+            rel = e.get("relation")
+            if not rel:
+                dx = e.get("dx_norm", None)
+                dy = e.get("dy_norm", None)
+                iou = float(e.get("iou", 0.0) or 0.0)
+                if iou > 0.25:
+                    rel = "overlaps"
+                elif dx is not None and dy is not None:
+                    if abs(dx) >= abs(dy):
+                        rel = "right_of" if dx > 0 else "left_of"
+                    else:
+                        rel = "below" if dy > 0 else "above"
+                else:
+                    rel = "near"
+
+            # ───── inversione della direzione, se rel. spaziale ─────
+            if any(k in str(rel).lower() for k in SPATIAL_KEYS):
+                src_label, tgt_label = lab(v), lab(u)   # inverti
+            else:
+                src_label, tgt_label = lab(u), lab(v)   # mantieni
+
+            lines.append(self._fmt_triple(src_label, rel, tgt_label))
+
+        return "Triples:\n" + "\n".join(lines) + ("\n" if lines else "")
+
+
+
     def _save_gpickle(self, G, path):
         """
         Salva il grafo in formato pickle (.gpickle) senza fare affidamento
@@ -1134,6 +1193,16 @@ class ImageGraphPreprocessor:
         with gzip.open(path, "wb") if path.endswith(".gz") else open(path, "wb") as f:
             pickle.dump(G, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    def _save_triples_text(self, scene_graph: nx.DiGraph, image_name: str) -> None:
+        """
+        Salva la rappresentazione testuale del grafo (Triples: …) per l'immagine.
+        Viene chiamato ogni volta che esiste un scene_graph.
+        """
+        triples_txt = self._graph_to_triples_text(scene_graph)
+        triples_path = os.path.join(self.output_folder, f"{image_name}_graph_triples.txt")
+        with open(triples_path, "w", encoding="utf-8") as f:
+            f.write(triples_txt)
+        print(f"[INFO] Saved triples to {triples_path}")
 
 
 
@@ -1518,7 +1587,7 @@ class ImageGraphPreprocessor:
             if min_height > 0:
                 band_a = band_a[:min_height, :]
                 band_b = band_b[:min_height, :]
-                
+
                 contact = np.logical_and(band_a, band_b).any()
                 if not contact:
                     # prova con una dilatazione leggera
@@ -2340,11 +2409,23 @@ class ImageGraphPreprocessor:
         Sistema le sovrapposizioni tra testi e (opzionalmente) altri artist (frecce).
         avoid_artists: lista di patch/artist da evitare (es. frecce).
         """
+        
+        if not texts:
+            return
+        
         from adjustText import adjust_text
         if avoid_artists is None:
             avoid_artists = []
 
         # 1) primo passaggio con adjust_text includendo le frecce
+        default_arrowprops = dict(
+                arrowstyle="-",    # linea senza punte
+                color="gray",
+                alpha=0.45,
+                shrinkA=4, shrinkB=4,
+                linewidth=1,
+                linestyle="dotted"
+            )
         adjust_text(
             texts,
             x=[p[0] for p in anchors],
@@ -2352,11 +2433,11 @@ class ImageGraphPreprocessor:
             ax=ax,
             only_move={"points": "y", "text": "xy"},
             force_text=0.8,
-            expand_text=(1.35, 1.35),
-            expand_points=(1.25, 1.25),
-            expand_objects=(1.25, 1.25),
+            expand_text=(1.55, 1.55),
+            expand_points=(1.45, 1.45),
+            expand_objects=(1.45, 1.45),
             add_objects=avoid_artists,
-            arrowprops=None
+            arrowprops=default_arrowprops
         )
 
         fig = ax.figure
@@ -2405,6 +2486,39 @@ class ImageGraphPreprocessor:
             # ricalcola bbs aggiornati
             text_bbs = [t.get_window_extent(renderer=renderer).expanded(1.02, 1.08) for t in texts]
 
+    def _nearest_point_on_arrow(self, ax, arrow, x, y):
+        """
+        Ritorna il punto della curva della freccia (in data coords)
+        più vicino al punto (x, y) passato.
+        """
+        # Path della freccia in coordinate display
+        path = arrow.get_path().transformed(arrow.get_transform())
+        verts_disp = path.vertices
+
+        # Converti in coordinate "data"
+        verts_data = ax.transData.inverted().transform(verts_disp)
+
+        p = np.array([x, y], dtype=float)
+        best = None
+        best_d2 = float("inf")
+
+        # distanza punto-segmento
+        for i in range(len(verts_data) - 1):
+            a = verts_data[i]
+            b = verts_data[i + 1]
+            ab = b - a
+            ab2 = float(np.dot(ab, ab))
+            if ab2 == 0.0:
+                proj = a
+            else:
+                t = np.clip(np.dot(p - a, ab) / ab2, 0.0, 1.0)
+                proj = a + t * ab
+            d2 = float(np.sum((p - proj) ** 2))
+            if d2 < best_d2:
+                best_d2 = d2
+                best = proj
+
+        return tuple(best) if best is not None else (x, y)
 
 
     def _visualize_detections_and_relationships_with_auto_masks(
@@ -2580,7 +2694,13 @@ class ImageGraphPreprocessor:
                     ha="center", va="center",
                     fontsize=self.obj_fs_in,
                     color=font_col,
-                    bbox=dict(facecolor=color, alpha=0.6, lw=0),
+                    bbox=dict(
+                        facecolor=color,
+                        alpha=0.6,
+                        edgecolor=color,
+                        linewidth=2.0,
+                        boxstyle="round,pad=0.25"
+                    ),
                     zorder=7,
                 )
             elif self.display_labels:
@@ -2661,7 +2781,7 @@ class ImageGraphPreprocessor:
                         ha='center', va='center',
                         color='black',
                         bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.85,
-                                  edgecolor=color, linewidth=0.6),
+                                  edgecolor=color, linewidth=2),
                         zorder=5
                     )
                     rel_texts.append(t_rel)
@@ -2685,7 +2805,13 @@ class ImageGraphPreprocessor:
                 pt[0], pt[1], text,
                 fontsize=self.obj_fs_out,
                 color=font_col,
-                bbox=dict(facecolor=color, alpha=0.6, lw=0),  # identico agli interni
+                bbox=dict(
+                    facecolor=color,
+                    alpha=0.6,
+                    edgecolor=color,
+                    linewidth=2.0,
+                    boxstyle="round,pad=0.25"
+                ),
                 zorder=7,
             )
 
@@ -2711,26 +2837,22 @@ class ImageGraphPreprocessor:
         # Serve per avere i bbox aggiornati
         fig.canvas.draw()   # non draw_idle
 
-        if self.resolve_overlaps:
-            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=arrow_patches)
 
-        # ---------- ORA disegna le frecce ----------
+
+        # Passo 1: risolvi testo↔testo (prima delle frecce)
+        if self.resolve_overlaps:
+            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=[])
+
+        # Passo 2: disegna le frecce
         if self.display_relationships and rel_draw_data:
             fig.canvas.draw()
-            renderer = fig.canvas.get_renderer()
-
-            # opzionale: accorcia di qualche pixel per non incollarsi ai testi
             SHRINK_PX = 6
-
             for d in rel_draw_data:
                 p0, p1 = d["src_pt"], d["tgt_pt"]
-                # accorcia il segmento alle estremità (evita di entrare nei box di testo)
                 p0, p1 = self._shrink_segment_px(p0, p1, SHRINK_PX, ax)
-
                 arrow = patches.FancyArrowPatch(
                     p0, p1,
-                    arrowstyle="->",
-                    color=d["color"],
+                    arrowstyle="->", color=d["color"],
                     linewidth=self.rel_arrow_lw,
                     connectionstyle=f"arc3,rad={d['rad']}",
                     mutation_scale=self.rel_arrow_ms,
@@ -2739,15 +2861,39 @@ class ImageGraphPreprocessor:
                 ax.add_patch(arrow)
                 arrow_patches.append(arrow)
 
-        # 3) ridisegna le linee che collegano posizione finale del testo al suo anchor
-        for t, pt, is_rel in zip(all_texts, all_anchors, rel_mask):
+        fig.canvas.draw()
+
+        # Passo 3: risolvi testo↔testo e testo↔frecce (ora arrow_patches è pieno)
+        if self.resolve_overlaps and (t_fix):
+            self._final_overlap_fix(ax, t_fix, a_fix, rm_fix, avoid_artists=arrow_patches)
+
+        # Passo 4: connector lines
+        # 4a) Etichette OGGETTO → ancora (come prima)
+        for t, pt in zip(texts, anchor_pts):
             ax.annotate(
                 "", xy=pt, xytext=t.get_position(),
-                arrowprops=dict(arrowstyle="-", color="gray",
-                                alpha=0.45, shrinkA=4, shrinkB=4,
-                                linewidth=1, linestyle="dotted" if is_rel else "-"),
+                arrowprops=dict(
+                    arrowstyle="-", color="gray",
+                    alpha=0.45, shrinkA=4, shrinkB=4,
+                    linewidth=1, linestyle="-",
+                ),
                 zorder=6,
             )
+
+        # 4b) Etichette RELAZIONE → punto più vicino sulla FRECCIA
+        if self.display_relationships and self.display_relation_labels and rel_texts and arrow_patches:
+            for t_rel, arrow in zip(rel_texts, arrow_patches):
+                xt, yt = t_rel.get_position()
+                near_pt = self._nearest_point_on_arrow(ax, arrow, xt, yt)
+                ax.annotate(
+                    "", xy=near_pt, xytext=(xt, yt),
+                    arrowprops=dict(
+                        arrowstyle="-", color="gray",
+                        alpha=0.45, shrinkA=4, shrinkB=4,
+                        linewidth=1, linestyle="dotted",  # relazioni: linea tratteggiata
+                    ),
+                    zorder=6,
+                )
 
 
         # ---------- legenda rapida --------------------------------------
@@ -3079,6 +3225,11 @@ class ImageGraphPreprocessor:
         print(f"\n[PROCESS] {image_name}")
         t0 = time.time()
 
+        if self.config.get("force_save_triples", False):
+            self.config["skip_graph"] = False
+            self.config["skip_prompt"] = False
+            self.config["save_image_only"] = False
+
         # ------------------------------------------------------------------ init
         fallback_seed_idx: int | None = None
         skip_label_nms = False                     # <- inizializziamo subito
@@ -3268,18 +3419,28 @@ class ImageGraphPreprocessor:
             skip_prompt = self.config.get("skip_prompt", False) or save_image_only
             skip_visualization = self.config.get("skip_visualization", False)
 
+            self._save_triples_text(scene_graph, image_name)
+
+            # File del grafo (gpickle/json) solo se non skippati
             if not skip_graph:
-                self._save_gpickle(scene_graph,
-                    os.path.join(self.output_folder, f"{image_name}_graph.gpickle"))
-                with open(os.path.join(self.output_folder,
-                                    f"{image_name}_graph.json"), "w") as jf:
-                    json.dump(nx.node_link_data(scene_graph), jf)
+                self._save_gpickle(
+                    scene_graph,
+                    os.path.join(self.output_folder, f"{image_name}_graph.gpickle")
+                )
+                with open(os.path.join(self.output_folder, f"{image_name}_graph.json"), "w") as jf:
+                   # converter che trasforma np.generic in built-in
+                   def _np_converter(o):
+                       import numpy as _np
+                       if isinstance(o, _np.generic):
+                           return o.item()
+                       raise TypeError(f"Type {type(o)} not serializable")
 
-            if not skip_prompt:
-                with open(os.path.join(self.output_folder,
-                                    f"{image_name}_scene_prompt.txt"), "w") as fp:
-                    fp.write(self._to_prompt(scene_graph))
-
+                   json.dump(
+                       nx.node_link_data(scene_graph),
+                       jf,
+                       default=_np_converter,
+                       indent=2
+                   )
             if not skip_visualization or save_image_only:
                 self._visualize_detections_and_relationships_with_auto_masks(
                     image=image_pil,
@@ -3455,12 +3616,23 @@ class ImageGraphPreprocessor:
                 os.path.join(self.output_folder, f"{image_name}_graph.gpickle")
             )
             with open(os.path.join(self.output_folder, f"{image_name}_graph.json"), "w") as jf:
-                json.dump(nx.node_link_data(scene_graph), jf)
+               # stesso converter usato sopra
+               def _np_converter(o):
+                   import numpy as _np
+                   if isinstance(o, _np.generic):
+                       return o.item()
+                   raise TypeError(f"Type {type(o)} not serializable")
+
+               json.dump(
+                   nx.node_link_data(scene_graph),
+                   jf,
+                   default=_np_converter,
+                   indent=2
+               )
 
         # Salva prompt solo se non skippato
-        if not skip_prompt:
-            with open(os.path.join(self.output_folder, f"{image_name}_scene_prompt.txt"), "w") as fp:
-                fp.write(self._to_prompt(scene_graph))
+        self._save_triples_text(scene_graph, image_name)
+
 
         # Salva visualizzazione solo se non skippata
         if not skip_visualization:
@@ -3659,15 +3831,15 @@ def parse_preproc_args():
         parser.add_argument("--display_labels", action="store_true")
         parser.add_argument("--display_relationships", action="store_true")
         parser.add_argument("--show_segmentation", action="store_true")
-        parser.add_argument("--seg_fill_alpha", type=float, default=0.55,
+        parser.add_argument("--seg_fill_alpha", type=float, default=0.3,
                             help="Opacità del riempimento delle maschere")
-        parser.add_argument("--bbox_linewidth", type=float, default=3.0,
+        parser.add_argument("--bbox_linewidth", type=float, default=2.0,
                             help="Spessore del bordo dei bounding box")
 
-        parser.add_argument("--obj_fontsize_inside",  type=int, default=8)
-        parser.add_argument("--obj_fontsize_outside", type=int, default=8)
-        parser.add_argument("--rel_fontsize",         type=int, default=8)
-        parser.add_argument("--legend_fontsize",      type=int, default=8)
+        parser.add_argument("--obj_fontsize_inside",  type=int, default=12)
+        parser.add_argument("--obj_fontsize_outside", type=int, default=12)
+        parser.add_argument("--rel_fontsize",         type=int, default=12)
+        parser.add_argument("--legend_fontsize",      type=int, default=10)
 
         parser.add_argument("--rel_arrow_linewidth",      type=float, default=2)
         parser.add_argument("--rel_arrow_mutation_scale", type=float, default=22)
@@ -3692,7 +3864,7 @@ def parse_preproc_args():
         # Relazioni geometriche
         parser.add_argument("--overlap_thresh", type=float, default=0.3)
         parser.add_argument("--margin",         type=int,   default=20)
-        parser.add_argument("--min_distance",   type=float, default=1)
+        parser.add_argument("--min_distance",   type=float, default=5)
         parser.add_argument("--max_distance",   type=float, default=20000)
 
         # SAM
@@ -3841,3 +4013,4 @@ if __name__ == "__main__":
 
     preproc = ImageGraphPreprocessor(config)
     preproc.run()
+

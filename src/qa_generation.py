@@ -1,5 +1,4 @@
 
-
 from __future__ import annotations
 import torch.multiprocessing as mp
 # Imposta solo una volta lo start method "spawn" per evitare leak di semafori e segfault
@@ -242,6 +241,12 @@ def preprocess_for_qa(
         fresh_preproc.config.update(cfg)
         fresh_preproc.question = question
         fresh_preproc._build_question_semantics()
+
+    # 🔧 assicura che l’istanza usi davvero la cartella voluta
+    if "output_folder" in cfg and cfg["output_folder"]:
+        fresh_preproc.output_folder = cfg["output_folder"]
+        os.makedirs(fresh_preproc.output_folder, exist_ok=True)
+
 
     # 4) Esegui preprocessing
     img_pil = load_image(image_path)
@@ -648,7 +653,7 @@ class HFVLModel:
             num_logits_to_keep=prefix
         )
         return self.processor.batch_decode(gen[:, prefix:], skip_special_tokens=True)[0].strip()
-        
+
     def _gen_llamav(self, prompt: str, image_path: Optional[str]):
         """Generazione per LlamaV-o1."""
         if image_path is None:
@@ -832,62 +837,154 @@ def get_scene_graph_path(image_path: str, question: str, preproc_folder: str) ->
     Costruisce il path al file scene_graph.json per una coppia (immagine, domanda).
     """
     import hashlib, os
-    
+
     base = os.path.splitext(os.path.basename(image_path))[0]
     qhash = hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
-    sg_filename = f"{base}_{qhash}_graph.json"   # <— invece di _scene_graph.json
+    sg_filename = f"{base}_{qhash}_graph_triples.txt"
     return os.path.join(preproc_folder, sg_filename)
 
 
 def load_scene_graph(scene_graph_path: str) -> str:
-    with open(scene_graph_path, "r", encoding="utf-8") as f:
-        sg = json.load(f)
-    nodes = sg.get("nodes", [])
-    links = sg.get("links", sg.get("edges", []))
-    id2lab = {i: n.get("label", "unknown") for i, n in enumerate(nodes)}
-    # escludi eventuale nodo 'scene'
-    scene_ids = {i for i, n in enumerate(nodes) if n.get("label") == "scene"}
-    objs = [n.get("label","unknown") for i,n in enumerate(nodes) if i not in scene_ids]
-    txt = "Scene Graph Information:\n"
-    if objs: txt += "Objects: " + ", ".join(objs) + "\n"
-    if links:
-        txt += "Spatial Relationships:\n"
-        for e in links:
-            u, v = e.get("source"), e.get("target")
-            if u in scene_ids: continue
-            # puoi derivare relazioni grezze da attributi, se presenti
-            rel = e.get("relation", "near")
-            txt += f"- {id2lab.get(u,'?')} {rel} {id2lab.get(v,'?')}\n"
-    return txt + "\n"
+    """
+    Restituisce un blocco di testo con una tripla per riga:
+    object1 ----> relation ----> object2
 
-    
+    Ordine di ricerca:
+    1) Se esiste un file testuale a fianco del JSON (p.es. ..._graph.txt o ..._graph_triples.txt),
+       usa direttamente quello (con intestazione 'Triples:' garantita).
+    2) Prova a caricare il JSON (node_link_data oppure {"objects","relationships"}).
+    3) Fallback: se il file letto contiene righe con '---->' lo riusa comunque come testo.
+    """
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ①  Se la path è già un .txt, prova a leggerlo direttamente
+    # ─────────────────────────────────────────────────────────────────────
+    if scene_graph_path.lower().endswith(".txt"):
+        try:
+            with open(scene_graph_path, "r", encoding="utf-8") as f:
+                txt = f.read()
+            txt = (txt if txt.lstrip().startswith("Triples:") else "Triples:\n" + txt)
+            if not txt.endswith("\n"):
+                txt += "\n"
+            return txt
+        except Exception as e:
+            logger.warning(f"Failed to read triples txt {scene_graph_path}: {e}")
+            return ""
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ②  Se è un .json (o altro), cerca prima eventuali TXT "gemelli"
+    #     Esempi cercati:
+    #       <base>.txt
+    #       <base>_triples.txt
+    #       ..._graph.json → ..._graph.txt / ..._graph_triples.txt
+    # ─────────────────────────────────────────────────────────────────────
+    import os
+    base, ext = os.path.splitext(scene_graph_path)
+    txt_candidates = [
+        base + ".txt",
+        base + "_triples.txt",
+    ]
+    # mapping tipico: *_graph.json → *_graph.txt / *_graph_triples.txt
+    if base.endswith("_graph"):
+        txt_candidates.append(base + ".txt")               # ..._graph.txt
+        txt_candidates.append(base + "_triples.txt")       # ..._graph_triples.txt
+    # mapping alternativo storico
+    txt_candidates.append(base.replace("_graph", "_scene_graph") + ".txt")
+
+    for tp in txt_candidates:
+        if os.path.exists(tp):
+            try:
+                with open(tp, "r", encoding="utf-8") as f:
+                    txt = f.read()
+                txt = (txt if txt.lstrip().startswith("Triples:") else "Triples:\n" + txt)
+                if not txt.endswith("\n"):
+                    txt += "\n"
+                return txt
+            except Exception as e:
+                logger.warning(f"Failed to read sibling triples txt {tp}: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ③  Prova come JSON (node_link_data oppure {"objects","relationships"})
+    # ─────────────────────────────────────────────────────────────────────
     try:
         with open(scene_graph_path, "r", encoding="utf-8") as f:
-            sg_data = json.load(f)
-        
-        # Converte il scene graph in formato testuale
-        sg_text = "Scene Graph Information:\n"
-        
-        # Oggetti rilevati
-        if "objects" in sg_data:
-            sg_text += "Objects: "
-            objects = [obj.get("label", "unknown") for obj in sg_data["objects"]]
-            sg_text += ", ".join(objects) + "\n"
-        
-        # Relazioni spaziali
-        if "relationships" in sg_data:
-            sg_text += "Spatial Relationships:\n"
-            for rel in sg_data["relationships"]:
-                subj = rel.get("subject", "unknown")
-                pred = rel.get("predicate", "unknown")
-                obj = rel.get("object", "unknown")
-                sg_text += f"- {subj} {pred} {obj}\n"
-        
-        return sg_text + "\n"
-        
+            sg = json.load(f)
     except Exception as e:
-        logger.warning(f"Failed to load scene graph from {scene_graph_path}: {e}")
+        logger.warning(f"Failed to load scene graph JSON from {scene_graph_path}: {e}")
+        # ③b Fallback: prova a leggerlo come testo libero con righe '---->'
+        try:
+            with open(scene_graph_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+            if "---->" in raw:
+                raw = raw if raw.lstrip().startswith("Triples:") else f"Triples:\n{raw}"
+                if not raw.endswith("\n"):
+                    raw += "\n"
+                return raw
+        except Exception:
+            pass
         return ""
+
+    lines: List[str] = []
+
+    # ─────────────────────────────
+    # ④ node_link_data (networkx)
+    # ─────────────────────────────
+    nodes = sg.get("nodes", None)
+    links = sg.get("links", sg.get("edges", None))
+    if nodes is not None and links is not None:
+        id2lab = {i: n.get("label", "unknown") for i, n in enumerate(nodes)}
+        scene_ids = {i for i, n in enumerate(nodes) if n.get("label") == "scene"}
+
+        for e in links:
+            u = e.get("source")
+            v = e.get("target")
+            if u in scene_ids or v in scene_ids:
+                continue
+
+            # Preferisci la relazione esplicita se presente
+            rel = e.get("relation")
+
+            # Altrimenti derivane una base da feature geometriche (fallback)
+            if not rel:
+                dx = e.get("dx_norm", None)
+                dy = e.get("dy_norm", None)
+                iou = float(e.get("iou", 0.0) or 0.0)
+                if iou > 0.25:
+                    rel = "overlaps"
+                elif dx is not None and dy is not None:
+                    if abs(dx) >= abs(dy):
+                        rel = "right_of" if dx > 0 else "left_of"
+                    else:
+                        rel = "below" if dy > 0 else "above"
+                else:
+                    rel = "near"
+
+            lines.append(f"{id2lab.get(u, '?')} ----> {rel} ----> {id2lab.get(v, '?')}")
+
+    # ─────────────────────────────
+    # ⑤ formato alternativo
+    #    {"objects":[...], "relationships":[...]}
+    # ─────────────────────────────
+    elif "relationships" in sg:
+        objs = sg.get("objects", [])
+        def lab(x):
+            if isinstance(x, int) and 0 <= x < len(objs):
+                return objs[x].get("label", f"obj_{x}")
+            return str(x)
+
+        for r in sg["relationships"]:
+            subj = r.get("subject", r.get("source", r.get("src", "?")))
+            obj  = r.get("object",  r.get("target", r.get("dst", "?")))
+            rel  = r.get("predicate", r.get("relation", r.get("rel", "related_to")))
+            lines.append(f"{lab(subj)} ----> {rel} ----> {lab(obj)}")
+
+    if not lines:
+        return ""
+
+    return "Triples:\n" + "\n".join(lines) + "\n"
+
+
+
 
 # ---------------------------------------------------------------------------
 # VQA runner with QA preprocessing
@@ -907,7 +1004,8 @@ def run_vqa(
     image_dir: Optional[str] = None,
     skip_preproc: bool = False,
     preproc_obj: Optional[ImageGraphPreprocessor] = None,
-    include_scene_graph: bool = False
+    include_scene_graph: bool = False,
+    inference_image: str = "preprocessed",
 ) -> List[Dict[str, Any]]:
     import os, glob, hashlib
 
@@ -1021,6 +1119,16 @@ def run_vqa(
                             f"Preprocessed image not found for {ex.image_path} ({base}_{qhash})."
                         )
 
+                # 4c) Selezione immagine per l'inference
+                raw_img = ex.image_path
+                if image_dir and not os.path.isabs(raw_img):
+                    raw_img = os.path.join(image_dir, raw_img)
+
+                inference_img = processed_img if inference_image == "preprocessed" else raw_img
+                if not os.path.exists(inference_img):
+                    raise FileNotFoundError(f"Image for inference not found: {inference_img}")
+
+
                 # 5) Caricamento dello scene graph (se richiesto) ------------
                 scene_graph_text = ""
                 if include_scene_graph:
@@ -1044,7 +1152,8 @@ def run_vqa(
 
                 # 7) Generazione ----------------------------------------------
                 t0 = time.time()
-                ans = model.generate(prompt, image_path=processed_img)
+                ans = model.generate(prompt, image_path=inference_img)
+
                 torch.cuda.empty_cache()
 
                 if "Answer:" in ans:
@@ -1055,8 +1164,11 @@ def run_vqa(
                     **ex.to_dict(),
                     "generated_answer": ans,
                     "processing_time": time.time() - t0,
-                    "used_scene_graph": bool(scene_graph_text)
+                    "used_scene_graph": bool(scene_graph_text),
+                    "inference_image_type": inference_image,
+                    "inference_image_path": inference_img,
                 }
+
                 results.append(out_record)
                 processed.add(key)
 
@@ -1138,11 +1250,19 @@ def parse_args():
         help="Include scene graph information in the model input during inference"
     )
 
+    ap.add_argument(
+        "--inference_image",
+        choices=["preprocessed", "raw"],
+        default="preprocessed",
+        help="Immagine da passare al modello durante l'inference."
+    )
+
+
     args, _ = ap.parse_known_args()
 
     return args
 
-    
+
 def main():
     args = parse_args()
 
@@ -1155,23 +1275,20 @@ def main():
         preproc_cfg   = {}
         GLOBAL_PREPROC = None
     else:
-        if ImageGraphPreprocessor is None:
-            raise ImportError(
-                "ImageGraphPreprocessor non disponibile. "
-                "Usa --skip-preprocessing per saltare il preprocessing o "
-                "verifica che il modulo image_preprocessor sia installato correttamente."
-            )
         # ◼️ Pipeline completa  →  parsiamo i flag extra e creiamo il pre-processor
         preproc_args = parse_preproc_args()
 
         preproc_cfg = preproc_args.__dict__.copy()
         preproc_cfg.update({
-            "input_path": None,               
-            "preproc_device": args.device,    
+            "input_path": None,
+            "preproc_device": args.device,
             "apply_question_filter": not getattr(preproc_args, 'disable_question_filter', args.disable_question_filter),
             "display_legend":     not getattr(preproc_args, 'no_legend', False),
             "aggressive_pruning":  getattr(preproc_args, 'aggressive_pruning', False),
         })
+
+        if args.include_scene_graph:
+            preproc_cfg["force_save_triples"] = True
 
         GLOBAL_PREPROC = ImageGraphPreprocessor(preproc_cfg)
 
@@ -1264,7 +1381,8 @@ def main():
         skip_preproc=args.skip_preprocessing,
         preproc_obj=GLOBAL_PREPROC,      # None se skip-preprocessing
         image_dir=args.image_dir,
-        include_scene_graph=args.include_scene_graph
+        include_scene_graph=args.include_scene_graph,
+        inference_image=args.inference_image,
     )
 
     # ------------------------------------------------------------
