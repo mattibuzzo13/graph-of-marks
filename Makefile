@@ -22,7 +22,7 @@ DETECTORS               ?= owlvit,yolov8,detectron2
 # Relationship extraction settings
 RELATIONSHIP_TYPE       ?= all
 MAX_RELATIONS           ?= 10
-MAX_RELATIONS_PER_OBJECT ?= 2
+MAX_RELATIONS_PER_OBJECT ?= 3
 MIN_RELATIONS_PER_OBJECT ?= 1
 START_INDEX             ?= -1
 END_INDEX               ?= -1
@@ -30,24 +30,24 @@ NUM_INSTANCES           ?= -1
 LABEL_MODE			 ?= original
 
 # Detection thresholds
-OWL_THRESHOLD           ?= 0.3
+OWL_THRESHOLD           ?= 0.4
 YOLO_THRESHOLD          ?= 0.5
 DETECTRON_THRESHOLD     ?= 0.5
 
 # NMS parameters
 LABEL_NMS_THRESHOLD     ?= 0.5
-SEG_IOU_THRESHOLD       ?= 0.8
+SEG_IOU_THRESHOLD       ?= 0.9
 
 # Relationship inference parameters
 OVERLAP_THRESH          ?= 0.3
-MARGIN                  ?= 30
-MIN_DISTANCE            ?= 60
+MARGIN                  ?= 20
+MIN_DISTANCE            ?= 50
 MAX_DISTANCE            ?= 20000
 
 # SAM parameters
 POINTS_PER_SIDE         ?= 32
-PRED_IOU_THRESH         ?= 0.9
-STABILITY_SCORE_THRESH  ?= 0.95
+PRED_IOU_THRESH         ?= 0.8
+STABILITY_SCORE_THRESH  ?= 0.9
 MIN_MASK_REGION_AREA    ?= 100
 SAM_VERSION             ?= hq
 SAM_HQ_MODEL_TYPE       ?= vit_h
@@ -61,7 +61,7 @@ VQA_OUTPUT_FILE         ?= vqa_results.json
 MODEL_NAME              ?= llava-hf/llava-1.5-7b-hf
 IMAGE_DIR               ?= $(OUTPUT_FOLDER)
 USE_VLLM                ?= true
-PROMPT_TEMPLATE         ?= 'Answer with only one word. Consider that the graph given in input is the same that is reported in the image. Refer to it beyond the image preprocessed to answer to the question. \nQuestion: {question}\nAnswer:'
+PROMPT_TEMPLATE         ?= 'Answer with only one word. Answer directly without saying anything else. Consider to describe the object in the image. \nQuestion: {question}\nAnswer:'
 SINGLE_QUESTION         ?=
 BATCH_SIZE              ?= 1
 MAX_LENGTH              ?= 512
@@ -192,6 +192,7 @@ run_vqa:
       --sam_hq_model_type $(SAM_HQ_MODEL_TYPE) \
       --no_legend \
       --aggressive_pruning \
+	  --save_image_only \
       $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only)
 
 #      --save_image_only

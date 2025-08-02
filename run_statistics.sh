@@ -8,10 +8,11 @@ HOST_HF_CACHE="$HOME/.cache/huggingface"
 GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 
 # Dataset e modello
-DATASET="VQAV2"
-MODEL_NAME="google/gemma-3-4b-it"
-INPUT_IMAGES="/datasets/VisualQA_Datasets/Preprocessing/VQAV2/GoM_relation_labeled"
-OUTPUT_BASE="/datasets/VisualQA_Datasets/Preprocessing/VQAV2"
+DATASET="VQAV1"
+FOLDER_NAME="GoM_num_relation_labeled"
+MODEL_NAME="omkarthawakar/LlamaV-o1"
+INPUT_IMAGES="/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/$FOLDER_NAME"
+OUTPUT_BASE="/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg"
 
 # Parametri di sampling per diversi run
 declare -a TEMPERATURES=(0.1 0.3 0.5)
@@ -34,7 +35,7 @@ for i in "${!TEMPERATURES[@]}"; do
     SEED="${SEEDS[$i]}"
     
     # Nome univoco per questo run
-    RUN_NAME="${DATASET}_${MODEL_NAME//\//_}_temp${TEMP}_top${TOP_P}_len${MAX_LEN}_seed${SEED}"
+    RUN_NAME="${DATASET}_${FOLDER_NAME}_${MODEL_NAME//\//_}_temp${TEMP}_top${TOP_P}_len${MAX_LEN}_seed${SEED}"
     OUTPUT_DIR="${OUTPUT_BASE}/${RUN_NAME}_output"
     OUTPUT_FILE="/workdir/${RUN_NAME}_results.json"
     

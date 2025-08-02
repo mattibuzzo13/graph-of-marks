@@ -149,16 +149,16 @@ class ImageGraphPreprocessor:
 
         # Detectors & thresholds
         self.detectors_to_use = config.get("detectors_to_use", ["owlvit", "yolov8", "detectron2"])
-        self.threshold_owl = config.get("threshold_owl", 0.5)
-        self.threshold_yolo = config.get("threshold_yolo", 0.5)
-        self.threshold_detectron = config.get("threshold_detectron", 0.5)
+        self.threshold_owl = config.get("threshold_owl", 0.4)
+        self.threshold_yolo = config.get("threshold_yolo", 0.8)
+        self.threshold_detectron = config.get("threshold_detectron", 0.8)
 
 
         # Relationship settings
         self.max_relations = config.get("max_relations", 10)
         self.proportional_relations = config.get("proportional_relations", False)
         self.relation_ratio = config.get("relation_ratio", 1.0)
-        self.max_relations_per_object = config.get("max_relations_per_object", 1)
+        self.max_relations_per_object = config.get("max_relations_per_object", 3)
         self.min_relations_per_object = config.get("min_relations_per_object", 1)
         self.filter_relations_by_question = config.get("filter_relations_by_question", True)
         self.threshold_object_similarity   = config.get("threshold_object_similarity", 0.5)
@@ -203,16 +203,16 @@ class ImageGraphPreprocessor:
 
         # Area filtering
         self.enable_area_filter = config.get("enable_area_filter", False)
-        self.min_area = config.get("min_area", 500)
+        self.min_area = config.get("min_area", 200)
         self.max_area = config.get("max_area", None)
 
         # Overlap & NMS thresholds
         self.label_nms_threshold = config.get("label_nms_threshold", 0.5)
-        self.seg_iou_threshold = config.get("seg_iou_threshold", 0.8)
+        self.seg_iou_threshold = config.get("seg_iou_threshold", 0.7)
 
         # Relationship inference geometry
         self.margin = config.get("margin", 20)
-        self.min_distance = config.get("min_distance", 90)
+        self.min_distance = config.get("min_distance", 50)
         self.max_distance = config.get("max_distance", 20000)
 
         # SAM parameters
@@ -2432,10 +2432,10 @@ class ImageGraphPreprocessor:
             y=[p[1] for p in anchors],
             ax=ax,
             only_move={"points": "y", "text": "xy"},
-            force_text=0.8,
-            expand_text=(1.55, 1.55),
-            expand_points=(1.45, 1.45),
-            expand_objects=(1.45, 1.45),
+            force_text=0.6,
+            expand_text=(1.25, 1.25),
+            expand_points=(1.15, 1.15),
+            expand_objects=(1.15, 1.15),
             add_objects=avoid_artists,
             arrowprops=default_arrowprops
         )
