@@ -190,7 +190,7 @@ run_vqa: check_vqa_input
 	    --max_length $(MAX_LENGTH) \
 	    --temperature $(TEMPERATURE) \
 	    --top_p $(TOP_P) \
-		--prompt_template $(PROMPT_TEMPLATE) \
+        --prompt_template "$(PROMPT_TEMPLATE)" \
 	    $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
 	    $(if $(filter true,$(SKIP_PREPROCESSING)),--skip_preprocessing) \
 	    $(if $(filter true,$(USE_VLLM)),--use_vllm) \
