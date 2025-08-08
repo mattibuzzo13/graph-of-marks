@@ -64,5 +64,5 @@ COPY . .
 
 ENV PYTHONPATH=/workdir/src:/workdir:${PYTHONPATH}
 
-ENTRYPOINT ["make"]
-CMD ["-f", "/workdir/Makefile"]
+ENTRYPOINT ["make", "-f", "/workdir/Makefile"]
+CMD ["help"]

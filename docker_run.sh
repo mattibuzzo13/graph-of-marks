@@ -16,70 +16,15 @@ GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
 
 echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
+echo "🚀 Using modular igp pipeline"
 
-# Avvia il container in modo 'usa e getta' (--rm) e lancia batch_preprocess con i parametri specificati
-# COCO
-# docker run --rm ${GPU_FLAG} -v "$(pwd)":/workdir -v /datasets/VisualQA_Datasets/coco/images/train2017:/input_data -v "$(pwd)/output_images_COCO":/output_images "$IMAGE_NAME" batch_preprocess INPUT_PATH=/input_data OUTPUT_FOLDER=/output_images DETECTORS=owl,yolov8,detectron2
-# RefCOCOg
-# docker run --rm ${GPU_FLAG} -v "$(pwd)":/workdir -v /datasets/VisualQA_Datasets/refcoco/images/train2014:/input_data -v "$(pwd)/output_images_RefCOCOg":/output_images "$IMAGE_NAME" batch_preprocess INPUT_PATH=/input_data OUTPUT_FOLDER=/output_images DETECTORS=owl,yolov8,detectron2
-# VQA
-#docker run --rm ${GPU_FLAG} -v "$(pwd)":/workdir -v "$(pwd)/images":/input_data -v "$(pwd)/output_images_VQA_rel_filled":/output_images "$IMAGE_NAME" batch_preprocess INPUT_PATH=/input_data OUTPUT_FOLDER=/output_images DETECTORS=owl,yolov8,detectron2 NUM_INSTANCES=1000
-# TextVQA
-# docker run --rm ${GPU_FLAG} -v "$(pwd)":/workdir -v /datasets/VisualQA_Datasets/textvqa/images/train_images:/input_data -v "$(pwd)/output_images_TextVQA":/output_images "$IMAGE_NAME" batch_preprocess INPUT_PATH=/input_data OUTPUT_FOLDER=/output_images DETECTORS=owl,yolov8,detectron2
-# GQA
-# docker run --rm ${GPU_FLAG} -v "$(pwd)":/workdir -v /datasets/VisualQA_Datasets/gqa/images/images:/input_data -v "$(pwd)/output_images_GQA":/output_images "$IMAGE_NAME" batch_preprocess INPUT_PATH=/input_data OUTPUT_FOLDER=/output_images DETECTORS=owl,yolov8,detectron2
+#------------------------------------------------------------------------------
+# ✅ ESEMPI AGGIORNATI PER IL SISTEMA MODULARE
+#------------------------------------------------------------------------------
 
-# Avvia il container per inference
+# 📊 PREPROCESSING EXAMPLES (using image_preprocessor.py + igp/)
 
-#docker run --rm ${GPU_FLAG} \
-#    -e CUDA_LAUNCH_BLOCKING=1 \
-#    -e HF_TOKEN=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 \
-#    -v "$(pwd)":/workdir \
-#    -v "$(pwd)/vqa_data_normalized_filtered_output.json":/workdir/vqa_data_normalized_filtered_output.json \
-#    -v "$(pwd)/Makefile":/workdir/Makefile \
-#    -v "$(pwd)/VQA_SoM":/input_images \
-#    "$IMAGE_NAME" run_vqa VQA_INPUT_FILE=vqa_data_normalized_filtered_output.json \
-#    USE_VLLM=false VQA_OUTPUT_FILE=vqa_result_llava_SoM.json IMAGE_DIR=/input_images \
-#    MODEL_NAME=llava-hf/llava-1.5-7b-hf TEMPERATURE=0.7 MAX_LENGTH=32 TOP_P=0.9 \
-#    MAX_IMAGES=1000 MAX_QUESTIONS_PER_IMAGE=1 
-
-# docker run --rm ${GPU_FLAG} \
-#     -e CUDA_LAUNCH_BLOCKING=1 \
-#     -e HF_TOKEN=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 \
-#     -v "$(pwd)":/workdir \
-#     -v "$(pwd)/vqav2_train2014_filtered.json":/workdir/vqav2_train2014_filtered.json \
-#     -v "$(pwd)/Makefile":/workdir/Makefile \
-#     -v "$(pwd)/data":/input_images \
-#     "$IMAGE_NAME" run_vqa VQA_INPUT_FILE=vqav2_train2014_filtered.json \
-#     USE_VLLM=false VQA_OUTPUT_FILE=vqa_result_llava_GoM_num_rel.json IMAGE_DIR=/input_images \
-#     MODEL_NAME=llava-hf/llava-1.5-7b-hf TEMPERATURE=0.7 MAX_LENGTH=32 TOP_P=0.9 \
-#     MAX_IMAGES=1000 MAX_QUESTIONS_PER_IMAGE=1
-
-# docker run --rm ${GPU_FLAG} \
-#     -e CUDA_LAUNCH_BLOCKING=1 \
-#     -e HF_TOKEN=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 \
-#     -v "$(pwd)":/workdir \
-#     -v "$(pwd)/vqav2_train2014_filtered.json":/workdir/vqav2_train2014_filtered.json \
-#     -v "$(pwd)/Makefile":/workdir/Makefile \
-#     -v "$(pwd)/data":/input_images \
-#     "$IMAGE_NAME" run_vqa VQA_INPUT_FILE=vqav2_train2014_filtered.json \
-#     USE_VLLM=false VQA_OUTPUT_FILE=vqa_result_llava_GoM_num_rel.json IMAGE_DIR=/input_images \
-#     MODEL_NAME=llava-hf/llava-1.5-7b-hf TEMPERATURE=0.7 MAX_LENGTH=32 TOP_P=0.9 \
-#     MAX_IMAGES=1000 MAX_QUESTIONS_PER_IMAGE=1 
-
-# docker run --rm ${GPU_FLAG} \
-#     -e CUDA_LAUNCH_BLOCKING=1 \
-#     -e HF_TOKEN=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 \
-#     -v "$(pwd)":/workdir \
-#     -v "$(pwd)/vqav2_train2014_filtered.json":/workdir/vqav2_train2014_filtered.json \
-#     -v "$(pwd)/Makefile":/workdir/Makefile \
-#     -v "$(pwd)/data":/input_images \
-#     "$IMAGE_NAME" run_vqa VQA_INPUT_FILE=vqav2_train2014_filtered.json \
-#     USE_VLLM=false VQA_OUTPUT_FILE=vqa_result_llava_GoM_num_rel.json IMAGE_DIR=/input_images \
-#     MODEL_NAME=llava-hf/llava-1.5-7b-hf TEMPERATURE=0.7 MAX_LENGTH=32 TOP_P=0.9 \
-#     MAX_IMAGES=1000 MAX_QUESTIONS_PER_IMAGE=1 
- 
-# Pre-processing only (no QA filtering)
+# Single image preprocessing with question filtering
 #docker run --rm ${GPU_FLAG} \
 #  -v "$(pwd)":/workdir \
 #  -v "$(pwd)/images/test.jpg":/workdir/test.jpg \
@@ -88,81 +33,74 @@ echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
 #  "$IMAGE_NAME" \
 #  make preprocess \
 #    INPUT_PATH=test.jpg \
-#    OUTPUT_FOLDER=/output_images \
-#    ENABLE_Q_FILTER=false
+#    QUESTION="What objects are in this image?" \
+#    ENABLE_Q_FILTER=true \
+#    OUTPUT_FOLDER=/output_images
 
-# Full VQA run on one image, but with all questions 
-#docker run --rm ${GPU_FLAG} --memory=20g --shm-size=8g \
+# Batch preprocessing with multiple detectors
+#docker run --rm ${GPU_FLAG} \
+#  -v "$(pwd)":/workdir \
+#  -v "/datasets/VisualQA_Datasets/coco/images/train2017":/input_data \
+#  -v "$(pwd)/output_images_COCO":/output_images \
+#  "$IMAGE_NAME" \
+#  make batch_preprocess \
+#    INPUT_PATH=/input_data \
+#    OUTPUT_FOLDER=/output_images \
+#    DETECTORS=owlvit,yolov8,detectron2 \
+#    NUM_INSTANCES=1000
+
+# 🤖 VQA INFERENCE EXAMPLES (using vqa.py + igp/)
+
+# Full VQA pipeline with preprocessing
+#docker run --rm ${GPU_FLAG} --memory=30g \
 #  -e CUDA_LAUNCH_BLOCKING=1 \
 #  -e HF_TOKEN=$HF_TOKEN \
 #  -e HF_HOME=/root/.cache/huggingface \
 #  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 \
-#  -e OMP_NUM_THREADS=4 \
+#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
 #  -v "$(pwd)":/workdir \
-#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
 #  -v "$(pwd)/vqa_val_merged.json":/workdir/data.json \
 #  -v "$(pwd)/data/val2014":/input_images \
 #  -v "$(pwd)/vqa_out":/workdir/vqa_out \
+#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
 #  -w /workdir \
 #  "$IMAGE_NAME" \
-#  run_vqa \
+#  make run_vqa \
 #    VQA_INPUT_FILE=data.json \
 #    IMAGE_DIR=/input_images \
 #    VQA_OUTPUT_FILE=vqa_out/results.json \
+#    MODEL_NAME=llava-hf/llava-1.5-7b-hf \
 #    USE_VLLM=false \
-#    MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
 #    TEMPERATURE=0.3 \
-#    MAX_LENGTH=32 \
-#   TOP_P=0.9 \
-#    MAX_IMAGES=-1 \
-#    MAX_QUESTIONS_PER_IMAGE=-1 \
-#    PREPROC_FOLDER=/workdir/qf_preprocessing_inference_qwen \
+#    MAX_LENGTH=512 \
+#    TOP_P=0.9 \
+#    MAX_IMAGES=100 \
+#    MAX_QUESTIONS_PER_IMAGE=1 \
+#    PREPROC_FOLDER=/workdir/vqa_out \
 #    SKIP_PREPROCESSING=false \
 #    ENABLE_Q_FILTER=true
 
-### INFERENCE
+# VQA inference only (skip preprocessing)
 #docker run --rm ${GPU_FLAG} --memory=30g \
 #  -e CUDA_LAUNCH_BLOCKING=1 \
+#  -e HF_TOKEN=$HF_TOKEN \
 #  -e HF_HOME=/root/.cache/huggingface \
 #  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-#  -e HF_TOKEN=$HF_TOKEN \
-#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
 #  -v "$(pwd)":/workdir \
 #  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV1/GoM":/input_images \
 #  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
 #  "$IMAGE_NAME" \
-#  run_vqa \
+#  make run_vqa \
 #    VQA_INPUT_FILE=/workdir/VQAV1.json \
+#    IMAGE_DIR=/input_images \
+#    VQA_OUTPUT_FILE=/workdir/VQAV1_results.json \
+#    MODEL_NAME=llava-hf/llava-1.5-7b-hf \
+#    USE_VLLM=false \
 #    MAX_IMAGES=-1 \
 #    MAX_QUESTIONS_PER_IMAGE=-1 \
-#    PREPROC_FOLDER=/input_images \
-#    VQA_OUTPUT_FILE=/workdir/VQAV1_LlamaV-o1_GoM_relation_labeled.json \
-#    USE_VLLM=false \
-#    MODEL_NAME=omkarthawakar/LlamaV-o1 \
 #    SKIP_PREPROCESSING=true
 
-## PREPROCESSING
-#docker run --rm ${GPU_FLAG} --memory=30g \
-#  -e CUDA_LAUNCH_BLOCKING=1 \
-#  -e HF_HOME=/root/.cache/huggingface \
-#  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-#  -e HF_TOKEN=$HF_TOKEN \
-#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
-#  -v "$(pwd)":/workdir \
-#  -v "/datasets/VisualQA_Datasets/VQAV2/original_VQAV2":/input_images \
-#  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_with_scene_output":/output_preprocessed \
-#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
-#  "$IMAGE_NAME" \
-#  run_vqa \
-#    VQA_INPUT_FILE=/workdir/VQAV2.json \
-#    MAX_IMAGES=-1 \
-#    MAX_QUESTIONS_PER_IMAGE=-1 \
-#    PREPROC_FOLDER=/output_preprocessed \
-#    SKIP_PREPROCESSING=false \
-#    ENABLE_Q_FILTER=true \
-#    PREPROCESS_ONLY=true
-
+# Preprocessing only (no inference)
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_HOME=/root/.cache/huggingface \
@@ -171,24 +109,55 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
   -v "$(pwd)":/workdir \
   -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
-  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/QWEN_GEMMA_originalwith_scene_output":/output_preprocessed \
+  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_rels":/output_preprocessed \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   "$IMAGE_NAME" \
   run_vqa \
     VQA_INPUT_FILE=/workdir/VQAV2.json \
     IMAGE_DIR=/input_images \
-    OUTPUT_FOLDER=/output_preprocessed \
-    MAX_IMAGES=100 \
-    MAX_QUESTIONS_PER_IMAGE=1 \
+    MAX_IMAGES=3 \
+    MAX_QUESTIONS_PER_IMAGE=-1 \
     PREPROC_FOLDER=/output_preprocessed \
-    VQA_OUTPUT_FILE=/workdir/VQAV2_GEMMA_GoM_related_Baseline_with_scene_graph.json \
-    USE_VLLM=false \
-    MODEL_NAME=google/gemma-3-4b-it \
-    TEMPERATURE=0.3 \
-    MAX_LENGTH=512 \
-    TOP_P=0.9 \
+    OUTPUT_FOLDER=/output_preprocessed \
     SKIP_PREPROCESSING=false \
     ENABLE_Q_FILTER=true \
-    INCLUDE_SCENE_GRAPH=true
+    PREPROCESS_ONLY=true \
+    SAVE_IMAGE_ONLY=true \
+    SKIP_GRAPH=true \
+    SKIP_PROMPT=true \
+    DETECTORS=owlvit,yolov8,detectron2 \
+    DISPLAY_RELATION_LABELS=true \
+    DISPLAY_RELATIONSHIPS=true \
+    DISPLAY_LABELS=true \
+    NO_LEGEND=true
 
-echo "Docker preprocessing container has exited."
+# VQA with scene graph input
+#docker run --rm ${GPU_FLAG} --memory=30g \
+#  -e CUDA_LAUNCH_BLOCKING=1 \
+#  -e HF_HOME=/root/.cache/huggingface \
+#  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+#  -e HF_TOKEN=$HF_TOKEN \
+#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
+#  -v "$(pwd)":/workdir \
+#  -v "/datasets/VisualQA_Datasets/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
+#  -v "/datasets/VisualQA_Datasets/VQAV2/preprocessing_output":/output_preprocessed \
+#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
+#  "$IMAGE_NAME" \
+#  make run_vqa \
+#    VQA_INPUT_FILE=/workdir/VQAV2.json \
+#    IMAGE_DIR=/input_images \
+#    OUTPUT_FOLDER=/output_preprocessed \
+#    VQA_OUTPUT_FILE=/workdir/VQAV2_results_with_scene_graph.json \
+#    MODEL_NAME=google/gemma-2-2b-it \
+#    USE_VLLM=false \
+#    TEMPERATURE=0.3 \
+#    MAX_LENGTH=512 \
+#    TOP_P=0.9 \
+#    MAX_IMAGES=100 \
+#    MAX_QUESTIONS_PER_IMAGE=1 \
+#    PREPROC_FOLDER=/output_preprocessed \
+#    SKIP_PREPROCESSING=false \
+#    ENABLE_Q_FILTER=true \
+#    INCLUDE_SCENE_GRAPH=true
+
+echo "🎉 Docker container with modular igp pipeline has completed."
