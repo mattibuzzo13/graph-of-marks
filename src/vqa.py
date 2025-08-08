@@ -64,6 +64,9 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--stability_score_thresh", type=float, default=0.92)
     ap.add_argument("--min_mask_region_area", type=int, default=100)
     ap.add_argument("--preproc_device", type=str, default=None)
+    
+    ap.add_argument("--aggressive_pruning", action="store_true",
+                   help="Tieni solo oggetti citati e relazioni richieste (pruning più duro)")
 
     # Relazioni
     ap.add_argument("--max_relations_per_object", type=int, default=3)

@@ -168,12 +168,16 @@ def build_precise_nearest_relation(
     orient = orientation_label(cx2 - cx1, cy2 - cy1, margin_px=margin_px)
     iou_val = iou(b1, b2)
     gap = edge_gap(b1, b2)
-
-    if iou_val > 0.1 or gap <= 3:
+    
+    # Dimensione di riferimento per normalizzare le distanze
+    avg_size = (x2 - x1 + y2 - y1 + X2 - X1 + Y2 - Y1) / 4.0
+    
+    # Soglie più conservative e basate sulle dimensioni degli oggetti
+    if iou_val > 0.15 or gap <= 2:  # IoU più alta, gap più stretto
         prox = "touching"
-    elif dist_px / max(1.0, max(x2 - x1, y2 - y1, X2 - X1, Y2 - Y1)) < 0.05:
+    elif gap <= max(3, avg_size * 0.02) and dist_px / avg_size < 0.08:  # Molto vicini
         prox = "very_close"
-    elif dist_px / max(1.0, max(x2 - x1, y2 - y1, X2 - X1, Y2 - Y1)) < 0.12:
+    elif gap <= max(8, avg_size * 0.06) and dist_px / avg_size < 0.15:  # Vicini
         prox = "close"
     else:
         prox = "near"

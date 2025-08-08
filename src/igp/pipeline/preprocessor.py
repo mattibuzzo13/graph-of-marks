@@ -513,12 +513,34 @@ class ImageGraphPreprocessor:
 
         # 2) QUESTION FILTER (oggetti)
         obj_terms, rel_terms = self._parse_question(custom_question or self.cfg.question)
+
+        # ✅ SALVA I VALORI ORIGINALI PRIMA DEL PRUNING
+        original_boxes = list(cached["boxes"])
+        original_labels = list(cached["labels"])
+        original_scores = list(cached["scores"])
+
         if self.cfg.aggressive_pruning:
             # pruning "duro": tieni SOLO citati; fallback se vuoto
             bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
             if bx_q:
                 boxes, labels, scores = bx_q, lb_q, sc_q
-            # altrimenti mantiene tutto
+                
+                # 🆕 FALLBACK: se rimane solo 1 oggetto, ripristina tutto e filtra le relazioni
+                if len(boxes) == 1:
+                    print(f"[FALLBACK] Solo 1 oggetto dopo aggressive pruning, ripristino tutti gli oggetti")
+                    
+                    # ✅ RIPRISTINA I VALORI ORIGINALI (non quelli filtrati!)
+                    boxes, labels, scores = original_boxes, original_labels, original_scores
+                    
+                    # Memorizza l'indice dell'oggetto target originale
+                    target_obj_label = lb_q[0]  # L'unico oggetto rimasto dopo il pruning
+                    target_indices = [i for i, label in enumerate(original_labels) 
+                                    if base_label(label) == base_label(target_obj_label)]
+                    
+                    # Salva gli indici per il filtraggio delle relazioni successivo
+                    self._target_object_indices = set(target_indices)
+                    print(f"[FALLBACK] Oggetto target: {target_obj_label}, indici: {target_indices}")
+                    print(f"[FALLBACK] Ripristinati {len(boxes)} oggetti totali")
 
         # 3) SEGMENTATION (SAM) + union con mask di Detectron2 se utile
         masks = self.segmenter.segment(image_pil, boxes)
@@ -551,6 +573,12 @@ class ImageGraphPreprocessor:
             use_clip=True,
             clip_threshold=0.23,
         )
+        
+        # 🆕 FALLBACK: se abbiamo target objects da fallback, filtra le relazioni
+        if hasattr(self, '_target_object_indices') and self._target_object_indices:
+            rels_all = self._filter_relations_by_target_object(rels_all)
+            # Reset del flag dopo l'uso
+            delattr(self, '_target_object_indices')
 
         # 6a) filtro per domanda (relazioni)
         if self.cfg.filter_relations_by_question and rel_terms:
@@ -627,6 +655,23 @@ class ImageGraphPreprocessor:
         self._free_memory()
         dt = time.time() - t0
         print(f"[DONE] {image_name} processed in {dt:.2f}s")
+
+    def _filter_relations_by_target_object(self, relationships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filtra le relazioni mantenendo solo quelle che coinvolgono gli oggetti target."""
+        if not hasattr(self, '_target_object_indices') or not self._target_object_indices:
+            return relationships
+        
+        filtered_rels = []
+        for rel in relationships:
+            src_idx = rel.get('src_idx', -1)
+            tgt_idx = rel.get('tgt_idx', -1)
+            
+            # Mantieni la relazione se coinvolge almeno uno degli oggetti target
+            if src_idx in self._target_object_indices or tgt_idx in self._target_object_indices:
+                filtered_rels.append(rel)
+        
+        print(f"[FALLBACK] Relazioni filtrate: {len(filtered_rels)}/{len(relationships)} mantenute")
+        return filtered_rels
 
     # ----------------------------- runners -----------------------------
 

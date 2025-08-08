@@ -99,6 +99,8 @@ def run_vqa(
                         output_folder=preproc_folder,
                         apply_question_filter=not disable_q_filter,
                         cfg_overrides=preproc_cfg,
+                        image_dir=image_dir,  
+                        aggressive_pruning=True
                     )
                     if not os.path.exists(processed_img):
                         base = os.path.splitext(os.path.basename(ex.image_path))[0]

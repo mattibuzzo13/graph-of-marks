@@ -20,7 +20,7 @@ PREPROC_FOLDER          ?= vqa_out
 DETECTORS               ?= owlvit,yolov8,detectron2
 
 # Detection thresholds
-OWL_THRESHOLD           ?= 0.4
+OWL_THRESHOLD           ?= 0.5
 YOLO_THRESHOLD          ?= 0.5
 DETECTRON_THRESHOLD     ?= 0.5
 
@@ -28,6 +28,7 @@ DETECTRON_THRESHOLD     ?= 0.5
 SAM_VERSION             ?= 1
 
 # Visualization options
+LABEL_MODE              ?= original
 DISPLAY_RELATION_LABELS ?= false
 DISPLAY_RELATIONSHIPS   ?= false
 DISPLAY_LABELS         ?= false
@@ -47,10 +48,10 @@ NUM_INSTANCES           ?= -1
 # VQA parameters
 VQA_INPUT_FILE          ?=
 VQA_OUTPUT_FILE         ?= vqa_results.json
-MODEL_NAME              ?= llava-hf/llava-1.5-7b-hf
+MODEL_NAME              ?= Qwen/Qwen2.5-VL-7B-Instruct
 IMAGE_DIR               ?= $(OUTPUT_FOLDER)
 USE_VLLM                ?= true
-PROMPT_TEMPLATE         ?= 'Answer with only one word. Answer directly without saying anything else. Consider to describe the object in the image. \nQuestion: {question}\nAnswer:'
+PROMPT_TEMPLATE         ?= 'Answer with only one word. \nQuestion: {question}\nAnswer:'
 SINGLE_QUESTION         ?=
 BATCH_SIZE              ?= 1
 MAX_LENGTH              ?= 512
@@ -94,6 +95,7 @@ ifeq ($(strip $(JSON_FILE)),)
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
+		--label_mode $(LABEL_MODE) \
 	    $(if $(strip $(QUESTION)),--question "$(QUESTION)") \
 	    $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \
@@ -117,6 +119,7 @@ else
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
+		--label_mode $(LABEL_MODE) \
 	    $(if $(strip $(QUESTION)),--question "$(QUESTION)") \
 	    $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \
@@ -157,6 +160,7 @@ batch_preprocess: check_input
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
+		--label_mode $(LABEL_MODE) \
 	    $(if $(filter-out -1,$(NUM_INSTANCES)),--num_instances $(NUM_INSTANCES)) \
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \
 	    $(if $(strip $(SPLIT)),--split "$(SPLIT)")
@@ -186,6 +190,7 @@ run_vqa: check_vqa_input
 	    --max_length $(MAX_LENGTH) \
 	    --temperature $(TEMPERATURE) \
 	    --top_p $(TOP_P) \
+		--prompt_template $(PROMPT_TEMPLATE) \
 	    $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
 	    $(if $(filter true,$(SKIP_PREPROCESSING)),--skip_preprocessing) \
 	    $(if $(filter true,$(USE_VLLM)),--use_vllm) \
@@ -199,6 +204,7 @@ run_vqa: check_vqa_input
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
+		--label_mode $(LABEL_MODE) \
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
         $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
         $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \

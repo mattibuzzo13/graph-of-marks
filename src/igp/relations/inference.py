@@ -18,6 +18,12 @@ from .geometry import (
     orientation_label,
 )
 
+__all__ = [
+    "RelationsConfig",
+    "RelationInferencer",
+]
+
+
 @dataclass
 class RelationsConfig:
     """Configuration for relationship inference"""
@@ -33,6 +39,9 @@ class RelationsConfig:
     margin_px: int = 20
     min_distance: float = 5.0
     max_distance: float = 20000.0
+    filter_redundant: bool = True
+    filter_relations_by_question: bool = True
+    threshold_relation_similarity: float = 0.50
 
 _SPATIAL_KEYS = (
     "left_of",
@@ -88,6 +97,7 @@ class RelationInferencer:
         use_geometry: bool = True,
         use_clip: bool = True,
         clip_threshold: float = 0.23,
+        filter_redundant: bool = True,
     ) -> List[dict]:
         """
         Calcola relazioni candidate (geometriche + CLIP).
@@ -169,8 +179,11 @@ class RelationInferencer:
                             }
                         )
 
-        # deduplica primordiale (mantieni la più vicina per ogni coppia direzionata)
         rels = self._unify_pair_relations(rels)
+        
+        if filter_redundant:
+            rels = self._filter_redundant_relations(rels)
+            
         return rels
 
     # ---------------------------------------------------------------------
@@ -231,6 +244,104 @@ class RelationInferencer:
             )
             final.extend(rlist_sorted[: max_relations_per_object])
         return final
+
+    def _filter_redundant_relations(self, relationships: List[dict]) -> List[dict]:
+        """
+        Filtra relazioni ridondanti mantenendo solo la più importante per ogni coppia di oggetti.
+        Per coppie con relazioni multiple (es. "left_of" + "touching_left"), mantiene quella prioritaria.
+        """
+        if not relationships:
+            return relationships
+
+        # Raggruppa per coppia di oggetti (ordine invariante)
+        pair_relations: Dict[Tuple[int, int], List[dict]] = {}
+        
+        for rel in relationships:
+            s0, t0 = rel["src_idx"], rel["tgt_idx"]
+            pair_key = tuple(sorted([s0, t0]))  # coppia ordinata per simmetria
+            
+            if pair_key not in pair_relations:
+                pair_relations[pair_key] = []
+            pair_relations[pair_key].append(rel)
+        
+        # Per ogni coppia, scegli la relazione più importante
+        filtered_relations = []
+        for pair_key, rels in pair_relations.items():
+            if len(rels) == 1:
+                # Solo una relazione, mantienila
+                filtered_relations.append(rels[0])
+            else:
+                # Multiple relazioni, scegli la più importante
+                best_rel = self._choose_best_relation(rels)
+                filtered_relations.append(best_rel)
+        
+        return filtered_relations
+
+    def _choose_best_relation(self, relations: List[dict]) -> dict:
+        """
+        Scegli la relazione più importante da una lista per la stessa coppia di oggetti.
+        Priorità: semantiche > spaziali specifiche > spaziali generiche
+        """
+        # Definisci priorità per tipo di relazione
+        semantic_relations = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
+        spatial_specific = {"touching", "adjacent", "near", "close"}
+        spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
+        
+        best_rel = relations[0]
+        best_priority = self._get_relation_priority(best_rel["relation"])
+        best_confidence = self._get_relation_confidence(best_rel)
+        
+        for rel in relations[1:]:
+            priority = self._get_relation_priority(rel["relation"])
+            confidence = self._get_relation_confidence(rel)
+            
+            # Confronta prima per priorità, poi per confidence
+            if (priority > best_priority or 
+                (priority == best_priority and confidence > best_confidence)):
+                best_rel = rel
+                best_priority = priority
+                best_confidence = confidence
+        
+        return best_rel
+
+    def _get_relation_priority(self, relation: str) -> int:
+        """Assegna priorità numerica a una relazione."""
+        rel_name = str(relation).lower()
+        
+        # Priorità 4: relazioni semantiche forti
+        semantic_strong = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
+        if any(sem in rel_name for sem in semantic_strong):
+            return 4
+            
+        # Priorità 3: relazioni di contatto/vicinanza
+        spatial_contact = {"touching", "adjacent"}
+        if any(contact in rel_name for contact in spatial_contact):
+            return 3
+            
+        # Priorità 2: relazioni spaziali generiche
+        spatial_generic = {"near", "close"}
+        if any(gen in rel_name for gen in spatial_generic):
+            return 2
+            
+        # Priorità 1: relazioni direzionali specifiche
+        spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
+        if any(dir_rel in rel_name for dir_rel in spatial_directional):
+            return 1
+            
+        # Priorità 0: altre relazioni
+        return 0
+
+    def _get_relation_confidence(self, relation: dict) -> float:
+        """Estrae la confidence di una relazione."""
+        # Prima prova clip_sim, poi distance inversa, poi default
+        if "clip_sim" in relation:
+            return float(relation["clip_sim"])
+        elif "distance" in relation:
+            # Distanza inversa normalizzata (più vicino = più confidence)
+            dist = float(relation["distance"])
+            return 1.0 / (1.0 + dist / 100.0)  # normalizza
+        else:
+            return 0.5  # default per relazioni geometriche
 
     def drop_inverse_duplicates(
         self,

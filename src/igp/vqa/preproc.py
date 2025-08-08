@@ -84,6 +84,7 @@ def preprocess_for_qa(
     cfg_overrides: Optional[Dict[str, Any]] = None,
     force_reprocess: bool = False,
     image_dir: Optional[str] = None,
+    aggressive_pruning: bool = True
 ) -> str:
     """
     Esegue la pipeline IGP per una singola coppia (immagine, domanda) e
@@ -101,6 +102,7 @@ def preprocess_for_qa(
         "input_path": None,                  # elaborazione in-memory
         "output_folder": output_folder,
         "apply_question_filter": bool(apply_question_filter),
+        "aggressive_pruning": bool(aggressive_pruning),
         "question": question,
     })
     pre = _ensure_preproc(cfg_updates, preproc_obj)
