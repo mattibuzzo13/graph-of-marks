@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 __all__ = [
-    # tipi
+    # exported types
     "Detection",
     "Relationship",
     "Box",
     "MaskDict",
-    # config re-export
+    # config re-exports
     "PreprocessorConfig",
     "SegmenterConfig",
     "RelationsConfig",
@@ -15,12 +15,12 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.0"  # package version
 
-# Tipi principali
+# Core public types
 from .types import Detection, Relationship, Box, MaskDict
 
-# Re-export dei config dalle rispettive sottosezioni
+# Re-export configuration objects from submodules
 from .config import (
     PreprocessorConfig,
     SegmenterConfig,

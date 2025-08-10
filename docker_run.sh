@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 set -e
 
-# Nome dell'immagine costruita in precedenza
+# Pre-built Docker image name
 IMAGE_NAME="gom"
+# Hugging Face token (environment overrideable)
 HF_TOKEN="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"
+# Host-side HF cache mount
 HOST_HF_CACHE="$HOME/.cache/huggingface"
 mkdir -p "$HOST_HF_CACHE"
 
-# Usa GPU 2 direttamente per debugging (senza SLURM)
+# Show CUDA device binding (for local debug; outside SLURM)
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-# Usa la variabile CUDA_VISIBLE_DEVICES assegnata da SLURM
+# Use SLURM-provided CUDA_VISIBLE_DEVICES inside the container
 GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
 
-echo "Avvio del container Docker con GPU flag: $GPU_FLAG"
+echo "Starting Docker container with GPU flag: $GPU_FLAG"
 echo "🚀 Using modular igp pipeline"
 
 #------------------------------------------------------------------------------
-# ✅ ESEMPI AGGIORNATI PER IL SISTEMA MODULARE
+# Examples for the modular system
 #------------------------------------------------------------------------------
 
-# 📊 PREPROCESSING EXAMPLES (using image_preprocessor.py + igp/)
+# PREPROCESSING EXAMPLES (image_preprocessor.py + igp/)
 
-# Single image preprocessing with question filtering
+# Single-image preprocessing with question filtering
 #docker run --rm ${GPU_FLAG} \
 #  -v "$(pwd)":/workdir \
 #  -v "$(pwd)/images/test.jpg":/workdir/test.jpg \
@@ -49,7 +51,7 @@ echo "🚀 Using modular igp pipeline"
 #    DETECTORS=owlvit,yolov8,detectron2 \
 #    NUM_INSTANCES=1000
 
-# 🤖 VQA INFERENCE EXAMPLES (using vqa.py + igp/)
+# VQA INFERENCE EXAMPLES (vqa.py + igp/)
 
 # Full VQA pipeline with preprocessing
 #docker run --rm ${GPU_FLAG} --memory=30g \
@@ -71,7 +73,7 @@ echo "🚀 Using modular igp pipeline"
 #    MAX_QUESTIONS_PER_IMAGE=-1 \
 #    SKIP_PREPROCESSING=true
 
-# Preprocessing only (no inference)
+# Preprocessing + VQA inference
 docker run --rm ${GPU_FLAG} --memory=30g \
   -e CUDA_LAUNCH_BLOCKING=1 \
   -e HF_HOME=/root/.cache/huggingface \
@@ -80,7 +82,7 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
   -v "$(pwd)":/workdir \
   -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
-  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_rels_num":/output_preprocessed \
+  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_rels_num_related":/output_preprocessed \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   "$IMAGE_NAME" \
   run_vqa \
@@ -109,7 +111,6 @@ docker run --rm ${GPU_FLAG} --memory=30g \
     MAX_LENGTH=512 \
     TOP_P=0.9 \
     PROMPT_TEMPLATE="Answer with only one word.\nQuestion: {question}\nAnswer:"
-
 
 # VQA inference only (skip preprocessing)
 #docker run --rm ${GPU_FLAG} --memory=30g \
@@ -192,4 +193,4 @@ docker run --rm ${GPU_FLAG} --memory=30g \
 #    ENABLE_Q_FILTER=true \
 #    INCLUDE_SCENE_GRAPH=true
 
-echo "🎉 Docker container with modular igp pipeline has completed."
+echo "Docker container with modular igp pipeline has completed."

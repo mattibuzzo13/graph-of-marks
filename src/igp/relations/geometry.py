@@ -1,4 +1,7 @@
 # igp/relations/geometry.py
+# Geometric heuristics for object relations: IoU, distances, orientation,
+# "on_top_of"/"below" checks with optional masks/depth, and a precise "nearest" relation.
+
 from __future__ import annotations
 
 import math
@@ -52,8 +55,8 @@ def edge_gap(b1: Sequence[float], b2: Sequence[float]) -> float:
 
 def orientation_label(dx: float, dy: float, *, margin_px: float = 5.0) -> str:
     """
-    Determina l'orientamento principale (left/right/above/below) oppure 'near'
-    se sotto la soglia di margine.
+    Determine the dominant orientation ('left_of'/'right_of'/'above'/'below'),
+    or 'near' if the offset is within the margin.
     """
     if abs(dx) >= abs(dy) and abs(dx) > margin_px:
         return "right_of" if dx > 0 else "left_of"
@@ -74,21 +77,21 @@ def is_on_top_of(
     on_top_horiz_overlap: float = 0.35,
 ) -> bool:
     """
-    Heuristica robusta per 'A on top of B' usando:
-      1) centro Y,
-      2) gap verticale limitato,
-      3) overlap orizzontale sufficiente,
-      4) (opz.) contatto maschere lungo la giunzione,
-      5) (opz.) coerenza con stima di profondità.
+    Robust heuristic for 'A on top of B' using:
+      1) Y-center ordering,
+      2) limited vertical gap,
+      3) sufficient horizontal overlap,
+      4) optional mask contact along the junction,
+      5) optional consistency with depth estimates.
     """
     x1a, y1a, x2a, y2a = as_xyxy(box_a)
     x1b, y1b, x2b, y2b = as_xyxy(box_b)
 
-    # 1) A deve stare sopra B (centro Y)
+    # 1) A must be above B (by Y-center)
     if (y1a + y2a) / 2.0 >= (y1b + y2b) / 2.0:
         return False
 
-    # 2) gap verticale (accetta leggero overlap ma non troppo)
+    # 2) Vertical gap (allow slight overlap, but not too much)
     bottom_a, top_b = y2a, y1b
     h_ref = min(y2a - y1a, y2b - y1b)
     tol_px = max(on_top_gap_px, int(0.06 * max(1.0, h_ref)))
@@ -100,13 +103,13 @@ def is_on_top_of(
         if vert_overlap / max(1.0, (y2a - y1a)) > 0.35:
             return False
 
-    # 3) overlap orizzontale
+    # 3) Horizontal overlap
     overlap_x = max(0.0, min(x2a, x2b) - max(x1a, x1b))
     ratio_x = overlap_x / max(1e-6, min((x2a - x1a), (x2b - x1b)))
     if ratio_x < on_top_horiz_overlap:
         return False
 
-    # 4) contatto maschere (opzionale)
+    # 4) Mask contact (optional)
     if mask_a is not None and mask_b is not None and _HAS_CV2:
         band = max(2, int(0.02 * max(1.0, h_ref)))
         H = mask_a.shape[0]
@@ -123,14 +126,14 @@ def is_on_top_of(
             band_b = band_b[:min_h, :]
             contact = np.logical_and(band_a, band_b).any()
             if not contact:
-                # dilatazione leggera per tolleranza
+                # Light dilation for tolerance
                 k = np.ones((3, 3), np.uint8)
                 da = cv2.dilate(band_a.astype(np.uint8), k)
                 db = cv2.dilate(band_b.astype(np.uint8), k)
                 if not (da & db).any():
                     return False
 
-    # 5) profondità coerente (opzionale)
+    # 5) Depth consistency (optional)
     if depth_a is not None and depth_b is not None:
         if depth_a > depth_b + 0.05:
             return False
@@ -155,8 +158,8 @@ def build_precise_nearest_relation(
     margin_px: int = 20,
 ) -> dict:
     """
-    Costruisce una relazione 'nearest' precisa tra i e j combinando
-    prossimità (touching/very_close/close/near) e orientamento.
+    Build a precise 'nearest' relation between i and j by combining
+    proximity levels (touching/very_close/close/near) and orientation.
     """
     b1, b2 = boxes[i], boxes[j]
     x1, y1, x2, y2 = as_xyxy(b1)
@@ -169,15 +172,15 @@ def build_precise_nearest_relation(
     iou_val = iou(b1, b2)
     gap = edge_gap(b1, b2)
     
-    # Dimensione di riferimento per normalizzare le distanze
+    # Reference size to normalize distances
     avg_size = (x2 - x1 + y2 - y1 + X2 - X1 + Y2 - Y1) / 4.0
     
-    # Soglie più conservative e basate sulle dimensioni degli oggetti
-    if iou_val > 0.15 or gap <= 2:  # IoU più alta, gap più stretto
+    # More conservative, size-aware thresholds
+    if iou_val > 0.15 or gap <= 2:  # higher IoU, tighter gap
         prox = "touching"
-    elif gap <= max(3, avg_size * 0.02) and dist_px / avg_size < 0.08:  # Molto vicini
+    elif gap <= max(3, avg_size * 0.02) and dist_px / avg_size < 0.08:  # very close
         prox = "very_close"
-    elif gap <= max(8, avg_size * 0.06) and dist_px / avg_size < 0.15:  # Vicini
+    elif gap <= max(8, avg_size * 0.06) and dist_px / avg_size < 0.15:  # close
         prox = "close"
     else:
         prox = "near"

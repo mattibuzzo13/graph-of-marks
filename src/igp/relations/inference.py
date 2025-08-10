@@ -1,4 +1,7 @@
 # igp/relations/inference.py
+# Combines geometric heuristics and CLIP-based scoring to infer relationships
+# between detected objects. Keeps comments concise for paper readability.
+
 from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -26,7 +29,7 @@ __all__ = [
 
 @dataclass
 class RelationsConfig:
-    """Configuration for relationship inference"""
+    """Configuration for relationship inference."""
     enabled: bool = True
     max_relations: int = 10
     max_relations_per_object: int = 3
@@ -68,8 +71,8 @@ _INVERSE = {
 
 class RelationInferencer:
     """
-    Combina euristiche geometriche e scoring CLIP per derivare relazioni tra oggetti.
-    Restituisce una lista di dict:
+    Combines geometric heuristics and CLIP scoring to derive object relations.
+    Returns a list of dicts:
       { "src_idx", "tgt_idx", "relation", "distance", ["relation_raw", "clip_sim"] }
     """
 
@@ -100,7 +103,7 @@ class RelationInferencer:
         filter_redundant: bool = True,
     ) -> List[dict]:
         """
-        Calcola relazioni candidate (geometriche + CLIP).
+        Compute candidate relations (geometry + CLIP).
         """
         n = len(boxes)
         if n <= 1:
@@ -111,7 +114,7 @@ class RelationInferencer:
 
         rels: List[dict] = []
 
-        # ---------- 1) Geometria: on_top_of / below simmetrici ----------
+        # ---------- 1) Geometry: on_top_of / below (symmetric) ----------
         if use_geometry:
             for i in range(n):
                 for j in range(n):
@@ -134,7 +137,7 @@ class RelationInferencer:
                             {"src_idx": j, "tgt_idx": i, "relation": "below", "distance": dist_ij}
                         )
 
-        # ---------- 2) Geometria: above/below/left/right con margine e distanza ----------
+        # ---------- 2) Geometry: above/below/left/right with margins & distance ----------
         if use_geometry:
             centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
             for i in range(n):
@@ -157,7 +160,7 @@ class RelationInferencer:
                         {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
                     )
 
-        # ---------- 3) CLIP ----------#
+        # ---------- 3) CLIP scoring ----------
         if use_clip and self.clip is not None:
             for i in range(n):
                 for j in range(n):
@@ -187,7 +190,7 @@ class RelationInferencer:
         return rels
 
     # ---------------------------------------------------------------------
-    # Post-processing/utility
+    # Post-processing / utilities
     # ---------------------------------------------------------------------
 
     def limit_relationships_per_object(
@@ -200,9 +203,9 @@ class RelationInferencer:
         question_rel_terms: Optional[Set[str]] = None,
     ) -> List[dict]:
         """
-        Garantisce almeno `min_relations_per_object` relazioni per nodo (con nearest),
-        e limita a `max_relations_per_object` privilegiando quelle richieste dalla domanda
-        (se `question_rel_terms` è fornito).
+        Ensure at least `min_relations_per_object` per node (via nearest),
+        and cap at `max_relations_per_object`, prioritizing question-requested
+        relations when `question_rel_terms` is provided.
         """
         from collections import defaultdict
 
@@ -210,13 +213,13 @@ class RelationInferencer:
         for r in relationships:
             rels_by_src[r["src_idx"]].append(r)
 
-        # assicura il minimo per-oggetto
+        # Guarantee a minimum per object
         n = len(boxes)
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         for i in range(n):
             if len(rels_by_src[i]) >= min_relations_per_object:
                 continue
-            # trova vicino migliore
+            # Find nearest neighbor
             best_j, best_d = None, float("inf")
             for j in range(n):
                 if j == i:
@@ -229,7 +232,7 @@ class RelationInferencer:
                     build_precise_nearest_relation(i, best_j, boxes, margin_px=self.margin_px)
                 )
 
-        # limita al massimo per-oggetto, con priorità relazione richiesta
+        # Cap per-object; prioritize relations mentioned in the question
         def _is_question_rel(rel_label: str) -> bool:
             if not question_rel_terms:
                 return False
@@ -247,31 +250,30 @@ class RelationInferencer:
 
     def _filter_redundant_relations(self, relationships: List[dict]) -> List[dict]:
         """
-        Filtra relazioni ridondanti mantenendo solo la più importante per ogni coppia di oggetti.
-        Per coppie con relazioni multiple (es. "left_of" + "touching_left"), mantiene quella prioritaria.
+        For each unordered pair of objects, keep only the most informative relation.
+        When multiple relations exist (e.g., "left_of" + "touching_left"),
+        choose according to a priority scheme.
         """
         if not relationships:
             return relationships
 
-        # Raggruppa per coppia di oggetti (ordine invariante)
+        # Group by object pair (order-invariant)
         pair_relations: Dict[Tuple[int, int], List[dict]] = {}
         
         for rel in relationships:
             s0, t0 = rel["src_idx"], rel["tgt_idx"]
-            pair_key = tuple(sorted([s0, t0]))  # coppia ordinata per simmetria
+            pair_key = tuple(sorted([s0, t0]))  # ordered pair for symmetry
             
             if pair_key not in pair_relations:
                 pair_relations[pair_key] = []
             pair_relations[pair_key].append(rel)
         
-        # Per ogni coppia, scegli la relazione più importante
+        # Select one relation per pair
         filtered_relations = []
         for pair_key, rels in pair_relations.items():
             if len(rels) == 1:
-                # Solo una relazione, mantienila
                 filtered_relations.append(rels[0])
             else:
-                # Multiple relazioni, scegli la più importante
                 best_rel = self._choose_best_relation(rels)
                 filtered_relations.append(best_rel)
         
@@ -279,10 +281,10 @@ class RelationInferencer:
 
     def _choose_best_relation(self, relations: List[dict]) -> dict:
         """
-        Scegli la relazione più importante da una lista per la stessa coppia di oggetti.
-        Priorità: semantiche > spaziali specifiche > spaziali generiche
+        Pick the most informative relation among candidates for the same pair.
+        Priority: semantic > specific spatial (contact/adjacency) > generic spatial > directional.
         """
-        # Definisci priorità per tipo di relazione
+        # Priority tiers for relation types
         semantic_relations = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
         spatial_specific = {"touching", "adjacent", "near", "close"}
         spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
@@ -295,7 +297,7 @@ class RelationInferencer:
             priority = self._get_relation_priority(rel["relation"])
             confidence = self._get_relation_confidence(rel)
             
-            # Confronta prima per priorità, poi per confidence
+            # Compare by priority first, then by confidence
             if (priority > best_priority or 
                 (priority == best_priority and confidence > best_confidence)):
                 best_rel = rel
@@ -305,43 +307,42 @@ class RelationInferencer:
         return best_rel
 
     def _get_relation_priority(self, relation: str) -> int:
-        """Assegna priorità numerica a una relazione."""
+        """Assign a numeric priority to a relation."""
         rel_name = str(relation).lower()
         
-        # Priorità 4: relazioni semantiche forti
+        # 4: strong semantic relations
         semantic_strong = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
         if any(sem in rel_name for sem in semantic_strong):
             return 4
             
-        # Priorità 3: relazioni di contatto/vicinanza
+        # 3: contact/adjacency
         spatial_contact = {"touching", "adjacent"}
         if any(contact in rel_name for contact in spatial_contact):
             return 3
             
-        # Priorità 2: relazioni spaziali generiche
+        # 2: generic proximity
         spatial_generic = {"near", "close"}
         if any(gen in rel_name for gen in spatial_generic):
             return 2
             
-        # Priorità 1: relazioni direzionali specifiche
+        # 1: directional spatial cues
         spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
         if any(dir_rel in rel_name for dir_rel in spatial_directional):
             return 1
             
-        # Priorità 0: altre relazioni
+        # 0: others
         return 0
 
     def _get_relation_confidence(self, relation: dict) -> float:
-        """Estrae la confidence di una relazione."""
-        # Prima prova clip_sim, poi distance inversa, poi default
+        """Extract a confidence score: prefer CLIP similarity; else inverse distance; else default."""
         if "clip_sim" in relation:
             return float(relation["clip_sim"])
         elif "distance" in relation:
-            # Distanza inversa normalizzata (più vicino = più confidence)
+            # Inverse distance (closer ⇒ higher)
             dist = float(relation["distance"])
-            return 1.0 / (1.0 + dist / 100.0)  # normalizza
+            return 1.0 / (1.0 + dist / 100.0)
         else:
-            return 0.5  # default per relazioni geometriche
+            return 0.5  # default for purely geometric relations
 
     def drop_inverse_duplicates(
         self,
@@ -352,9 +353,9 @@ class RelationInferencer:
         min_relations_per_object: int = 1,
     ) -> List[dict]:
         """
-        Rimuove relazioni inverse ridondanti. In caso di conflitto, privilegia quelle
-        che coinvolgono il soggetto della domanda (se fornito), poi rispetta i limiti
-        min/max per oggetto.
+        Remove redundant inverse pairs (e.g., left_of vs right_of). In conflicts,
+        prefer relations involving the subject(s) of the question (if provided),
+        then respect per-object max limits.
         """
         kept: List[dict] = []
         from collections import defaultdict
@@ -407,9 +408,9 @@ class RelationInferencer:
         threshold: float = 0.5,
     ) -> List[dict]:
         """
-        Filtra le relazioni mantenendo solo quelle coerenti con i termini della domanda.
-        - Se `similarity_fn` è fornita, la usa per matching fuzzy (es. spaCy similarity).
-        - Altrimenti fa solo match esatto/sottostringa.
+        Keep only relations consistent with the question terms.
+        - If `similarity_fn` is provided, use it for fuzzy matching (e.g., spaCy similarity).
+        - Otherwise perform exact/substring matching.
         """
         if not question_terms:
             return relationships
@@ -433,8 +434,8 @@ class RelationInferencer:
 
     def unify_spatial_direction(self, relationships: List[dict]) -> List[dict]:
         """
-        Per le relazioni spaziali, inverte la direzione così che la freccia punti
-        verso l'oggetto di riferimento (coerente con il rendering grafico).
+        For spatial relations, invert direction so the arrow points toward the
+        reference object (consistent with the rendering convention).
         """
         out: List[dict] = []
         for r in relationships:
@@ -458,8 +459,8 @@ class RelationInferencer:
     @staticmethod
     def _unify_pair_relations(relationships: List[dict]) -> List[dict]:
         """
-        Mantiene al più una relazione per coppia direzionata (src, tgt),
-        scegliendo quella con distanza minore (o la prima).
+        Keep at most one relation per directed pair (src, tgt),
+        choosing the one with the smallest distance (or first encountered).
         """
         best_for_pair: Dict[Tuple[int, int], dict] = {}
         for r in relationships:

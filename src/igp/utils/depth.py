@@ -1,4 +1,9 @@
 # igp/utils/depth.py
+# Lightweight MiDaS wrapper for relative depth.
+# - Loads a MiDaS model via torch.hub and the corresponding transforms.
+# - Returns normalized relative depth in [0, 1] where higher = closer.
+# - If PyTorch is unavailable, methods degrade gracefully.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,8 +27,8 @@ class DepthConfig:
 
 class DepthEstimator:
     """
-    Wrapper per MiDaS via torch.hub.
-    Fornisce profondità relativa normalizzata in [0,1] (valore alto = più vicino).
+    MiDaS wrapper via torch.hub.
+    Provides normalized relative depth in [0, 1] (larger value = closer).
     """
     def __init__(self, config: DepthConfig | None = None) -> None:
         self.config = config or DepthConfig()
@@ -34,10 +39,10 @@ class DepthEstimator:
             return
 
         device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        # Caricamento MiDaS + transforms
+        # Load MiDaS model and its transforms
         self.model = torch.hub.load("intel-isl/MiDaS", self.config.model_name).to(device).eval()
         transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-        # Usa la trasformazione corretta per il modello
+        # Pick the correct transform for the chosen model
         if self.config.model_name.lower().startswith("dpt"):
             self.transform = transforms.dpt_transform
         else:
@@ -50,22 +55,22 @@ class DepthEstimator:
     @torch.inference_mode()
     def relative_depth_at(self, image: Image.Image, centers: Sequence[Tuple[float, float]]) -> List[float]:
         """
-        Ritorna valori normalizzati in [0,1] (alto = vicino) per i centroidi
-        specificati in coordinate dell'immagine originale.
+        Return normalized values in [0, 1] (higher = closer) for the given
+        centroid coordinates, expressed in the original image space.
         """
         if not self.available() or not centers:
             return [0.5] * len(centers)
 
-        # PIL -> numpy BGR
-        import cv2  # lazy import; MiDaS dipende da OpenCV solo per conversione qui
+        # PIL → NumPy BGR (MiDaS reference)
+        import cv2  # lazy import; OpenCV is used only for this conversion
         img_np = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-        # trasformazione + forward
+        # Transform + forward pass
         im_t = self.transform(img_np).to(self.device)
         depth = self.model(im_t).squeeze().detach().cpu().numpy()  # (H_d, W_d)
 
         Hd, Wd = depth.shape[:2]
-        W0, H0 = image.size  # PIL: (W, H)
+        W0, H0 = image.size  # PIL gives (W, H)
 
         vals: List[float] = []
         for (cx, cy) in centers:
@@ -80,8 +85,7 @@ class DepthEstimator:
         if rng < 1e-6:
             return [0.5] * len(vals)
 
-        # Nota: MiDaS restituisce valori “maggiore = più lontano”
-        # Invertiamo poi normalizziamo, così 1.0 = più vicino
+        # Note: MiDaS predicts larger = farther; invert and normalize so 1.0 = closer
         arr = (arr - arr.min()) / rng
         arr = 1.0 - arr
         return arr.tolist()

@@ -1,12 +1,12 @@
 # Makefile for graph-visual-reasoning preprocessing and VQA inference (modular igp version)
 
-# JSON file containing QA pairs (if set, loops over entries)
+# Path to a JSON file with QA pairs (if set, iterate over entries)
 JSON_FILE               ?=
 
 # Optional single-image question (used if JSON_FILE is empty)
 QUESTION                ?=
 
-# Toggle question-based filtering (true/false)
+# Enable/disable question-guided filtering (true/false)
 ENABLE_Q_FILTER         ?= true
 
 # Input path (directory or single image)
@@ -82,7 +82,7 @@ ifeq ($(strip $(VQA_INPUT_FILE))$(strip $(IMAGE_DIR)),)
 endif
 
 #------------------------------------------------------------------------------
-# ✅ PREPROCESSING: Usa il nuovo image_preprocessor.py modulare
+# PREPROCESSING: use the modular image_preprocessor.py
 #------------------------------------------------------------------------------
 preprocess: check_input
 ifeq ($(strip $(JSON_FILE)),)
@@ -103,12 +103,12 @@ ifeq ($(strip $(JSON_FILE)),)
 	    $(if $(strip $(IMAGE_COLUMN)),--image_column "$(IMAGE_COLUMN)") \
 	    $(if $(filter-out -1,$(NUM_INSTANCES)),--num_instances $(NUM_INSTANCES)) \
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
-        $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
-        $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
-        $(if $(filter true,$(NO_LEGEND)),--no_legend) \
-        $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
-        $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
-        $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
+	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
+	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
+	    $(if $(filter true,$(NO_LEGEND)),--no_legend) \
+	    $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
+	    $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
+	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
 else
 	@echo "[INFO] Preprocessing JSON batch $(JSON_FILE) with igp..."
 	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/image_preprocessor.py \
@@ -127,12 +127,12 @@ else
 	    $(if $(strip $(IMAGE_COLUMN)),--image_column "$(IMAGE_COLUMN)") \
 	    $(if $(filter-out -1,$(NUM_INSTANCES)),--num_instances $(NUM_INSTANCES)) \
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
-        $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
-        $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
-        $(if $(filter true,$(NO_LEGEND)),--no_legend) \
-        $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
-        $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
-        $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
+	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
+	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
+	    $(if $(filter true,$(NO_LEGEND)),--no_legend) \
+	    $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
+	    $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
+	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
 endif
 
 #------------------------------------------------------------------------------
@@ -148,7 +148,7 @@ preprocess_detectron2: check_input
 	$(MAKE) preprocess DETECTORS=detectron2
 
 #------------------------------------------------------------------------------
-# Legacy batch preprocessing (mantieni per backward compatibility)
+# Legacy batch preprocessing (kept for backward compatibility)
 #------------------------------------------------------------------------------
 batch_preprocess: check_input
 	@echo "[INFO] Batch preprocessing $(INPUT_PATH) with igp (num_instances=$(NUM_INSTANCES))..."
@@ -165,16 +165,16 @@ batch_preprocess: check_input
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \
 	    $(if $(strip $(SPLIT)),--split "$(SPLIT)")
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
-        $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
-        $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
+	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
+	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
 		$(if $(filter true,$(NO_LEGEND)),--no_legend) \
-        $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
-        $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
-        $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
+	    $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
+	    $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
+	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
 
 
 #------------------------------------------------------------------------------
-# ✅ VQA: Usa il nuovo vqa.py modulare
+# VQA: use the modular vqa.py
 #------------------------------------------------------------------------------
 run_vqa: check_vqa_input
 	@echo "[INFO] Running VQA inference with igp..."
@@ -190,7 +190,7 @@ run_vqa: check_vqa_input
 	    --max_length $(MAX_LENGTH) \
 	    --temperature $(TEMPERATURE) \
 	    --top_p $(TOP_P) \
-        --prompt_template "$(PROMPT_TEMPLATE)" \
+	    --prompt_template "$(PROMPT_TEMPLATE)" \
 	    $(if $(strip $(SINGLE_QUESTION)),--single_question "$(SINGLE_QUESTION)") \
 	    $(if $(filter true,$(SKIP_PREPROCESSING)),--skip_preprocessing) \
 	    $(if $(filter true,$(USE_VLLM)),--use_vllm) \
@@ -206,22 +206,22 @@ run_vqa: check_vqa_input
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
-        $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
-        $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
-        $(if $(filter true,$(NO_LEGEND)),--no_legend) \
-        $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
-        $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
-        $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
+	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
+	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
+	    $(if $(filter true,$(NO_LEGEND)),--no_legend) \
+	    $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
+	    $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
+	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
 
 #------------------------------------------------------------------------------
-# VQA su cartella di immagini
+# VQA on an image folder
 #------------------------------------------------------------------------------
 run_vqa_folder:
 	@[ -n "$(IMAGE_FOLDER)" ] || (echo "ERROR: IMAGE_FOLDER è richiesto"; exit 1)
 	$(MAKE) run_vqa IMAGE_DIR=$(IMAGE_FOLDER) VQA_INPUT_FILE= SINGLE_QUESTION="$(FIXED_PROMPT)"
 
 #------------------------------------------------------------------------------
-# Dataset download (mantieni come prima)
+# Dataset download (kept as before)
 #------------------------------------------------------------------------------
 download_dataset:
 ifndef DATASET
@@ -260,23 +260,23 @@ clean:
 	@rm -rf $(OUTPUT_FOLDER) $(VQA_OUTPUT_FILE) $(basename $(VQA_OUTPUT_FILE))_metrics.json
 
 help:
-	@echo "🚀 Graph-of-Marks Modular Pipeline (igp)"
+	@echo "Graph-of-Marks Modular Pipeline (igp)"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  📊 PREPROCESSING:"
+	@echo "PREPROCESSING:"
 	@echo "    make preprocess INPUT_PATH=path/to/image [QUESTION='...'] [ENABLE_Q_FILTER=true|false]"
 	@echo "    make preprocess JSON_FILE=data.json [QUESTION='...']"
 	@echo "    make batch_preprocess INPUT_PATH=path/to/folder [NUM_INSTANCES=100]"
 	@echo "    make preprocess_owlvit|preprocess_yolo|preprocess_detectron2"
 	@echo ""
-	@echo "  🤖 VQA INFERENCE:"
+	@echo "VQA INFERENCE:"
 	@echo "    make run_vqa VQA_INPUT_FILE=data.json MODEL_NAME=llava-hf/llava-1.5-7b-hf"
 	@echo "    make run_vqa_folder IMAGE_FOLDER=path/to/images [FIXED_PROMPT='Describe this']"
 	@echo ""
-	@echo "  📥 DATASET DOWNLOAD:"
+	@echo "DATASET DOWNLOAD:"
 	@echo "    make download_coco|download_gqa|download_refcoco|download_vqa|download_textvqa"
 	@echo ""
-	@echo "  🔧 UTILITIES:"
+	@echo "UTILITIES:"
 	@echo "    make install_deps"
 	@echo "    make clean"
 	@echo ""

@@ -1,4 +1,8 @@
 # igp/graph/scene_graph.py
+# Builds a scene graph (NetworkX DiGraph) from fused detections and optional
+# Nodes carry object attributes; edges encode
+# geometric/semantic relations. Includes utilities to save in gpickle/JSON.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,25 +19,23 @@ from PIL import Image
 
 from igp.utils.boxes import iou as iou_xyxy, to_xywh, center, union as union_box
 from igp.utils.clip_utils import CLIPWrapper
-from igp.utils.caption import Captioner
 from igp.utils.depth import DepthEstimator
 
 
 @dataclass
 class SceneGraphConfig:
     """
-    Soglie e flag per la costruzione del grafo.
+    Configuration flags and thresholds for graph construction.
     """
     # Edge pruning
-    max_dist_norm: float = 0.4          # scarta coppie molto lontane (dist_norm > 0.4)
-    min_iou_keep: float = 0.01          # richiede un po' di overlap se simil. CLIP è bassa
-    min_clip_sim_keep: float = 0.20     # se iou < min_iou_keep, serve almeno questa simil. CLIP
+    max_dist_norm: float = 0.4          # drop pairs very far apart (dist_norm > 0.4)
+    min_iou_keep: float = 0.01          # require minimal overlap if CLIP similarity is low
+    min_clip_sim_keep: float = 0.20     # if IoU < min_iou_keep, keep only if CLIP sim ≥ this
 
-    # Nodi “scene”
+    # "scene" node
     add_scene_node: bool = True
-    add_caption: bool = True
 
-    # Feature
+    # Features to store on nodes
     store_clip_embeddings: bool = True
     store_depth: bool = True
     store_color: bool = True
@@ -41,26 +43,27 @@ class SceneGraphConfig:
     # Dominant color (best-effort)
     kmeans_clusters: int = 3
 
-    # Device fallback è gestito dai wrapper (CLIP/Caption/Depth)
+    # Device selection is handled by the wrappers (CLIP/Depth).
 
 
 class SceneGraphBuilder:
     """
-    Costruisce un grafo scena (NetworkX DiGraph) con attributi compatibili
-    con il codice originale:
-      - nodi 0..N-1: oggetti (label, score, clip_emb, bbox_norm, area_norm, color, depth_norm)
-      - un nodo 'scene' opzionale con caption
-      - archi i->j con attributi geometrici (dx_norm, dy_norm, dist_norm, angle_deg, iou, clip_sim, depth_delta)
+    Build a scene graph (NetworkX DiGraph) with attributes compatible with the
+    original codebase:
+
+      - object nodes 0..N-1: (label, score, clip_emb, bbox_norm, area_norm,
+                               color, depth_norm)
+      - optional 'scene' node
+      - directed edges i->j with geometric/semantic attributes:
+        (dx_norm, dy_norm, dist_norm, angle_deg, iou, clip_sim, depth_delta)
     """
     def __init__(
         self,
         clip: Optional[CLIPWrapper] = None,
-        captioner: Optional[Captioner] = None,
         depth: Optional[DepthEstimator] = None,
         config: Optional[SceneGraphConfig] = None,
     ) -> None:
         self.clip = clip
-        self.captioner = captioner
         self.depth = depth
         self.cfg = config or SceneGraphConfig()
 
@@ -74,7 +77,7 @@ class SceneGraphBuilder:
         scores: Sequence[float],
     ) -> nx.DiGraph:
         """
-        Crea il grafo scena a partire da detections fuse (post-WBF/NMS).
+        Build the scene graph from fused detections (post-WBF/NMS).
         """
         G = nx.DiGraph()
         W, H = image.size
@@ -83,11 +86,11 @@ class SceneGraphBuilder:
         clip_embs = self._compute_clip_embeddings(image, boxes_xyxy)  # (N, D) or None
         dom_colors = self._dominant_colors(image, boxes_xyxy) if self.cfg.store_color else ["unknown"] * len(boxes_xyxy)
 
-        # depth: calcolata ai centroidi
+        # Depth: sampled at box centroids
         centres = [center(b) for b in boxes_xyxy]
         depths = self._relative_depth(image, centres) if self.cfg.store_depth else [0.5] * len(boxes_xyxy)
 
-        # Aggiungi nodi oggetto
+        # Add object nodes
         for idx, (box, lab, sc) in enumerate(zip(boxes_xyxy, labels, scores)):
             x1, y1, x2, y2 = box[:4]
             area_norm = ((x2 - x1) * (y2 - y1)) / float(max(1, W * H))
@@ -106,18 +109,17 @@ class SceneGraphBuilder:
 
             G.add_node(idx, **node_attrs)
 
-        # Nodo scena + caption
+        # Optional scene node
         scene_id: Optional[int] = None
         if self.cfg.add_scene_node:
             scene_id = len(G)
-            cap = self._caption(image) if self.cfg.add_caption else ""
-            G.add_node(scene_id, label="scene", caption=cap)
-            # collegalo agli oggetti (non diretto)
+            G.add_node(scene_id, label="scene")
+            # Link it to all object nodes (non-directed semantics; edges are i/o convenience)
             for i in range(len(boxes_xyxy)):
                 G.add_edge(scene_id, i)
 
         # 2) Edge features ------------------------------------------------------
-        # Prepara simmetria CLIP dagli embedding nodo-nodo
+        # Populate pairwise edges with pruning and metrics
         for i in range(len(boxes_xyxy)):
             for j in range(len(boxes_xyxy)):
                 if i == j:
@@ -131,7 +133,7 @@ class SceneGraphBuilder:
     @staticmethod
     def save_gpickle(G: nx.DiGraph, path: str | Path, compress: bool | None = None) -> None:
         """
-        Salva il grafo su disco. Se l'estensione è .gz o compress=True usa gzip.
+        Save the graph to disk. If extension is .gz or compress=True, use gzip.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,7 @@ class SceneGraphBuilder:
     @staticmethod
     def save_json(G: nx.DiGraph, path: str | Path) -> None:
         """
-        Salva il grafo in formato node-link JSON (serializzabile).
+        Save the graph as node-link JSON (serializable).
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +170,8 @@ class SceneGraphBuilder:
         boxes_xyxy: Sequence[Sequence[float]],
     ) -> Optional[List[List[float]]]:
         """
-        Calcola embedding CLIP per i crop di ciascun box. Ritorna lista di vettori (list[float]) o None.
+        Compute CLIP embeddings for each box crop.
+        Returns a list of vectors (list[float]) or None when unavailable.
         """
         if self.clip is None or not self.clip.available():
             return None
@@ -184,15 +187,15 @@ class SceneGraphBuilder:
         feats = self.clip.image_features(crops)  # torch.Tensor [N, D]
         if feats is None:
             return None
-        # normalizzati dal wrapper; converti in Python list
+        # Wrapper is expected to return normalized embeddings; convert to Python lists
         return feats.detach().cpu().tolist()
 
     def _dominant_colors(
         self, image: Image.Image, boxes_xyxy: Sequence[Sequence[float]]
     ) -> List[str]:
         """
-        Stima "colore dominante" grossolano per ogni box.
-        Best-effort: usa KMeans se disponibile, altrimenti "unknown".
+        Rough "dominant color" estimation per box.
+        Best-effort: uses KMeans if available, otherwise returns "unknown".
         """
         try:
             import cv2  # type: ignore
@@ -206,7 +209,7 @@ class SceneGraphBuilder:
             x2 = max(x1 + 1, x2)
             y2 = max(y1 + 1, y2)
             np_crop = np.array(image.crop((x1, y1, x2, y2)).convert("RGB"))
-            if np_crop.size < 3 * 50:  # troppi pochi pixel
+            if np_crop.size < 3 * 50:  # too few pixels
                 out.append("unknown")
                 continue
 
@@ -215,10 +218,10 @@ class SceneGraphBuilder:
                 k = max(1, int(self.cfg.kmeans_clusters))
                 km = KMeans(n_clusters=k, n_init="auto").fit(flat)
                 centers = km.cluster_centers_.astype(np.uint8)  # RGB
-                # lab euristico per mappare a nomi brevi
+                # Heuristic mapping to short color names
                 labs = cv2.cvtColor(centers[np.newaxis, :, :], cv2.COLOR_RGB2LAB)[0]
                 L, a, b2 = labs.mean(axis=0)
-                # mapping molto grezzo
+                # Very rough mapping
                 if L > 200:
                     out.append("white")
                 elif L < 50:
@@ -236,28 +239,21 @@ class SceneGraphBuilder:
         return out
 
     def _relative_depth(self, image: Image.Image, centers: Sequence[Tuple[float, float]]) -> List[float]:
+        # Return normalized relative depth at given centers; default to 0.5 if unavailable.
         if self.depth is None or not self.depth.available():
             return [0.5] * len(centers)
         return self.depth.relative_depth_at(image, centers)
 
-    def _caption(self, image: Image.Image) -> str:
-        if self.captioner is None:
-            return ""
-        try:
-            return self.captioner.caption(image) or ""
-        except Exception:
-            return ""
-
     def _clip_sim_nodes(self, G: nx.DiGraph, i: int, j: int) -> float:
         """
-        Similarità CLIP nodo-nodo (dot tra embedding normalizzati).
+        Node-to-node CLIP similarity (dot product between normalized embeddings).
         """
         try:
             ei = G.nodes[i].get("clip_emb")
             ej = G.nodes[j].get("clip_emb")
             if ei is None or ej is None:
                 return 0.0
-            # prodotto scalare tra vettori normalizzati
+            # Dot product between normalized vectors
             s = float(np.dot(np.asarray(ei, dtype=np.float32), np.asarray(ej, dtype=np.float32)))
             return s
         except Exception:
@@ -272,6 +268,7 @@ class SceneGraphBuilder:
         W: int,
         H: int,
     ) -> None:
+        # Compute basic geometry between object i and j and decide whether to add the edge.
         b1 = boxes_xyxy[i]
         b2 = boxes_xyxy[j]
 
@@ -289,14 +286,14 @@ class SceneGraphBuilder:
         iou_val = float(iou_xyxy(b1, b2))
         clip_sim = float(self._clip_sim_nodes(G, i, j))
 
-        # logica di pruning come nel monolite:
-        # se iou è molto piccolo e simil CLIP è bassa, scarta
+        # Pruning (as in the original monolith):
+        # if IoU is very small and CLIP similarity is low, skip the edge
         if (iou_val < float(self.cfg.min_iou_keep)) and (clip_sim < float(self.cfg.min_clip_sim_keep)):
             return
 
         angle = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
 
-        # depth delta (opzionale)
+        # Depth delta (optional)
         d_i = G.nodes[i].get("depth_norm", None)
         d_j = G.nodes[j].get("depth_norm", None)
         depth_delta = (float(d_j) - float(d_i)) if (d_i is not None and d_j is not None) else 0.0
@@ -318,7 +315,7 @@ class SceneGraphBuilder:
     @staticmethod
     def union_crop(image: Image.Image, box_a: Sequence[float], box_b: Sequence[float]) -> Image.Image:
         """
-        Croppa l'area che abbraccia entrambi i box. Utile per CLIP-relations, se servisse.
+        Crop the minimal region covering both boxes. Useful for CLIP-relations, if needed.
         """
         W, H = image.size
         x1, y1, x2, y2 = union_box(box_a, box_b)

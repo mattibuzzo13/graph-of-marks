@@ -11,6 +11,7 @@ from PIL import Image
 from .base import Segmenter, SegmenterConfig
 
 
+# Official SAM v1 checkpoint URLs (Meta)
 _SAM_URLS = {
     "vit_h": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
     "vit_l": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
@@ -20,8 +21,8 @@ _SAM_URLS = {
 
 class Sam1Segmenter(Segmenter):
     """
-    Segment-Anything v1 (Meta). Richiede il pacchetto `segment_anything`.
-    Usa il prompt di tipo bounding-box con fallback a point-prompt centrale.
+    Segment Anything v1 (Meta). Requires the `segment_anything` package.
+    Uses a bounding-box prompt with a robust fallback to a single center point.
     """
 
     def __init__(
@@ -29,10 +30,10 @@ class Sam1Segmenter(Segmenter):
         checkpoint: Optional[str] = None,
         model_type: str = "vit_h",
         *,
-        points_per_side: int = 32,                  # non usato qui ma lasciato per compat
-        pred_iou_thresh: float = 0.8,               # non usato direttamente
-        stability_score_thresh: float = 0.85,       # non usato direttamente
-        min_mask_region_area: int = 300,            # non usato direttamente
+        points_per_side: int = 32,                  # kept for API compatibility; unused here
+        pred_iou_thresh: float = 0.8,               # not used directly
+        stability_score_thresh: float = 0.85,       # not used directly
+        min_mask_region_area: int = 300,            # not used directly
         config: Optional[SegmenterConfig] = None,
         auto_download: bool = True,
     ) -> None:
@@ -44,7 +45,7 @@ class Sam1Segmenter(Segmenter):
             from segment_anything import sam_model_registry, SamPredictor  # type: ignore
         except Exception as e:
             raise ImportError(
-                "segment_anything non installato. Installa da: "
+                "segment_anything is not installed. Install from: "
                 "https://github.com/facebookresearch/segment-anything"
             ) from e
 
@@ -67,7 +68,7 @@ class Sam1Segmenter(Segmenter):
             for box in boxes:
                 x1, y1, x2, y2 = self.clamp_box_xyxy(box, W, H)
 
-                # tentativi con shrink per robustezza
+                # Try progressively shrunken boxes for robustness; stop at first valid mask
                 mask_ok = None
                 score_ok = 0.0
                 for shrink in (0, 2, 4, 8, 12, 16):
@@ -87,7 +88,7 @@ class Sam1Segmenter(Segmenter):
                     score = float(scores_box[best])
 
                     if mask.sum() < 50:
-                        # fallback: point prompt in centro
+                        # Fallback: single positive point at the (clamped) box center
                         cx, cy = (xs + xe) // 2, (ys + ye) // 2
                         masks_pt, scores_pt, _ = self._predictor.predict(
                             point_coords=np.array([[cx, cy]]),
@@ -102,10 +103,10 @@ class Sam1Segmenter(Segmenter):
                         mask = self.close_mask_holes(mask)
 
                     mask_ok, score_ok = mask, score
-                    break  # abbiamo una mask valida; passa al prossimo box
+                    break  # valid mask obtained; proceed to next box
 
                 if mask_ok is None:
-                    # fallback vuoto
+                    # Final fallback: empty mask
                     mask_ok = np.zeros((H, W), dtype=bool)
                     score_ok = 0.0
 
@@ -119,7 +120,7 @@ class Sam1Segmenter(Segmenter):
                 )
             return out
         finally:
-            # pulizia per memoria GPU
+            # GPU memory cleanup between calls
             self._predictor.reset_image()
             if hasattr(self._predictor, "features"):
                 delattr(self._predictor, "features")
@@ -132,10 +133,10 @@ class Sam1Segmenter(Segmenter):
         if checkpoint:
             p = Path(checkpoint)
             if not p.exists():
-                raise FileNotFoundError(f"Checkpoint SAM-1 non trovato: {checkpoint}")
+                raise FileNotFoundError(f"SAM-1 checkpoint not found: {checkpoint}")
             return p
 
-        # default filename
+        # Default filename per model type
         fname = {
             "vit_h": "sam_vit_h_4b8939.pth",
             "vit_l": "sam_vit_l_0b3195.pth",
@@ -146,8 +147,8 @@ class Sam1Segmenter(Segmenter):
 
         if not p.exists():
             if not auto_download:
-                raise FileNotFoundError(f"Checkpoint SAM-1 assente: {p}")
-            # scarica
+                raise FileNotFoundError(f"Missing SAM-1 checkpoint: {p}")
+            # Download from official URL if absent
             url = _SAM_URLS.get(model_type, _SAM_URLS["vit_h"])
             from torch.hub import download_url_to_file
             download_url_to_file(url, str(p))

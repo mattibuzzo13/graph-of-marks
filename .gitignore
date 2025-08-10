@@ -31,3 +31,4 @@ __pycache__/
 **/output_images/
 **/configs/
 **/checkpoints/
+**/older_code/

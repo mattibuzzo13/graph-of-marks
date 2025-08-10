@@ -1,4 +1,8 @@
 # igp/detectors/owlvit.py
+# Wrapper around OWL-ViT (Owlv2) for open-vocabulary object detection.
+# Provides single-image inference, optional horizontal TTA, and robust
+# creation of `Detection` objects without altering core logic.
+
 from __future__ import annotations
 
 from typing import List, Optional, Sequence
@@ -13,6 +17,7 @@ from igp.detectors.base import Detector
 from igp.types import Detection
 
 
+# Default open-vocabulary queries (COCO-like plus a few extras).
 _DEFAULT_QUERIES: Sequence[str] = (
     "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
     "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
@@ -31,12 +36,15 @@ _DEFAULT_QUERIES: Sequence[str] = (
 
 class OwlViTDetector(Detector):
     """
-    Wrapper per OWL-ViT (Owlv2) 'open-vocabulary' object detection.
+    OWL-ViT (Owlv2) open-vocabulary object detector.
 
-    - Usa Owlv2Processor/Owlv2ForObjectDetection da Hugging Face.
-    - Richiede una lista di query testuali (default: insieme COCO-like).
-    - Ritorna List[Detection] con (box xyxy float, label str, score float).
+    - Uses Hugging Face Owlv2Processor / Owlv2ForObjectDetection.
+    - Requires a list of text queries (defaults to a COCO-like set).
+    - Returns List[Detection] with (xyxy box as float, label str, score float).
     """
+
+# NOTE: The class is redeclared below and will override this stub definition at import time.
+
 
 class OwlViTDetector(Detector):
     def __init__(
@@ -50,7 +58,7 @@ class OwlViTDetector(Detector):
         fp16: bool = True,
         low_cpu_mem_usage: bool = True,
     ) -> None:
-        # ✅ CHIAMATA ALLA BASE: Inizializza la classe padre
+        # Initialize base class (sets name, device selection, and score threshold).
         super().__init__(
             name="owlvit",
             device=device,
@@ -59,9 +67,10 @@ class OwlViTDetector(Detector):
         
         self.model_name = model_name
         self.queries: Sequence[str] = list(queries) if queries is not None else list(_DEFAULT_QUERIES)
-        # ✅ RIMUOVI: self.device e self.score_threshold sono già impostati da super()
+        # `self.device` and `self.score_threshold` are already defined by the base class.
         self.tta_hflip = bool(tta_hflip)
 
+        # Load processor/model; pick dtype based on device and fp16 flag.
         self.processor = Owlv2Processor.from_pretrained(model_name)
         dtype = torch.float16 if (fp16 and self.device == "cuda") else torch.float32
         self.model = Owlv2ForObjectDetection.from_pretrained(
@@ -71,16 +80,16 @@ class OwlViTDetector(Detector):
         ).to(self.device)
         self.model.eval()
 
-    # ----------------- API richiesta dalla base -----------------
+    # ----------------- Base API -----------------
 
     def detect(self, image: Image.Image) -> List[Detection]:
         """
-        ✅ USA IL METODO DELLA BASE: run() gestisce RGB + threshold automaticamente
+        Single-image inference.
+        Note: `_ensure_rgb` and score filtering are handled by `run()` in the base class.
         """
-        # Il metodo detect non deve più chiamare _ensure_rgb o _apply_score_threshold
-        # perché sarà chiamato tramite run() che li gestisce
         dets = self._detect_once(image)
 
+        # Optional TTA: horizontal flip + box re-projection.
         if self.tta_hflip:
             flipped = image.transpose(Image.FLIP_LEFT_RIGHT)
             dets_flip = self._detect_once(flipped)
@@ -91,23 +100,24 @@ class OwlViTDetector(Detector):
                 d = self._rebox(d, new_box)
                 dets.append(d)
 
-        return dets  # Non filtrare qui - sarà fatto da run()
+        return dets  # Do not threshold here; `run()` applies the global score filter.
 
-    # ----------------- Helpers interni -----------------
+    # ----------------- Internal helpers -----------------
 
     @torch.inference_mode()
     def _detect_once(self, image: Image.Image) -> List[Detection]:
-        # Owlv2 vuole batch → immagini=[image]
+        # OWLv2 expects batched inputs; wrap single image.
         encoding = self.processor(
             images=[image],
-            text=self.queries,           # lista di stringhe
+            text=self.queries,           # list of query strings
             return_tensors="pt",
         )
-        # sposta su device
+        # Move tensors to the selected device.
         encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
 
         outputs = self.model(**encoding)
 
+        # Post-process to image size.
         w, h = image.size
         target_sizes = torch.tensor([[h, w]], device=self.device)
         results = self.processor.post_process_grounded_object_detection(outputs=outputs, target_sizes=target_sizes)
@@ -126,35 +136,35 @@ class OwlViTDetector(Detector):
         
         detections: List[Detection] = []
         for box, score, lab_idx in zip(boxes, scores, labels):
-            # ✅ RIMUOVI: if score < self.score_threshold: continue
-            # La soglia sarà applicata da run()
+            # Thresholding is deferred; the base `run()` method will handle it.
             label = self._safe_label(lab_idx)
             detections.append(self._make_detection(box, label, float(score)))
 
         return detections
 
     def _safe_label(self, idx: int) -> str:
+        # Resolve label from query list; fall back to the index as string.
         try:
             return str(self.queries[idx])
         except Exception:
             return str(idx)
 
     def _make_detection(self, box_xyxy: Sequence[float], label: str, score: float) -> Detection:
+        # Create Detection robustly against variations of the dataclass signature.
         b = tuple(float(x) for x in box_xyxy[:4])
-        # Crea Detection in modo robusto rispetto alla signature reale
         try:
             return Detection(box=b, label=label, score=score, source="owlvit")
         except TypeError:
             try:
                 return Detection(box=b, label=label, score=score)
             except TypeError:
-                # minima compatibilità
+                # Minimal compatibility fallback.
                 return Detection(box=b, label=label)
 
     def _rebox(self, det: Detection, new_box_xyxy: Sequence[float]) -> Detection:
+        # Return a copy of `det` with a new box; handles immutable dataclasses.
         b = tuple(float(x) for x in new_box_xyxy[:4])
         try:
-            # Se Detection è immutabile, creane una nuova
             return Detection(
                 box=b,
                 label=getattr(det, "label", ""),

@@ -1,4 +1,5 @@
 # igp/segmentation/sam2.py
+# Thin wrapper around SAM 2.x: box-prompt segmentation with a center-point fallback.
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,8 +14,9 @@ from .base import Segmenter, SegmenterConfig
 
 class Sam2Segmenter(Segmenter):
     """
-    Segment-Anything 2.x (Meta). Richiede i moduli 'sam2' del repo ufficiale.
-    Usa bounding-box prompt, fallback a point-prompt centrale se la mask è troppo piccola.
+    Segment Anything 2.x (Meta). Requires the official `sam2` modules.
+    Uses a bounding-box prompt; if the mask is too small, falls back to a single
+    positive point at the box center.
     """
 
     def __init__(
@@ -42,17 +44,22 @@ class Sam2Segmenter(Segmenter):
                 f"Checkpoint SAM-2 non trovato: {ckpt_path} (fornisci un percorso valido)."
             )
         if not cfg_path.exists():
-            # molti ambienti caricano il cfg direttamente dall'installazione del repo;
-            # qui non forziamo il download del yaml: se manca, lasciamo proseguire,
-            # dato che build_sam2 accetta il path string.
+            # Many environments load the cfg directly from the installed repo.
+            # We don't force-download the YAML; build_sam2 accepts a string path.
             pass
 
         self._sam2_model = build_sam2(model_cfg, str(ckpt_path), device=self.device, precision="fp16").eval()
-        from sam2.sam2_image_predictor import SAM2ImagePredictor  # late import per mypy
+        from sam2.sam2_image_predictor import SAM2ImagePredictor  # late import for type checkers
         self._predictor = SAM2ImagePredictor(self._sam2_model)
 
     @torch.inference_mode()
     def segment(self, image_pil: Image.Image, boxes: Sequence[Sequence[float]]) -> List[Dict[str, Any]]:
+        """
+        Segment each box on the given image. Returns a list of dicts containing:
+          - 'segmentation': boolean mask (H, W)
+          - 'bbox': xywh box derived from the mask
+          - 'predicted_iou': model-reported score
+        """
         image_np = np.array(image_pil)
         H, W = image_np.shape[:2]
 
@@ -65,11 +72,12 @@ class Sam2Segmenter(Segmenter):
                 input_box = np.array([[x1, y1, x2, y2]])
 
                 try:
+                    # Primary attempt: box-prompt
                     masks, scores, _ = self._predictor.predict(box=input_box, multimask_output=False)
                     mask = masks[0]
                     score = float(scores[0]) if scores is not None else 1.0
                     if mask.sum() < 30:
-                        # fallback a punto centrale
+                        # Fallback: single positive point at box center
                         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                         masks, scores, _ = self._predictor.predict(
                             point_coords=np.array([[cx, cy]]),
@@ -79,6 +87,7 @@ class Sam2Segmenter(Segmenter):
                         mask = masks[0]
                         score = float(scores[0]) if scores is not None else score
                 except Exception:
+                    # Defensive fallback on predictor failure
                     mask = np.zeros((H, W), dtype=bool)
                     score = 0.0
 
@@ -95,6 +104,7 @@ class Sam2Segmenter(Segmenter):
                 )
             return out
         finally:
+            # Release cached features and GPU memory between calls
             if hasattr(self._predictor, "features"):
                 delattr(self._predictor, "features")
             if torch.cuda.is_available():

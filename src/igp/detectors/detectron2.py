@@ -9,7 +9,7 @@ from PIL import Image
 from igp.types import Detection
 from igp.detectors.base import Detector
 
-# Import Detectron2 solo quando necessario (evita costo all'import di altri detector)
+# Keep Detectron2 imports local to this module to avoid overhead elsewhere.
 from detectron2.config import get_cfg
 from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
@@ -18,12 +18,12 @@ from detectron2.data import MetadataCatalog
 
 class Detectron2Detector(Detector):
     """
-    Wrapper Detectron2 per object detection / instance segmentation.
+    Detectron2 wrapper for object detection / instance segmentation.
 
-    - Di default usa 'COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml'
-      con pesi del model zoo.
-    - Restituisce Detection con: box (x1,y1,x2,y2), label (string), score (float)
-      e, se disponibile, mask (np.ndarray bool di shape [H, W]).
+    - Defaults to 'COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml'
+      with model zoo weights.
+    - Returns Detection with: box (x1, y1, x2, y2), label (str), score (float),
+      and, if available, mask (bool np.ndarray of shape [H, W]).
     """
 
     def __init__(
@@ -39,20 +39,20 @@ class Detectron2Detector(Detector):
     ) -> None:
         """
         Args:
-            name: nome leggibile del detector (default: 'detectron2')
-            model_config: percorso nel model zoo (o file .yaml locale)
-            weights: url o path locale a pesi; se None usa quelli del model zoo
-            device: 'cuda' o 'cpu' (se None, usa device della base)
-            score_threshold: soglia conf. a runtime (inserita anche in cfg)
-            return_masks: se True, prova ad includere le maschere
-            class_names: override per i nomi di classe
+            name: human-readable detector name (default: 'detectron2').
+            model_config: model zoo path or local .yaml file.
+            weights: URL or local path to weights; if None, use model zoo weights.
+            device: 'cuda' or 'cpu' (if None, falls back to base class device).
+            score_threshold: runtime confidence threshold (also set in cfg).
+            return_masks: if True, include predicted masks when available.
+            class_names: optional override for class names.
         """
         super().__init__(name=name, device=device, score_threshold=score_threshold)
         self.model_config = model_config
         self.weights = weights
         self.return_masks = return_masks
 
-        # Costruzione cfg + predictor
+        # Build config and predictor.
         self.cfg = self._build_cfg(
             model_config=model_config,
             weights=weights,
@@ -61,28 +61,28 @@ class Detectron2Detector(Detector):
         )
         self.predictor = DefaultPredictor(self.cfg)
 
-        # Classi (se non fornite esplicitamente, prova a recuperarle da MetadataCatalog)
+        # Class names (use provided list or try to fetch from MetadataCatalog).
         if class_names is not None:
             self.classes = list(class_names)
         else:
-            # La maggior parte dei config del model zoo ha DATASETS.TRAIN valorizzato
+            # Most model zoo configs have DATASETS.TRAIN set.
             try:
                 train_ds = self.cfg.DATASETS.TRAIN[0]
                 self.classes = list(MetadataCatalog.get(train_ds).thing_classes)
             except Exception:
-                # fallback prudente: indicizza per id
+                # Conservative fallback: index by class id.
                 self.classes = []
 
     # --------------- lifecycle ----------------
 
     def close(self) -> None:
-        """Libera risorse del predictor (soprattutto GPU)."""
+        """Release predictor resources (notably GPU memory)."""
         try:
-            # Rilascio esplicito dei campi principali
+            # Explicitly drop main fields.
             del self.predictor
         except Exception:
             pass
-        # Svuota cache CUDA se presente
+        # Clear CUDA cache if available.
         try:
             import torch
 
@@ -94,18 +94,17 @@ class Detectron2Detector(Detector):
     # --------------- core API -----------------
 
     def detect(self, image: Image.Image) -> List[Detection]:
-
         img_np = np.array(image)  # H, W, 3 (RGB)
 
         outputs = self.predictor(img_np)
         instances = outputs["instances"].to("cpu")
 
-        # Predizioni base
+        # Base predictions.
         boxes = instances.pred_boxes.tensor.numpy().tolist() if instances.has("pred_boxes") else []
         scores = instances.scores.numpy().tolist() if instances.has("scores") else []
         classes = instances.pred_classes.numpy().tolist() if instances.has("pred_classes") else []
 
-        # Maschere (opzionali)
+        # Optional masks.
         masks_np: Optional[np.ndarray] = None
         if self.return_masks and instances.has("pred_masks"):
             # (N, H, W) bool
@@ -118,7 +117,7 @@ class Detectron2Detector(Detector):
             score = float(scores[i])
             cls_id = int(classes[i])
 
-            # label
+            # Map class id to label if available.
             if self.classes and 0 <= cls_id < len(self.classes):
                 label = str(self.classes[cls_id])
             else:
@@ -129,12 +128,12 @@ class Detectron2Detector(Detector):
             det = self._make_detection(box=box, label=label, score=score, mask=mask)
             detections.append(det)
 
-        # Applica anche un eventuale filtro di soglia globale (ridondante ma sicuro)
+        # Return raw detections; any global score threshold may be applied by the caller.
         return detections
 
     def detect_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
-        # Fallback semplice; per efficienza si potrebbe scrivere una versione batched,
-        # ma DefaultPredictor opera su singola immagine.
+        # Simple fallback: run single-image inference.
+        # For speed, a true batched path would be preferable, but DefaultPredictor is per-image.
         return [self.detect(img) for img in images]
 
     # --------------- helpers ------------------
@@ -148,14 +147,14 @@ class Detectron2Detector(Detector):
         score_threshold: Optional[float],
     ):
         cfg = get_cfg()
-        # Config dal model zoo (o percorso locale)
+        # Load config from model zoo (or local file path).
         try:
             cfg.merge_from_file(model_zoo.get_config_file(model_config))
             cfg.MODEL.WEIGHTS = (
                 weights if weights is not None else model_zoo.get_checkpoint_url(model_config)
             )
         except Exception:
-            # Se non è nel model zoo, proviamo a interpretarlo come file locale
+            # If not in the model zoo, interpret as a local config file.
             cfg.merge_from_file(model_config)
             if weights is not None:
                 cfg.MODEL.WEIGHTS = weights
@@ -177,28 +176,28 @@ class Detectron2Detector(Detector):
         mask: Optional[np.ndarray],
     ) -> Detection:
         """
-        Crea un Detection in modo robusto rispetto alla signature effettiva
-        della tua dataclass `igp.types.Detection`.
+        Create a Detection while being robust to the actual dataclass signature
+        of `igp.types.Detection`.
         """
-        # box in (x1,y1,x2,y2) float
+        # Box as (x1, y1, x2, y2) floats.
         b = tuple(float(x) for x in box[:4])
 
-        # Prova con i campi più ricchi, poi degrada in caso di TypeError
+        # Try the richest set of fields first; gracefully degrade on TypeError.
         try:
-            # Se Detection supporta tutti i campi
+            # If Detection supports all fields.
             return Detection(box=b, label=label, score=score, mask=mask, source=self.name)
         except TypeError:
             try:
-                # Se non supporta source
+                # If it does not support `source`.
                 return Detection(box=b, label=label, score=score, mask=mask)
             except TypeError:
                 try:
-                    # Se non supporta mask
+                    # If it does not support `mask`.
                     return Detection(box=b, label=label, score=score)
                 except TypeError:
-                    # Fallback minimo - controlla la definizione di Detection
+                    # Minimal fallback — check the concrete Detection definition.
                     from igp.types import Detection as DetectionType
-                    # Usa solo i campi obbligatori
+                    # Use only required fields.
                     return DetectionType(box=b, label=label, score=score)
 
 

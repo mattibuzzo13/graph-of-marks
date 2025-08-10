@@ -1,4 +1,8 @@
 # igp/detectors/yolov8.py
+# Minimal wrapper around Ultralytics YOLOv8.
+# Provides single-image detection, optional horizontal-flip TTA,
+# and robust `Detection` creation without changing core logic.
+
 from __future__ import annotations
 
 from typing import List, Optional, Sequence
@@ -13,6 +17,7 @@ from igp.types import Detection
 try:
     from ultralytics import YOLO
 except Exception as e:  # pragma: no cover
+    # Keep import-time error message concise; installation is required by the user.
     raise ImportError(
         "Ultralytics YOLOv8 non è installato. Installa con: pip install ultralytics"
     ) from e
@@ -20,10 +25,10 @@ except Exception as e:  # pragma: no cover
 
 class YOLOv8Detector(Detector):
     """
-    Wrapper minimale per Ultralytics YOLOv8.
+    Minimal wrapper for Ultralytics YOLOv8.
 
-    - Ritorna List[Detection] con box in formato (x1, y1, x2, y2) float, label str, score float.
-    - Opzionale TTA con flip orizzontale e rimappatura bbox.
+    - Returns List[Detection] with boxes (x1, y1, x2, y2) as floats, label as str, and score as float.
+    - Optional horizontal-flip TTA with bbox remapping back to the original image frame.
     """
 
     def __init__(
@@ -35,7 +40,7 @@ class YOLOv8Detector(Detector):
         imgsz: int = 640,
         tta_hflip: bool = False,
     ) -> None:
-        # ✅ CHIAMATA ALLA BASE
+        # Base initialization (sets name, device selection, and global score threshold).
         super().__init__(
             name="yolov8",
             device=device,
@@ -43,11 +48,11 @@ class YOLOv8Detector(Detector):
         )
         
         self.model = YOLO(model_path)
-        # ✅ RIMUOVI: self.device e self.score_threshold sono già dalla base
+        # `self.device` and `self.score_threshold` already come from the base class.
         self.imgsz = int(imgsz)
         self.tta_hflip = bool(tta_hflip)
 
-        # Porta il modello sul device
+        # Move the model to the selected device (handle different Ultralytics internals).
         try:
             self.model.to(self.device)
         except Exception:
@@ -57,7 +62,7 @@ class YOLOv8Detector(Detector):
                 pass
 
     def detect(self, image: Image.Image) -> List[Detection]:
-        """✅ Rimuovi filtro difensivo finale - gestito da run()"""
+        """Single-image detection; global score filtering is handled by `run()`."""
         dets = self._detect_once(image)
 
         if self.tta_hflip:
@@ -71,7 +76,7 @@ class YOLOv8Detector(Detector):
                 remapped.append(self._rebox(d, new_box))
             dets.extend(remapped)
 
-        # ✅ RIMUOVI il filtro difensivo - gestito da run()
+        # Return raw detections; `run()` will apply any global threshold.
         return dets
 
     # ---------------------------------------------------------------------
@@ -82,9 +87,9 @@ class YOLOv8Detector(Detector):
         image_np = np.array(image)
         results_list = self.model.predict(
             image_np,
-            conf=self.score_threshold,  
+            conf=self.score_threshold,  # model-level threshold (kept; caller may apply another)
             imgsz=self.imgsz,
-            device=self.device,  
+            device=self.device,
             verbose=False,
         )
 
@@ -92,12 +97,12 @@ class YOLOv8Detector(Detector):
             return []
 
         results = results_list[0]
-        # names: dict[int,str] (dipende dalla versione, gestiamo fallback)
+        # Retrieve class-name mapping (varies across Ultralytics versions).
         names = getattr(results, "names", None)
         if names is None:
             names = getattr(self.model, "names", None)
         if names is None:
-            # ulteriore fallback
+            # Last-resort fallback.
             names = getattr(getattr(self.model, "model", object()), "names", {})  # type: ignore[attr-defined]
 
         detections: List[Detection] = []
@@ -106,7 +111,7 @@ class YOLOv8Detector(Detector):
             conf = results.boxes.conf
             cls_ = results.boxes.cls
         except Exception:
-            # struttura inattesa
+            # Unexpected structure; return empty for safety.
             return []
 
         for box_t, conf_t, cls_t in zip(xyxy, conf, cls_):
@@ -117,6 +122,7 @@ class YOLOv8Detector(Detector):
                 label = str(names.get(cls_idx, cls_idx)) if isinstance(names, dict) else str(cls_idx)
                 detections.append(self._make_detection((x1, y1, x2, y2), label, score))
             except Exception:
+                # Skip malformed entries but continue processing others.
                 continue
 
         return detections
@@ -128,7 +134,7 @@ class YOLOv8Detector(Detector):
 
     def _make_detection(self, box_xyxy: Sequence[float], label: str, score: float) -> Detection:
         b = self._as_xyxy(box_xyxy)
-        # Crea Detection in modo robusto rispetto alla firma reale della dataclass
+        # Construct Detection robustly across possible dataclass signatures.
         try:
             return Detection(box=b, label=label, score=score, source="yolov8")
         except TypeError:
@@ -139,6 +145,7 @@ class YOLOv8Detector(Detector):
 
     def _rebox(self, det: Detection, new_box_xyxy: Sequence[float]) -> Detection:
         b = self._as_xyxy(new_box_xyxy)
+        # Return a new Detection with the updated box; handle immutable dataclasses.
         try:
             return Detection(
                 box=b,

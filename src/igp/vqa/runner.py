@@ -1,4 +1,9 @@
 # igp/vqa/runner.py
+# -----------------------------------------------------------------------------
+# Minimal VQA runner: preprocess images (optional), build prompts (optionally
+# with scene-graph text), call a model wrapper, and stream results to JSON.
+# Robust to restarts (skips processed pairs) and long runs (periodic GC).
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 import gc
 import glob
@@ -20,6 +25,7 @@ from .preproc import (
 from .io import load_image
 from .models import VLLMWrapper, HFVLModel
 
+# Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
 ModelLike = Union[VLLMWrapper, HFVLModel]
 
 def run_vqa(
@@ -39,8 +45,9 @@ def run_vqa(
     include_scene_graph: bool = False,
     inference_image: str = "preprocessed",
 ) -> List[Dict[str, Any]]:
-
+    # Create results file (incremental writes allow safe resume).
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
+
     results: List[Dict[str, Any]] = []
     if os.path.exists(out_json):
         with open(out_json, "r", encoding="utf-8") as f:
@@ -49,14 +56,17 @@ def run_vqa(
             except Exception:
                 results = []
 
+    # Track processed (image, question) pairs to skip on resume.
     processed = {(r.get("image_path"), r.get("question")) for r in results}
 
+    # Group by image to amortize preprocessing.
     grouped: Dict[str, List[VQAExample]] = {}
     for ex in examples:
         grouped.setdefault(ex.image_path, []).append(ex)
 
     img_paths = list(grouped)[:max_imgs] if max_imgs > 0 else list(grouped)
 
+    # Optional progress bar.
     try:
         from tqdm import tqdm
     except Exception:
@@ -71,6 +81,7 @@ def run_vqa(
                 if key in processed:
                     continue
 
+                # Periodic memory cleanup for long runs.
                 if len(processed) and len(processed) % 50 == 0:
                     gc.collect()
                     if torch.cuda.is_available():
@@ -78,7 +89,7 @@ def run_vqa(
                     mem = psutil.virtual_memory()
                     print(f"[GC] RAM used {mem.percent}%")
 
-                # 1) Immagine per l’inference
+                # --- 1) Choose image for inference (preprocessed or raw) ---
                 if skip_preproc:
                     processed_img = get_preprocessed_path(ex.image_path, ex.question, preproc_folder)
                     if not os.path.exists(processed_img):
@@ -102,6 +113,7 @@ def run_vqa(
                         image_dir=image_dir,  
                         aggressive_pruning=True
                     )
+                    # Be robust to extension/naming variants.
                     if not os.path.exists(processed_img):
                         base = os.path.splitext(os.path.basename(ex.image_path))[0]
                         qhash = __import__("hashlib").md5(ex.question.encode("utf-8")).hexdigest()[:8]
@@ -120,7 +132,7 @@ def run_vqa(
                 if not os.path.exists(inference_img):
                     raise FileNotFoundError(f"Image for inference not found: {inference_img}")
 
-                # 2) Scene graph (opzionale)
+                # --- 2) (Optional) prepend scene-graph triples to the prompt ---
                 scene_graph_text = ""
                 if include_scene_graph:
                     sg_path = get_scene_graph_path(ex.image_path, ex.question, preproc_folder)
@@ -131,11 +143,11 @@ def run_vqa(
                     if os.path.exists(sg_path):
                         scene_graph_text = load_scene_graph(sg_path)
 
-                # 3) Prompt
+                # --- 3) Build prompt from template (+ scene graph if available) ---
                 base_prompt = prompt_tpl.format(question=ex.question)
                 prompt = f"{scene_graph_text}{base_prompt}" if scene_graph_text else base_prompt
 
-                # 4) Generazione
+                # --- 4) Generate answer and log metadata ---
                 t0 = time.time()
                 ans = model.generate(prompt, image_path=inference_img)
                 if torch.cuda.is_available():
@@ -154,12 +166,14 @@ def run_vqa(
                 results.append(out_record)
                 processed.add(key)
 
+        # Persist after each image’s batch (safe resume).
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
 
     return results
 
 def evaluate(res: List[Dict[str, Any]]) -> Dict[str, float]:
+    # Exact-match scorer (case-insensitive). Returns empty dict if no gold.
     gold = [r for r in res if r.get("answer")]
     if not gold:
         return {}

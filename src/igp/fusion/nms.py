@@ -1,4 +1,7 @@
 # igp/fusion/nms.py
+# NMS/Soft-NMS utilities operating on `Detection` objects.
+# Includes IoU computation and a per-label NMS that returns kept indices.
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -8,7 +11,7 @@ from igp.types import Detection
 
 
 # ---------------------------------------------------------------------------
-# API PUBBLICA
+# PUBLIC API
 # ---------------------------------------------------------------------------
 
 def nms(
@@ -19,16 +22,16 @@ def nms(
     sort_desc: bool = True,
 ) -> List[Detection]:
     """
-    Non-Maximum Suppression su una lista di Detection.
+    Non-Maximum Suppression over a list of Detection objects.
 
     Args:
-        detections: lista di Detection (box xyxy, label, score).
-        iou_thr: soglia IoU per soppressione.
-        class_aware: se True applica NMS per classe; altrimenti globale.
-        sort_desc: ordina il risultato per score decrescente.
+        detections: list of detections (xyxy box, label, score).
+        iou_thr: IoU threshold for suppression.
+        class_aware: if True, apply NMS independently per class; otherwise global.
+        sort_desc: sort final results by descending score.
 
     Returns:
-        Lista filtrata di Detection.
+        Filtered list of Detection.
     """
     if not detections:
         return []
@@ -42,7 +45,7 @@ def nms(
 
     kept: List[Detection] = []
     for _, dets in groups.items():
-        # ordina per score
+        # sort by confidence score
         dets_sorted = sorted(dets, key=lambda d: float(_get_score(d)), reverse=True)
         suppress = [False] * len(dets_sorted)
 
@@ -73,11 +76,11 @@ def soft_nms(
     sort_desc: bool = True,
 ) -> List[Detection]:
     """
-    Soft-NMS (linear o gaussian) su Detection.
+    Soft-NMS (linear or gaussian) over Detection objects.
 
-    Note:
-        - È una versione semplice in-place su una copia; non richiede NumPy.
-        - 'method' seleziona il decadimento dello score.
+    Notes:
+        - Simple in-place style on a copy; NumPy not required.
+        - 'method' selects score decay strategy.
     """
     if not detections:
         return []
@@ -99,16 +102,16 @@ def soft_nms(
 
     kept: List[Detection] = []
     for _, dets in groups.items():
-        # lavora su una lista mutabile di copie
+        # operate on a mutable list of copies
         work = dets[:]
         while work:
-            # prendi il migliore
+            # pick current best
             work.sort(key=lambda d: float(_get_score(d)), reverse=True)
             best = work[0]
             kept.append(best)
             box_best = _as_xyxy(best.box)
 
-            # applica decadimento agli altri
+            # decay the rest
             rest: List[Detection] = []
             for d in work[1:]:
                 ov = iou(box_best, _as_xyxy(d.box))
@@ -128,6 +131,7 @@ def soft_nms(
 # ---------------------------------------------------------------------------
 
 def iou(b1: Sequence[float], b2: Sequence[float]) -> float:
+    """Intersection-over-Union for two boxes in (x1, y1, x2, y2) format."""
     x1, y1, x2, y2 = _as_xyxy(b1)
     X1, Y1, X2, Y2 = _as_xyxy(b2)
     ix1 = max(x1, X1)
@@ -162,8 +166,8 @@ def _set_score(d: Detection, new_score: float) -> None:
     try:
         d.score = float(new_score)  # type: ignore[attr-defined]
     except Exception:
-        # se Detection è immutabile, si potrebbe creare una nuova istanza,
-        # ma qui assumiamo che sia mutabile come nel resto del progetto.
+        # If Detection is immutable, we'd create a new instance,
+        # but here we assume mutability as elsewhere in the project.
         pass
 
 def labelwise_nms(
@@ -173,33 +177,33 @@ def labelwise_nms(
     iou_threshold: float = 0.5
 ) -> List[int]:
     """
-    Applica NMS per ogni classe separatamente e restituisce gli indici da mantenere.
+    Apply NMS separately per class and return indices to keep.
     
     Args:
-        boxes: Lista di bounding boxes in formato [x1, y1, x2, y2]
-        labels: Lista delle etichette corrispondenti
-        scores: Lista dei punteggi di confidenza
-        iou_threshold: Soglia IoU per la soppressione
+        boxes: list of boxes [x1, y1, x2, y2].
+        labels: corresponding labels.
+        scores: confidence scores.
+        iou_threshold: IoU threshold for suppression.
         
     Returns:
-        Lista di indici delle detection da mantenere
+        Indices of detections to keep, sorted by descending score.
     """
     if not boxes or len(boxes) != len(labels) or len(boxes) != len(scores):
         return []
     
-    # Raggruppa per etichetta
+    # Group indices by label
     label_groups: Dict[str, List[int]] = defaultdict(list)
     for i, label in enumerate(labels):
         label_groups[label].append(i)
     
     keep_indices = []
     
-    # Applica NMS per ogni gruppo di etichette
+    # NMS within each label group
     for label, indices in label_groups.items():
         if not indices:
             continue
             
-        # Ordina per score decrescente
+        # Sort by score (desc)
         indices_sorted = sorted(indices, key=lambda i: scores[i], reverse=True)
         
         suppressed = set()
@@ -211,7 +215,7 @@ def labelwise_nms(
             keep_indices.append(i)
             box_i = boxes[i]
             
-            # Sopprimi le detection con IoU alto
+            # Suppress high-overlap detections
             for j in indices_sorted:
                 if j == i or j in suppressed:
                     continue
@@ -219,12 +223,12 @@ def labelwise_nms(
                 if iou(box_i, boxes[j]) >= iou_threshold:
                     suppressed.add(j)
     
-    # Ordina gli indici risultanti per score decrescente
+    # Final ordering by score (desc)
     keep_indices.sort(key=lambda i: scores[i], reverse=True)
     return keep_indices
 
 def _clone_det(d: Detection) -> Detection:
-    # copia shallow con campi canonici noti; mantiene 'source' se presente
+    # Shallow copy using canonical fields; preserve 'source' when present.
     x1, y1, x2, y2 = _as_xyxy(d.box)
     label = _get_label(d)
     score = _get_score(d)

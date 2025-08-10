@@ -12,16 +12,18 @@ from igp.vqa.runner import run_vqa, evaluate
 from igp.vqa.preproc import run_preprocessing
 
 def _parse_args() -> argparse.Namespace:
+    # CLI for a modular VQA pipeline orchestrated with the IGP preprocessor.
+    # Exposes model, preprocessing, visualization, and caching controls.
     ap = argparse.ArgumentParser("VQA pipeline (modulare) + IGP preprocessor",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # I/O
+    # I/O for datasets and output
     ap.add_argument("--input_file", required=True, help="JSON file of QA examples")
     ap.add_argument("--output_file", default="vqa_results.json", help="Where to save VQA results")
     ap.add_argument("--image_dir", help="Base directory for relative image paths")
     ap.add_argument("--single_question", type=str, default=None, help="Usa la stessa domanda per tutte le immagini")
 
-    # Modello
+    # Model selection and decoding knobs
     ap.add_argument("--model_name", default="google/gemma-3-4b-it")
     ap.add_argument("--use_vllm", action="store_true")
     ap.add_argument("--device", default="cuda")
@@ -30,7 +32,7 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--top_p", type=float, default=0.9)
     ap.add_argument("--tensor_parallel_size", type=int, default=1)
 
-    # Preprocessing
+    # Preprocessing controls
     ap.add_argument("--preproc_folder", type=str, default="preprocessed")
     ap.add_argument("--disable_question_filter", action="store_true")
     ap.add_argument("--skip_preprocessing", action="store_true")
@@ -38,25 +40,25 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--include_scene_graph", action="store_true")
     ap.add_argument("--inference_image", choices=["preprocessed", "raw"], default="preprocessed")
 
-    # Batching/limiti
+    # Batching and limits
     ap.add_argument("--batch_size", type=int, default=1)
     ap.add_argument("--max_images", type=int, default=-1)
     ap.add_argument("--max_questions_per_image", type=int, default=-1)
 
-    # Prompt
+    # Prompt template
     ap.add_argument("--prompt_template", default="Question: {question}\nAnswer:")
 
-    # ✅ AGGIUNTI: Argomenti compatibili con image_preprocessor.py
+    # Compatibility alias (mirror of image_preprocessor.py)
     ap.add_argument("--output_folder", type=str, help="Output folder (alias for preproc_folder)")
     
-    # Detector
+    # Detector configuration
     ap.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
                    help="Comma-separated list of detectors")
     ap.add_argument("--owl_threshold", type=float, default=0.40)
     ap.add_argument("--yolo_threshold", type=float, default=0.80)
     ap.add_argument("--detectron_threshold", type=float, default=0.80)
 
-    # SAM
+    # SAM backend configuration
     ap.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
     ap.add_argument("--sam_hq_model_type", type=str, choices=["vit_b", "vit_l", "vit_h"], default="vit_h")
     ap.add_argument("--points_per_side", type=int, default=32)
@@ -68,18 +70,18 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--aggressive_pruning", action="store_true",
                    help="Tieni solo oggetti citati e relazioni richieste (pruning più duro)")
 
-    # Relazioni
+    # Relation inference constraints
     ap.add_argument("--max_relations_per_object", type=int, default=3)
     ap.add_argument("--min_relations_per_object", type=int, default=1)
     ap.add_argument("--margin", type=int, default=20)
     ap.add_argument("--min_distance", type=float, default=50)
     ap.add_argument("--max_distance", type=float, default=20000)
 
-    # NMS/segmentazione
+    # NMS/segmentation thresholds
     ap.add_argument("--label_nms_threshold", type=float, default=0.50)
     ap.add_argument("--seg_iou_threshold", type=float, default=0.70)
 
-    # Visualizzazione
+    # Visualization toggles and style
     ap.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
     ap.add_argument("--display_labels", action="store_true")
     ap.add_argument("--display_relationships", action="store_true")
@@ -99,33 +101,34 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--no_bboxes", action="store_true")
     ap.add_argument("--show_confidence", action="store_true")
 
-    # Colori e post-processing
+    # Color tuning
     ap.add_argument("--color_sat_boost", type=float, default=1.30)
     ap.add_argument("--color_val_boost", type=float, default=1.15)
 
-    # Hole filling
+    # Mask post-processing (hole filling)
     ap.add_argument("--close_holes", action="store_true")
     ap.add_argument("--hole_kernel", type=int, default=7)
     ap.add_argument("--min_hole_area", type=int, default=100)
 
-    # Output
+    # Output artifacts
     ap.add_argument("--save_image_only", action="store_true")
     ap.add_argument("--skip_graph", action="store_true")
     ap.add_argument("--skip_prompt", action="store_true")
     ap.add_argument("--skip_visualization", action="store_true")
     ap.add_argument("--export_preproc_only", action="store_true")
 
-    # Cache
+    # Detection cache
     ap.add_argument("--enable_detection_cache", action="store_true")
     ap.add_argument("--max_cache_size", type=int, default=100)
 
-    # Override rapidi per la pipeline
+    # Quick overrides of preprocessor config (k=v pairs)
     ap.add_argument("--preproc_override", nargs="*", default=[],
         help="Override k=v per la pipeline IGP")
 
     return ap.parse_args()
 
 def _parse_overrides(pairs: list[str]) -> dict:
+    # Parse "k=v" strings into a dict with basic type inference.
     out = {}
     for p in pairs:
         if "=" not in p: continue
@@ -145,16 +148,15 @@ def _parse_overrides(pairs: list[str]) -> dict:
 def main() -> int:
     args = _parse_args()
 
-    # ✅ COMPATIBILITÀ: Gestisci output_folder vs preproc_folder
+    # Folder aliasing: keep parity with image_preprocessor.py.
     if args.output_folder and not args.preproc_folder:
         args.preproc_folder = args.output_folder
     elif not args.output_folder and args.preproc_folder:
         args.output_folder = args.preproc_folder
 
-    # ✅ CONVERSIONE: Converti tutti gli argomenti di image_preprocessor in preproc_override
+    # Build preprocessor override list from CLI (only add non-defaults).
     preproc_overrides = list(args.preproc_override) if args.preproc_override else []
     
-    # Aggiungi parametri del preprocessor agli override (solo se diversi dai default)
     preprocessor_params = {
         'detectors_to_use': f"({','.join(args.detectors.split(','))})" if args.detectors != "owlvit,yolov8,detectron2" else None,
         'threshold_owl': args.owl_threshold if args.owl_threshold != 0.40 else None,
@@ -205,25 +207,25 @@ def main() -> int:
         'max_cache_size': args.max_cache_size if args.max_cache_size != 100 else None,
     }
     
-    # Aggiungi device del preprocessor se specificato
+    # Optional: pin preprocessor device
     if args.preproc_device:
         preprocessor_params['preproc_device'] = args.preproc_device
     
-    # Aggiungi solo parametri non-None ai preproc_override
+    # Materialize non-None overrides as "k=v" strings
     for key, value in preprocessor_params.items():
         if value is not None:
             preproc_overrides.append(f"{key}={value}")
 
-    # Carico esempi
+    # Load QA examples; optionally override all questions with a single query
     examples = load_examples(args.input_file)
     if args.single_question:
         for e in examples:
             e.question = args.single_question
 
-    # ✅ PARSING: Converti preproc_override in dict
+    # Convert overrides to a dict for the preprocessor
     preproc_cfg = _parse_overrides(preproc_overrides)
 
-    # Solo preprocessing?
+    # Optional preprocessing-only mode (no VQA generation)
     if args.preprocess_only:
         run_preprocessing(
             examples,
@@ -237,11 +239,12 @@ def main() -> int:
         print(f"[INFO] Preprocessing completato in: {args.preproc_folder}")
         return 0
 
-    # Login (se serve) e modello
+    # Optional HF Hub login via env var (avoids interactive login)
     tok = os.getenv("HF_TOKEN")
     if tok: 
         hf_login(token=tok)
 
+    # Select backend: vLLM (server-style) or HF Transformers (local)
     model = (
         VLLMWrapper(
             args.model_name,
@@ -260,7 +263,7 @@ def main() -> int:
         )
     )
 
-    # VQA con tutti i parametri
+    # Full VQA run: preprocess (unless skipped), prompt, generate, and log outputs
     res = run_vqa(
         examples, 
         model,
@@ -278,7 +281,7 @@ def main() -> int:
         inference_image=args.inference_image,
     )
 
-    # Metriche (se gold presente)
+    # Optional evaluation if ground-truth answers are present
     metrics = evaluate(res)
     if metrics:
         mfile = os.path.splitext(args.output_file)[0] + "_metrics.json"
@@ -288,9 +291,10 @@ def main() -> int:
     
     print(f"[INFO] Risultati VQA salvati in: {args.output_file}")
     if metrics:
-        print(f"[INFO] Metriche salvate in: {mfile}")
+        print(f("[INFO] Metriche salvate in: {mfile}"))
     
     return 0
 
 if __name__ == "__main__":
+    # Standard CLI entrypoint.
     raise SystemExit(main())

@@ -1,4 +1,7 @@
 # igp/pipeline/preprocessor.py
+# End-to-end pipeline to build an image graph:
+#   detect → fuse (WBF/NMS) → segment → depth → relations → scene graph → visualization/export.
+
 from __future__ import annotations
 
 import gc
@@ -34,7 +37,6 @@ from igp.segmentation.samhq import SamHQSegmenter
 
 # ---------- utils ----------
 from igp.utils.depth import DepthEstimator, DepthConfig
-from igp.utils.caption import Captioner
 from igp.utils.clip_utils import CLIPWrapper  
 from igp.utils.boxes import iou, clamp_xyxy  
 from igp.utils.colors import base_label
@@ -55,17 +57,16 @@ def build_scene_graph(
     depths: Optional[Sequence[float]] = None,
     caption: str = ""
 ) -> "nx.DiGraph":
-    """Wrapper per SceneGraphBuilder.build()"""
-
+    """Thin wrapper around SceneGraphBuilder.build() for compatibility."""
     
     W, H = image_size
-    # Crea un'immagine dummy per il builder
+    # Create a dummy image for the builder (the builder only needs size/crops).
     image = Image.new('RGB', (W, H), color='white')
     
     builder = _SceneGraphBuilder()
     return builder.build(image, boxes, labels, scores)
 
-# ✅ ALIAS per compatibilità con prompt.py
+# ✅ Alias kept for prompt serialization compatibility
 to_triples_text = graph_to_triples_text
 
 # ---------- viz ----------
@@ -80,13 +81,13 @@ class PreprocessorConfig:
     json_file: str = ""
     output_folder: str = "output_images"
 
-    # batching / dataset (opzionale)
+    # batching / dataset (optional)
     dataset: Optional[str] = None
     split: str = "train"
     image_column: str = "image"
     num_instances: int = -1
 
-    # domanda / filtri
+    # question / filtering
     question: str = ""
     apply_question_filter: bool = True
     aggressive_pruning: bool = False
@@ -94,13 +95,13 @@ class PreprocessorConfig:
     threshold_object_similarity: float = 0.50
     threshold_relation_similarity: float = 0.50
 
-    # detectors & soglie
+    # detectors & thresholds
     detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
     threshold_owl: float = 0.40
     threshold_yolo: float = 0.80
     threshold_detectron: float = 0.80
 
-    # relazioni per oggetto
+    # per-object relation limits
     max_relations_per_object: int = 3
     min_relations_per_object: int = 1
 
@@ -108,7 +109,7 @@ class PreprocessorConfig:
     label_nms_threshold: float = 0.50
     seg_iou_threshold: float = 0.70
 
-    # geometria
+    # geometry (pixels)
     margin: int = 20
     min_distance: float = 50
     max_distance: float = 20000
@@ -122,9 +123,9 @@ class PreprocessorConfig:
     min_mask_region_area: int = 100
 
     # device
-    preproc_device: Optional[str] = None  # es. "cpu" o "cuda"
+    preproc_device: Optional[str] = None  # e.g., "cpu" or "cuda"
 
-    # visualizzazione
+    # rendering toggles
     label_mode: str = "original"
     display_labels: bool = True
     display_relationships: bool = True
@@ -144,7 +145,7 @@ class PreprocessorConfig:
     show_bboxes: bool = True
     show_confidence: bool = False
 
-    # maschere (morph close dei buchi)
+    # mask post-processing (morphological close)
     close_holes: bool = False
     hole_kernel: int = 7
     min_hole_area: int = 100
@@ -154,13 +155,13 @@ class PreprocessorConfig:
     skip_graph: bool = False
     skip_prompt: bool = False
     skip_visualization: bool = False
-    export_preproc_only: bool = False  # salva PNG trasparente con solo overlay
+    export_preproc_only: bool = False  # save a transparent PNG with overlay only
 
-    # cache detection
+    # detection cache
     enable_detection_cache: bool = True
     max_cache_size: int = 100
 
-    # colori
+    # colors
     color_sat_boost: float = 1.30
     color_val_boost: float = 1.15
 
@@ -168,56 +169,50 @@ class PreprocessorConfig:
 # ----------------------------- Preprocessor -----------------------------
 class ImageGraphPreprocessor:
     """
-    Pipeline end-to-end:
-      detect → fuse(NMS/WBF) → segment → depth → relate → graph → viz/export
+    End-to-end pipeline:
+      detect → fuse (NMS/WBF) → segment → depth → relate → graph → viz/export.
     """
 
     def __init__(self, config: PreprocessorConfig) -> None:
         self.cfg = config
         os.makedirs(self.cfg.output_folder, exist_ok=True)
 
-        # device
+        # Device selection with CUDA fallback if available.
         if self.cfg.preproc_device:
             self.device = self.cfg.preproc_device
         else:
             try:
                 import torch
-
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 self.device = "cpu"
 
-        # detectors
+        # Detectors stack (open-vocab + closed-vocab for complementarity).
         self.detectors: List[Detector] = self._init_detectors()
 
-        # segmenter
+        # Segmenter selection (SAM v1 / v2 / HQ).
         self.segmenter: Segmenter = self._init_segmenter()
 
-        # depth + caption + CLIP helper (usato da relations se necessario)
+        # Depth, caption, and CLIP helpers (used by relations if enabled).
         depth_config = DepthConfig(device=self.device)
         self.depth_est = DepthEstimator(config=depth_config)
-        try:
-            self.captioner = Captioner(device=self.device)
-        except TypeError:
-            # Se anche Captioner usa config, crea un config appropriato
-            from igp.utils.caption import CaptionerConfig  # se esiste
-            caption_config = CaptionerConfig(device=self.device)
-            self.captioner = Captioner(config=caption_config)
+        
         try:
             self.clip = CLIPWrapper(device=self.device)
         except TypeError:
-            # Se anche CLIPWrapper usa config, crea un config appropriato
+            # If CLIPWrapper expects a config object, use the optional config path.
             from igp.utils.clip_utils import CLIPConfig
             clip_config = CLIPConfig(device=self.device)
             self.clip = CLIPWrapper(config=clip_config) 
 
+        # Relation inference with geometric constraints and optional CLIP.
         self.relations_inferencer = RelationInferencer(
             margin_px=config.margin,
             min_distance=config.min_distance,
             max_distance=config.max_distance
         )
 
-        # visualizer
+        # Visualization configuration (keeps visual output consistent for the paper).
         self.visualizer = Visualizer(
             VisualizerConfig(
                 display_labels=self.cfg.display_labels,
@@ -241,33 +236,31 @@ class ImageGraphPreprocessor:
             )
         )
 
-        # detection cache
+        # In-memory detection cache (per-image + per-params).
         self._detection_cache: Dict[str, Dict[str, Any]] = {}
         self._det_cache: Dict[str, Dict[str, Any]] = {}
 
     # ----------------------------- setup helpers -----------------------------
 
     def _init_detectors(self) -> List[Detector]:
-        """Inizializza i detector abilitati."""
+        """Initialize enabled detectors according to config."""
         dets: List[Detector] = []
         names = set(d.strip().lower() for d in self.cfg.detectors_to_use)
         
         if "owlvit" in names:
-            # ✅ CORREZIONE: Usa score_threshold invece di threshold
+            # Use score_threshold consistent with base Detector interface.
             dets.append(OwlViTDetector(
                 device=self.device, 
                 score_threshold=self.cfg.threshold_owl
             ))
         
         if "yolov8" in names:
-            # ✅ CORREZIONE: Usa score_threshold invece di threshold
             dets.append(YOLOv8Detector(
                 device=self.device, 
                 score_threshold=self.cfg.threshold_yolo
             ))
         
         if "detectron2" in names:
-            # ✅ CORREZIONE: Usa score_threshold invece di threshold
             dets.append(Detectron2Detector(
                 device=self.device, 
                 score_threshold=self.cfg.threshold_detectron
@@ -276,6 +269,7 @@ class ImageGraphPreprocessor:
         return dets
 
     def _init_segmenter(self) -> Segmenter:
+        """Create the SAM segmenter variant with common post-processing flags."""
         s_cfg = SegmenterConfig(
             device=self.device,
             close_holes=self.cfg.close_holes,
@@ -291,6 +285,7 @@ class ImageGraphPreprocessor:
     # ----------------------------- cache helpers -----------------------------
 
     def _generate_cache_key(self, image_pil: Image.Image, question: str = "") -> str:
+        """Hash the raw image bytes + relevant pipeline params to cache detections."""
         img_hash = hashlib.md5(image_pil.tobytes()).hexdigest()[:16]
         param_str = json.dumps(
             {
@@ -306,11 +301,13 @@ class ImageGraphPreprocessor:
         return f"{img_hash}_{param_hash}"
 
     def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        """Read detection results from cache if enabled."""
         if not self.cfg.enable_detection_cache:
             return None
         return self._detection_cache.get(key)
 
     def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
+        """Write detection results to cache with simple capacity control."""
         if not self.cfg.enable_detection_cache:
             return
         if len(self._detection_cache) >= int(self.cfg.max_cache_size):
@@ -321,12 +318,12 @@ class ImageGraphPreprocessor:
     # ----------------------------- pipeline core -----------------------------
 
     def _run_detectors(self, image_pil: Image.Image) -> Dict[str, Any]:
-        """Esegue tutti i detector e restituisce detections grezze (da fondere)."""
+        """Run all detectors and return raw detections ready for fusion."""
         all_dets: List[Dict[str, Any]] = []
         counts: Dict[str, int] = {}
         for det in self.detectors:
-            # ✅ USA run() che gestisce RGB + threshold automaticamente
-            out = det.run(image_pil)  # invece di det.detect(image_pil)
+            # Use base.run(): ensures RGB normalization + threshold handling.
+            out = det.run(image_pil)
             
             src_name = det.__class__.__name__
             counts[src_name] = len(out)
@@ -349,16 +346,16 @@ class ImageGraphPreprocessor:
         }
 
     def _wbf_fusion(self, all_detections: List[Dict[str, Any]], image_size: Tuple[int, int]) -> Tuple[List[List[float]], List[str], List[float]]:
-        """Fusione stile ensemble-boxes WBF con pesi per sorgente."""
+        """Weighted Boxes Fusion (WBF) with source-specific weights."""
         if not all_detections:
             return [], [], []
         W, H = image_size
-        # mappa label->id stabile
+        # Stable label mapping (normalize labels before fusion).
         canon_labels = [base_label(d["label"]) for d in all_detections]
         uniq_labels = sorted(set(canon_labels))
         label2id = {lb: i for i, lb in enumerate(uniq_labels)}
 
-        # ✅ CORREZIONE: Converti le detection in formato Detection per WBF
+        # Convert raw dicts to Detection objects for the fusion utility.
         from igp.types import Detection
         detections_obj = []
         
@@ -368,13 +365,13 @@ class ImageGraphPreprocessor:
             score = float(d["score"])
             source = d.get("from", "unknown")
             
-            # Crea oggetto Detection
+            # Robust construction for different Detection signatures.
             try:
                 det_obj = Detection(box=(x1, y1, x2, y2), label=label, score=score, source=source)
             except TypeError:
                 try:
                     det_obj = Detection(box=(x1, y1, x2, y2), label=label, score=score)
-                    det_obj.source = source  # Aggiungi manualmente se necessario
+                    det_obj.source = source
                 except TypeError:
                     det_obj = Detection(box=(x1, y1, x2, y2), label=label)
                     det_obj.score = score
@@ -382,7 +379,7 @@ class ImageGraphPreprocessor:
             
             detections_obj.append(det_obj)
 
-        # ✅ CORREZIONE: Usa la funzione corretta con parametri giusti
+        # Apply WBF with sensible defaults; returns fused boxes in pixels.
         fused_detections = weighted_boxes_fusion(
             detections_obj,
             image_size=(W, H),
@@ -393,7 +390,7 @@ class ImageGraphPreprocessor:
             sort_desc=True
         )
         
-        # Estrai i risultati
+        # Extract final arrays for downstream tasks.
         boxes_px = [list(d.box) for d in fused_detections]
         labels = [d.label for d in fused_detections]
         scores = [d.score for d in fused_detections]
@@ -401,7 +398,7 @@ class ImageGraphPreprocessor:
         return boxes_px, labels, scores
 
     def _fuse_with_det2_mask(self, sam_mask: np.ndarray, det2_mask: Optional[np.ndarray]) -> np.ndarray:
-        """Union con soglia IoU: se det2 presente e abbastanza compatibile, fai union."""
+        """Union with Detectron2 mask when sufficiently overlapping (IoU ≥ 0.5)."""
         if det2_mask is None:
             return sam_mask
         iou = self._mask_iou(sam_mask, det2_mask)
@@ -411,12 +408,13 @@ class ImageGraphPreprocessor:
 
     @staticmethod
     def _mask_iou(m1: np.ndarray, m2: np.ndarray) -> float:
+        """Binary mask IoU helper."""
         inter = np.logical_and(m1, m2).sum()
         union = np.logical_or(m1, m2).sum()
         return float(inter) / float(union) if union > 0 else 0.0
 
     def _apply_label_nms(self, boxes: List[List[float]], labels: List[str], scores: List[float]) -> Tuple[List[List[float]], List[str], List[float], List[int]]:
-        """NMS per classe (label-wise). Ritorna liste filtrate + indici mantenuti."""
+        """Per-class (label-wise) NMS; returns filtered lists and kept indices."""
         keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
         boxes_f = [boxes[i] for i in keep]
         labels_f = [labels[i] for i in keep]
@@ -425,19 +423,19 @@ class ImageGraphPreprocessor:
 
     def _parse_question(self, question: str) -> Tuple[set, set]:
         """
-        Estrae (object_terms, relation_terms) dalla domanda.
-        - object_terms: lemmi/noun semplici (fallback senza spaCy).
-        - relation_terms: together with sinonimi basilari.
+        Extract (object_terms, relation_terms) from the natural-language question.
+        - Lightweight token filtering for objects (no spaCy dependency).
+        - Basic synonym expansion for relations.
         """
         q = (question or self.cfg.question or "").strip().lower()
         if not q:
             return set(), set()
 
-        # object terms - fallback semplice
+        # Object terms — simple alpha tokens minus common function words.
         tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if t.isalpha()]
         obj_terms = {t for t in tokens if t not in {"the", "a", "an", "is", "are", "on", "in", "of", "to"}}
 
-        # relation terms (sinonimi basilari)
+        # Relation terms (primitive synonym map).
         rel_map = {
             "above": {"above"},
             "below": {"below", "under"},
@@ -463,7 +461,7 @@ class ImageGraphPreprocessor:
         scores: List[float],
         obj_terms: set,
     ) -> Tuple[List[List[float]], List[str], List[float]]:
-        """Se obj_terms non è vuoto, tiene solo gli oggetti con label base in obj_terms."""
+        """If `obj_terms` is not empty, keep only objects whose base label matches."""
         if not self.cfg.apply_question_filter or not obj_terms:
             return boxes, labels, scores
         idxs = [i for i, lb in enumerate(labels) if base_label(lb) in obj_terms]
@@ -474,6 +472,7 @@ class ImageGraphPreprocessor:
     # ----------------------------- single image -----------------------------
 
     def process_single_image(self, image_pil: Image.Image, image_name: str, custom_question: Optional[str] = None) -> None:
+        """Run the full pipeline on one image; save graph/triples/visual output if enabled."""
         t0 = time.time()
         W, H = image_pil.size
         cache_key = self._generate_cache_key(image_pil, custom_question or self.cfg.question)
@@ -483,9 +482,9 @@ class ImageGraphPreprocessor:
         if cached is None:
             det_raw = self._run_detectors(image_pil)
             boxes_fused, labels_fused, scores_fused = self._wbf_fusion(det_raw["detections"], (W, H))
-            # normalizza label in base form
+            # Normalize labels to a base form to improve consistency downstream.
             labels_fused = [base_label(l) for l in labels_fused]
-            # salva per successive fasi
+            # Persist for later stages (segmentation/union).
             det_for_mask = [
                 {
                     "box": b,
@@ -504,60 +503,57 @@ class ImageGraphPreprocessor:
             }
             self._cache_put(cache_key, cached)
         else:
-            pass  # usa cached
+            pass  # use cached results
 
         boxes = list(cached["boxes"])
         labels = list(cached["labels"])
         scores = list(cached["scores"])
         det2_for_mask = list(cached["det2"])
 
-        # 2) QUESTION FILTER (oggetti)
+        # 2) QUESTION FILTER (objects)
         obj_terms, rel_terms = self._parse_question(custom_question or self.cfg.question)
 
-        # ✅ SALVA I VALORI ORIGINALI PRIMA DEL PRUNING
+        # Preserve originals in case aggressive pruning is too strong.
         original_boxes = list(cached["boxes"])
         original_labels = list(cached["labels"])
         original_scores = list(cached["scores"])
 
         if self.cfg.aggressive_pruning:
-            # pruning "duro": tieni SOLO citati; fallback se vuoto
+            # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
             bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
             if bx_q:
                 boxes, labels, scores = bx_q, lb_q, sc_q
                 
-                # 🆕 FALLBACK: se rimane solo 1 oggetto, ripristina tutto e filtra le relazioni
+                # Fallback: if only one object survives, restore all objects and filter relations later.
                 if len(boxes) == 1:
-                    print(f"[FALLBACK] Solo 1 oggetto dopo aggressive pruning, ripristino tutti gli oggetti")
+                    print(f"[FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
                     
-                    # ✅ RIPRISTINA I VALORI ORIGINALI (non quelli filtrati!)
                     boxes, labels, scores = original_boxes, original_labels, original_scores
-                    
-                    # Memorizza l'indice dell'oggetto target originale
-                    target_obj_label = lb_q[0]  # L'unico oggetto rimasto dopo il pruning
+                    # Record the target object's indices to later keep only relations involving it.
+                    target_obj_label = lb_q[0]
                     target_indices = [i for i, label in enumerate(original_labels) 
                                     if base_label(label) == base_label(target_obj_label)]
                     
-                    # Salva gli indici per il filtraggio delle relazioni successivo
                     self._target_object_indices = set(target_indices)
-                    print(f"[FALLBACK] Oggetto target: {target_obj_label}, indici: {target_indices}")
-                    print(f"[FALLBACK] Ripristinati {len(boxes)} oggetti totali")
+                    print(f"[FALLBACK] Target object: {target_obj_label}, indices: {target_indices}")
+                    print(f"[FALLBACK] Restored {len(boxes)} total objects")
 
-        # 3) SEGMENTATION (SAM) + union con mask di Detectron2 se utile
+        # 3) SEGMENTATION (SAM) + optional union with Detectron2 masks
         masks = self.segmenter.segment(image_pil, boxes)
         for i in range(len(masks)):
             d2m = det2_for_mask[i].get("det2_mask")
             if d2m is not None:
                 masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
 
-        # 4) NMS per label (dopo rifinitura)
+        # 4) LABEL-WISE NMS
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores)
         masks = [masks[i] for i in keep]
 
-        # 5) DEPTH
+        # 5) DEPTH (at box centers)
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         depths = self.depth_est.relative_depth_at(image_pil, centers)
 
-        # 6) RELATIONS
+        # 6) RELATIONS (geometry + CLIP)
         r_cfg = RelationsConfig(
             margin_px=self.cfg.margin,
             min_distance=self.cfg.min_distance,
@@ -574,20 +570,20 @@ class ImageGraphPreprocessor:
             clip_threshold=0.23,
         )
         
-        # 🆕 FALLBACK: se abbiamo target objects da fallback, filtra le relazioni
+        # If fallback target was set, keep only relations involving those objects.
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
             rels_all = self._filter_relations_by_target_object(rels_all)
-            # Reset del flag dopo l'uso
+            # Clear the flag after use.
             delattr(self, '_target_object_indices')
 
-        # 6a) filtro per domanda (relazioni)
+        # 6a) Relation filtering by question terms (optional).
         if self.cfg.filter_relations_by_question and rel_terms:
             rels_all = self.relations_inferencer.filter_by_question(
                 rels_all,
                 question_terms=rel_terms,
                 threshold=self.cfg.threshold_relation_similarity
             )
-        # 6b) limiti per-oggetto + rimozione duplicati inversi
+        # 6b) Per-object limits and inverse-duplicate removal.
         rels_all = self.relations_inferencer.limit_relationships_per_object(
             rels_all,
             boxes,
@@ -597,33 +593,31 @@ class ImageGraphPreprocessor:
         )
         rels_all = self.relations_inferencer.drop_inverse_duplicates(rels_all)
 
-        # 7) GRAPH + PROMPT/TRIPLES
+        # 7) GRAPH + PROMPT/TRIPLES (optional)
         if not self.cfg.skip_graph or not self.cfg.skip_prompt or not self.cfg.skip_visualization:
-            caption = self.captioner.caption(image_pil)
             scene_graph = build_scene_graph(
                 image_size=(W, H),
                 boxes=boxes,
                 labels=labels,
                 scores=scores,
                 depths=depths,
-                caption=caption,
             )
         else:
             scene_graph = None
 
-        # salva scene graph (gpickle/json)
+        # Save scene graph (gpickle/json) if requested.
         if scene_graph is not None and not self.cfg.skip_graph:
             out_gpickle = os.path.join(self.cfg.output_folder, f"{image_name}_graph.gpickle")
             out_json = os.path.join(self.cfg.output_folder, f"{image_name}_graph.json")
             self._save_graph(scene_graph, out_gpickle, out_json)
 
-        # salva triples
+        # Save textual triples (always derived from scene_graph when available).
         if scene_graph is not None:
             triples_path = os.path.join(self.cfg.output_folder, f"{image_name}_graph_triples.txt")
             with open(triples_path, "w", encoding="utf-8") as f:
                 f.write(to_triples_text(scene_graph))
 
-        # 8) VIZ
+        # 8) VISUALIZATION / EXPORT
         if not self.cfg.skip_visualization:
             out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.jpg")
             self.visualizer.draw(
@@ -651,13 +645,13 @@ class ImageGraphPreprocessor:
                 bg_color=(1, 1, 1, 0),
             )
 
-        # cleanup
+        # Cleanup GPU/CPU memory between runs (useful for batches).
         self._free_memory()
         dt = time.time() - t0
         print(f"[DONE] {image_name} processed in {dt:.2f}s")
 
     def _filter_relations_by_target_object(self, relationships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filtra le relazioni mantenendo solo quelle che coinvolgono gli oggetti target."""
+        """Keep only relations that involve at least one of the fallback target objects."""
         if not hasattr(self, '_target_object_indices') or not self._target_object_indices:
             return relationships
         
@@ -665,22 +659,20 @@ class ImageGraphPreprocessor:
         for rel in relationships:
             src_idx = rel.get('src_idx', -1)
             tgt_idx = rel.get('tgt_idx', -1)
-            
-            # Mantieni la relazione se coinvolge almeno uno degli oggetti target
             if src_idx in self._target_object_indices or tgt_idx in self._target_object_indices:
                 filtered_rels.append(rel)
         
-        print(f"[FALLBACK] Relazioni filtrate: {len(filtered_rels)}/{len(relationships)} mantenute")
+        print(f"[FALLBACK] Filtered relations: {len(filtered_rels)}/{len(relationships)} kept")
         return filtered_rels
 
     # ----------------------------- runners -----------------------------
 
     def run(self) -> None:
         """
-        Entry-point batch:
-          - json_file: lista di dict con "image_path" e opzionale "question"
-          - dataset: (opzionale, richiede `datasets`) con split/colonna
-          - input_path: file singolo o cartella
+        Batch entry-point:
+          - json_file: list of dicts with "image_path" and optional "question"
+          - dataset: optional (requires `datasets`) with split/column
+          - input_path: single file or folder
         """
         if self.cfg.json_file:
             self._run_from_json(self.cfg.json_file)
@@ -713,6 +705,7 @@ class ImageGraphPreprocessor:
             self.process_single_image(img, name)
 
     def _run_from_json(self, json_path: str) -> None:
+        """Iterate a JSON file of items: {'image_path': ..., 'question': ...}."""
         with open(json_path, "r", encoding="utf-8") as f:
             rows = json.load(f)
         if self.cfg.num_instances > 0:
@@ -729,6 +722,7 @@ class ImageGraphPreprocessor:
             self.process_single_image(img, name, custom_question=q)
 
     def _run_from_dataset(self) -> None:
+        """Load a Hugging Face dataset split and process images in sequence."""
         try:
             from datasets import load_dataset  # type: ignore
         except Exception:
@@ -755,7 +749,6 @@ class ImageGraphPreprocessor:
                 img_pil = img_data
             elif isinstance(img_data, dict) and "bytes" in img_data:
                 from io import BytesIO
-
                 img_pil = Image.open(BytesIO(img_data["bytes"])).convert("RGB")
             elif isinstance(img_data, np.ndarray):
                 img_pil = Image.fromarray(img_data).convert("RGB")
@@ -769,7 +762,7 @@ class ImageGraphPreprocessor:
     # ----------------------------- utils -----------------------------
 
     def _pick_best_det2_mask_for_box(self, box: Sequence[float], detections: List[Dict[str, Any]]) -> Optional[np.ndarray]:
-        """Recupera, tra le detection detectron2, la mask con IoU max rispetto al box dato."""
+        """Among Detectron2 detections, return the mask with maximum IoU w.r.t. the given box."""
         best = None
         best_iou = 0.0
         for d in detections:
@@ -784,20 +777,19 @@ class ImageGraphPreprocessor:
         return best if best_iou >= 0.30 else None
 
     def _format_labels_for_display(self, labels: List[str]) -> List[str]:
-        """Applica modalità label (original/numeric/alphabetic) + eventuale suffisso indice."""
+        """Apply label display mode (original/numeric/alphabetic)."""
         if self.cfg.label_mode == "original":
             return [f"{lb}" for lb in labels]
         if self.cfg.label_mode == "numeric":
             return [str(i + 1) for i, _ in enumerate(labels)]
         if self.cfg.label_mode == "alphabetic":
             import string as _string
-
             return list(_string.ascii_uppercase[: len(labels)])
         return labels
 
     @staticmethod
     def _save_graph(G, path_gpickle: str, path_json: str) -> None:
-        """Salva gpickle + json node_link_data."""
+        """Save both gpickle (optionally gzipped) and node-link JSON for the scene graph."""
         # gpickle
         try:
             import gzip
@@ -812,24 +804,21 @@ class ImageGraphPreprocessor:
         # json
         try:
             import networkx as nx
-
             with open(path_json, "w", encoding="utf-8") as jf:
                 def _np_conv(o):
                     import numpy as _np
-
                     if isinstance(o, _np.generic):
                         return o.item()
                     raise TypeError
-
                 json.dump(nx.node_link_data(G), jf, default=_np_conv, indent=2)
         except Exception as e:
             print(f"[WARN] Could not save scene graph json: {e}")
 
     @staticmethod
     def _free_memory() -> None:
+        """Free GPU cache (if any) and run GC to reduce memory spikes in batches."""
         try:
             import torch
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:

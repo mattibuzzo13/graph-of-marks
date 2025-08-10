@@ -14,14 +14,18 @@ from transformers import (
 )
 from .io import load_image
 
-# vLLM (opzionale)
+# vLLM (optional)
+# We try to import vLLM. If it is not available, we set a feature flag (VLLM_OK=False)
+# so that code paths depending on vLLM can raise a clear error or be skipped gracefully.
 try:
     from vllm import LLM, SamplingParams  # type: ignore
     VLLM_OK = True
 except Exception:
     VLLM_OK = False
 
-# Qwen (opzionale)
+# Qwen (optional)
+# We also try to import Qwen 2.5-VL specific classes and helpers.
+# If they are missing, we set QWEN_OK=False and bypass those paths.
 try:
     from transformers import Qwen2_5_VLForConditionalGeneration  # type: ignore
     from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig  # type: ignore
@@ -31,36 +35,48 @@ except Exception:
     QWEN_OK = False
 
 # ---------------------------------------------------------------------
-# Helper download (progress bar) — compatibile Hugging Face hub
+# Helper download (progress bar) — compatible with the Hugging Face Hub
 # ---------------------------------------------------------------------
+# This utility fetches all files of a model repository from the Hugging Face Hub
+# and displays an overall progress bar. It returns the local snapshot directory
+# where the repository has been materialized in the cache. This is useful when
+# models require local paths (e.g., for offloading or custom loading logic).
 from pathlib import Path
 from packaging import version
 from huggingface_hub import __version__ as HF_VER
 from huggingface_hub import HfApi, hf_hub_download
 
 def download_repo_with_bar(repo_id: str, cache_dir: str) -> str:
+    # Query repository metadata to enumerate all files ("siblings").
     api = HfApi()
     try:
         info = api.model_info(repo_id, repo_type="model")
     except TypeError:
+        # Older huggingface_hub versions may not accept repo_type
         info = api.model_info(repo_id)
 
+    # Make the function robust by supporting both "siblings" and legacy "files" fields.
     siblings = getattr(info, "siblings", getattr(info, "files", []))
     files    = [s.rfilename for s in siblings]
     total    = sum((s.size or 0) for s in siblings)
 
+    # Create a progress bar if tqdm is available; otherwise proceed silently.
     try:
         from tqdm.auto import tqdm
         pbar = tqdm(total=total, unit="B", unit_scale=True, desc=f"Downloading {repo_id}")
     except Exception:
         pbar = None
 
+    # Download every file into the local cache (resuming if partially present).
+    # Track the snapshot directory so callers can refer to a stable local path.
     local_snapshot: Optional[Path] = None
     for f in files:
         local_file = Path(hf_hub_download(repo_id, filename=f, cache_dir=cache_dir, resume_download=True))
         if local_snapshot is None:
+            # Cache layout: .../models--{org}--{model}/snapshots/{commit}/file
             local_snapshot = local_file.parent
         if pbar:
+            # Update the progress bar with the file size. This approximates progress across files.
             pbar.update(local_file.stat().st_size)
     if pbar:
         pbar.close()
@@ -69,6 +85,9 @@ def download_repo_with_bar(repo_id: str, cache_dir: str) -> str:
 # ---------------------------------------------------------------------
 # vLLM wrapper
 # ---------------------------------------------------------------------
+# A thin adapter over vLLM that unifies text-only and vision-language prompting.
+# It selects the correct generation path depending on whether an image is passed
+# and whether the target model is recognized as vision-language (VL).
 class VLLMWrapper:
     def __init__(
         self,
@@ -80,20 +99,27 @@ class VLLMWrapper:
         top_p: float = 0.9,
         tensor_parallel_size: int = 1,
     ):
+        # Ensure vLLM is available at construction time; otherwise fail fast with guidance.
         if not VLLM_OK:
             raise ImportError("Install vLLM to use VLLMWrapper.")
+        # Heuristic check: mark as VL if the model name contains any known VL keywords.
         self.is_vl = any(t in model_name.lower() for t in ("gemma", "smolvlm2", "qwen", "llava", "blip", "phi-4", "bagel", "llamav"))
+        # Instantiate the vLLM engine. The dtype is chosen based on device for efficiency.
         self.llm = LLM(
             model=model_name,
             tensor_parallel_size=tensor_parallel_size,
             dtype="half" if device == "cuda" else "float32",
-            trust_remote_code=True,
+            trust_remote_code=True,  # allows custom modeling code provided by model repos
         )
+        # Set up decoding parameters: temperature, top-p, and the token budget.
         self.sampling = SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_length)
 
     def generate(self, prompt: str, *, image_path: Optional[str] = None) -> str:
+        # Use inference_mode to avoid autograd overhead; autocast("cuda") improves throughput on GPU.
         with torch.inference_mode(), autocast(device_type="cuda"):
             if self.is_vl and image_path:
+                # VL path: construct a chat-like message list with an image URL and the user text.
+                # vLLM's .chat API consumes structured messages following an OpenAI-like schema.
                 messages = [{
                     "role": "user",
                     "content": [
@@ -103,12 +129,19 @@ class VLLMWrapper:
                 }]
                 out = self.llm.chat(messages, sampling_params=self.sampling)
             else:
+                # Text-only path: use vLLM's batch generate API with a single-element prompt list.
                 out = self.llm.generate([prompt], self.sampling)
+        # Normalize the returned structure: take the first candidate and strip whitespace.
         return out[0].outputs[0].text.strip() if out and out[0].outputs else ""
 
 # ---------------------------------------------------------------------
-# HF Transformers wrapper (multi–modello, robusto)
+# HF Transformers wrapper (multi–model, robust)
 # ---------------------------------------------------------------------
+# This class provides a unified interface across various HF models (text-only and VL).
+# It:
+#  - Detects model families by name and chooses appropriate loading strategies.
+#  - Applies quantization/offload when helpful to fit into limited VRAM.
+#  - Uses model-specific generation paths when required by the architecture.
 class HFVLModel:
     def __init__(
         self,
@@ -120,8 +153,11 @@ class HFVLModel:
         top_p: float = 0.9,
         torch_dtype: str = "auto",
     ):
+        # Select a device: prefer CUDA if available and requested; otherwise fall back to CPU.
         self.device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
+        # Store decoding parameters.
         self.max_length, self.temperature, self.top_p = max_length, temperature, top_p
+        # Pre-compute family flags from the model name (lower-cased).
         name = model_name.lower()
         self.is_gemma  = "gemma" in name
         self.is_smol   = "smolvlm2" in name
@@ -131,23 +167,27 @@ class HFVLModel:
         self.is_bagel  = "bagel" in name
         self.is_llamav = ("llamav" in name) or ("llamav-o1" in name) or ("llamav_o1" in name)
 
+        # Choose a default dtype: bfloat16 on CUDA (if allowed by "auto") or a specific torch dtype by name.
         if torch_dtype == "auto" and torch.cuda.is_available():
             dtype = torch.bfloat16
         else:
             dtype = getattr(torch, torch_dtype, torch.float32)
 
+        # Try to load the model configuration eagerly. If this fails, we continue with None.
         cfg = None
         try:
             cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         except Exception:
             pass
 
+        # Helper that sets up a generic AutoProcessor + AutoModelForCausalLM pipeline.
         def _load_auto():
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(model_name, config=cfg, torch_dtype=dtype, trust_remote_code=True)
 
-        # — Gemma, Qwen, Bagel, LLaMA-V: percorsi dedicati con offload/quant —
+        # — Gemma, Qwen, Bagel, LLaMA-V: specialized paths with offload/quantization —
         if self.is_gemma:
+            # For Gemma-like repos, pre-download the snapshot for robust local loading and offload.
             cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
             local_repo = download_repo_with_bar(model_name, cache_dir)
             self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
@@ -157,16 +197,18 @@ class HFVLModel:
                 offload_folder="./offload", offload_buffers=True,
             )
         elif self.is_smol:
+            # SmolVLM2 exposes an ImageTextToText interface; we load the multimodal head explicitly.
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, device_map="auto", torch_dtype=dtype, trust_remote_code=True
             )
         elif self.is_qwen and QWEN_OK:
+            # Qwen 2.5-VL: 8-bit quantization for memory efficiency + robust config patching.
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
             cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
             local_repo = download_repo_with_bar(model_name, cache_dir)
 
-            # Patch TF >= 4.52 parallel_attn (robusta su cfg dict)
+            # Patch for newer transformers: ensure "parallel_attn" fields are lists of valid values.
             import transformers.modeling_utils as _mu
             if not getattr(_mu, "ALL_PARALLEL_STYLES", None):
                 _mu.ALL_PARALLEL_STYLES = ["none", "tp", "rowwise", "colwise"]
@@ -191,6 +233,7 @@ class HFVLModel:
             )
             self.model.eval()
         elif self.is_bagel:
+            # Bagel-like VL models: prefer ImageTextToText; if unavailable, fall back to CausalLM.
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
             cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
             local_repo = download_repo_with_bar(model_name, cache_dir)
@@ -203,6 +246,7 @@ class HFVLModel:
                     offload_folder="./offload", offload_buffers=True,
                 )
             except Exception:
+                # Some repos only provide a CausalLM interface; we still enable 8-bit quantization.
                 self.model = AutoModelForCausalLM.from_pretrained(
                     local_repo, device_map="auto", torch_dtype=torch.float16,
                     quantization_config=bnb_cfg, trust_remote_code=True,
@@ -211,6 +255,7 @@ class HFVLModel:
                 )
             self.model.eval()
         elif self.is_llamav:
+            # LLaMA-V family: use 4-bit quantization to reduce memory footprint on consumer GPUs.
             bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
             cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
             local_repo = download_repo_with_bar(model_name, cache_dir)
@@ -223,6 +268,7 @@ class HFVLModel:
                     offload_folder="./offload", offload_buffers=True,
                 )
             except Exception:
+                # Fallback if the multimodal head is not available.
                 self.model = AutoModelForCausalLM.from_pretrained(
                     local_repo, config=cfg, device_map="auto", torch_dtype=torch.float16,
                     quantization_config=bnb_cfg, trust_remote_code=True,
@@ -231,28 +277,37 @@ class HFVLModel:
                 )
             self.model.eval()
         elif self.is_phi4:
+            # Phi-4 multimodal (instruct) variant: plain AutoProcessor + CausalLM with the chosen dtype.
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, config=cfg, device_map="auto", torch_dtype=dtype, trust_remote_code=True
             )
         elif "llava" in name:
+            # LLaVA: use a dedicated processor and the LlavaForConditionalGeneration class.
             from transformers import LlavaProcessor  # type: ignore
             self.processor = LlavaProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = LlavaForConditionalGeneration.from_pretrained(
                 model_name, config=cfg, device_map="auto", torch_dtype=dtype
             )
         elif "blip" in name:
+            # BLIP-2 family: explicit BlipProcessor + Blip2ForConditionalGeneration (multimodal).
             self.processor = BlipProcessor.from_pretrained(model_name, trust_remote_code=True)
             self.model = Blip2ForConditionalGeneration.from_pretrained(model_name, config=cfg, torch_dtype=dtype)
         else:
+            # Generic (text-only or repos with custom heads that adhere to CausalLM API).
             _load_auto()
 
+        # If the model was not sharded across devices (no hf_device_map), move it onto `self.device`.
         if not getattr(self.model, "hf_device_map", None):
             self.model.to(self.device)
+        # Ensure eval mode to disable dropout and related training-time behavior.
         self.model.eval()
 
-    # — Implementazioni per modello (solo quelle che necessitano handler custom) —
+    # — Model-specific generation implementations (required for some architectures) —
     def _gen_qwen(self, prompt: str, image_path: Optional[str]):
+        # Qwen 2.5-VL can handle both text-only and VL inputs. For text-only,
+        # we call the tokenizer directly; for VL we construct a chat template
+        # and process image/video inputs via process_vision_info.
         assert QWEN_OK, "Install qwen_vl_utils to use Qwen2.5-VL"
         if not image_path:
             toks = self.processor(prompt, return_tensors="pt").to(self.device)
@@ -267,6 +322,8 @@ class HFVLModel:
         return self.processor.decode(trimmed[0], skip_special_tokens=True).strip()
 
     def _gen_llamav(self, prompt: str, image_path: Optional[str]):
+        # LLaMA-V style generation. For text-only, pass the prompt through the processor.
+        # For VL, construct a chat template that includes an image token plus user text.
         if not image_path:
             toks = self.processor(prompt, return_tensors="pt").to(self.device)
             gen = self.model.generate(**toks, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
@@ -275,14 +332,17 @@ class HFVLModel:
         messages = [{"role":"user","content":[{"type":"image","image":f"file://{image_path}"},{"type":"text","text":prompt}]}]
         chat_txt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[chat_txt], images=[img], return_tensors="pt", padding=True).to(self.device)
+        # The prefix corresponds to the input token length; we slice the generated tokens accordingly.
         prefix = inputs["input_ids"].shape[1]
         gen = self.model.generate(**inputs, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
         generated = gen[:, prefix:]
         return self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
 
     def generate(self, prompt: str, *, image_path: Optional[str]=None) -> str:
+        # Unified generation entry point.
+        # We enable inference_mode and CUDA autocast (on GPU) for speed and memory efficiency.
         with torch.inference_mode(), autocast(device_type="cuda"):
-            # Gemma (placeholder)
+            # Gemma (placeholder): some Gemma-based VL interfaces expect a special image token.
             if self.is_gemma and image_path:
                 img = load_image(image_path)
                 if "<start_of_image>" not in prompt:
@@ -292,10 +352,12 @@ class HFVLModel:
                 generated = gen[:, inputs["input_ids"].shape[1]:]
                 return self.processor.decode(generated[0], skip_special_tokens=True).strip()
 
+            # Delegate to model-specific handlers when required.
             if self.is_qwen:   return self._gen_qwen(prompt, image_path)
             if self.is_llamav: return self._gen_llamav(prompt, image_path)
 
-            # Generico multimodale (BLIP/LLaVA/Auto ImageTextToText)
+            # Generic multimodal path (BLIP/LLaVA/Auto ImageTextToText):
+            # For some processors a literal "<image>" token is expected by the model's template.
             if image_path:
                 img = load_image(image_path)
                 multimodal_prompt = "<image> " + prompt
@@ -303,7 +365,7 @@ class HFVLModel:
                 gen = self.model.generate(**inputs, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
                 return self.processor.decode(gen[0], skip_special_tokens=True).strip()
 
-            # Solo testo
+            # Text-only path: standard tokenization + generation + decoding.
             toks = self.processor(prompt, return_tensors="pt").to(self.device)
             gen = self.model.generate(**toks, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
             return self.processor.decode(gen[0], skip_special_tokens=True).strip()

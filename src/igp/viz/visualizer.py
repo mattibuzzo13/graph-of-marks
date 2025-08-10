@@ -1,3 +1,20 @@
+# Visual overlay utilities for detections, masks, and relationships.
+# This module renders:
+#   • instance segmentations / bounding boxes
+#   • object labels (auto-placed inside/outside with contrast-aware text)
+#   • relationship arrows and optional relation labels
+#   • a compact legend
+#
+# Design notes (high level):
+#   - Drawing runs in ordered steps so depth, labels, and arrows compose cleanly.
+#   - Overlap resolution is split into focused passes:
+#       (1) object labels vs object labels
+#       (2) arrows vs arrows (tweak curvature when they collide)
+#       (3) relation labels vs object labels
+#       (4) relation labels vs relation labels
+#   - All "nudging" happens in data/display space with renderer-measured bboxes.
+#   - Fallbacks are in place for optional deps (OpenCV, adjustText).
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,7 +26,7 @@ import matplotlib.patches as patches
 
 from PIL import Image
 
-# opzionali (degradano con fallback)
+# Optional dependencies (gracefully degrade if missing)
 try:
     import cv2  # type: ignore
 except Exception:
@@ -20,10 +37,11 @@ try:
 except Exception:
     adjust_text = None  # fallback
 
+# Color helpers (prefer fast function import; fall back to ColorCycler if unavailable)
 try:
     from igp.utils.colors import color_for_label, text_color_for_bg
 except ImportError:
-    # Fallback: usa ColorCycler esistente
+    # Fallback: use existing ColorCycler for consistent per-class coloring
     from igp.utils.colors import ColorCycler, text_color_for_bg  # type: ignore
 
     _color_cycler = ColorCycler()
@@ -35,24 +53,24 @@ except ImportError:
         val_boost: float = 1.15,
         cache: Optional[dict] = None,
     ) -> str:
-        """Wrapper minimal per ColorCycler.color_for_label."""
+        """Minimal wrapper over ColorCycler.color_for_label for stable class colors."""
         return _color_cycler.color_for_label(label)
 
 
 @dataclass
 class VisualizerConfig:
-    # cosa mostrare
+    # WHAT to show
     display_labels: bool = True
     display_relationships: bool = True
     display_relation_labels: bool = True
     display_legend: bool = True
 
-    # cosa disegnare per gli oggetti
+    # HOW to draw objects
     show_segmentation: bool = True
     fill_segmentation: bool = True
     show_bboxes: bool = True
 
-    # stile oggetti/relazioni
+    # Typography / styling
     obj_fontsize_inside: int = 12
     obj_fontsize_outside: int = 12
     rel_fontsize: int = 10
@@ -62,53 +80,52 @@ class VisualizerConfig:
     rel_arrow_linewidth: float = 2.0
     rel_arrow_mutation_scale: float = 22.0
 
-    # gestione relazioni
+    # Relationship post-processing
     filter_redundant_relations: bool = True
     cap_relations_per_object: bool = False
     max_relations_per_object: int = 1
     min_relations_per_object: int = 1
 
-    # etichette
+    # Label content/mode
     label_mode: str = "original"  # "original" | "numeric" | "alphabetic"
     show_confidence: bool = False
 
-    # posizionamento etichette interne
-    min_area_ratio_inside: float = 0.006  # 0.6% dell'immagine
+    # Inside-label placement constraints
+    min_area_ratio_inside: float = 0.006  # 0.6% of the image area
     inside_label_margin_px: int = 6
     min_solidity_inside: float = 0.45
-    measure_text_with_renderer: bool = True  # renderer preciso di default
+    measure_text_with_renderer: bool = True  # precise renderer-based text sizing
 
-    # risoluzione sovrapposizioni
+    # Overlap resolution strategy
     resolve_overlaps: bool = True
     adjust_text_profile: str = "dense"  # "balanced" | "dense"
     micro_push_iters: int = 60
     
-    # controllo profondità
+    # Depth handling
     use_depth_ordering: bool = True
     depth_key: str = "depth"
 
-    # posizionamento etichette relazioni
+    # Relation label placement policy
     relation_label_placement: str = "near_arrow"  # "near_arrow" | "midpoint"
     relation_label_offset_px: float = 10.0
     relation_label_max_dist_px: float = 30.0
 
-    # color tweaks
+    # Global color tweaks
     color_sat_boost: float = 1.30
     color_val_boost: float = 1.15
 
-    # relazione speciale
+    # Special heuristic knobs (kept for parity with geometry rules elsewhere)
     on_top_gap_px: int = 8
     on_top_horiz_overlap: float = 0.35
 
 
 class Visualizer:
     """
-    Visualizza:
-      - maschere SAM (opzionale, con riempimento/contorno)
-      - bounding boxes (opzionale)
-      - etichette dentro/fuori gli oggetti con contrasto automatico
-      - frecce di relazione (con eventuali etichette)
-      - legenda per classi (max 10 voci)
+    High-level renderer:
+      - draws SAM masks and/or boxes,
+      - places object labels (inside if feasible, otherwise outside with connectors),
+      - plots relationship arrows and optional labels,
+      - composes a small legend (top-right).
     """
 
     SPATIAL_KEYS = (
@@ -140,19 +157,19 @@ class Visualizer:
         draw_background: bool = True,
         bg_color: Tuple[float, float, float, float] = (1, 1, 1, 0),
     ) -> None:
-        """Disegna l'overlay e salva/mostra il risultato."""
-        cfg = self.cfg  # alias locale per evitare getattr ripetuti
+        """Main entry point: composes overlay in well-defined passes to minimize clutter."""
+        cfg = self.cfg  # local alias to avoid repeated getattr
         fig, ax = plt.subplots(figsize=(10, 8))
         W, H = image.size
 
-        # 0) filtro relazioni
+        # 0) Pre-filter relationships (redundancy + per-object caps if enabled)
         rels = list(relationships)
         if cfg.filter_redundant_relations:
             rels = self._filter_redundant_relations(rels)
         if cfg.cap_relations_per_object:
             rels = self._cap_relations_per_object(rels, boxes)
 
-        # 1) sfondo
+        # 1) Canvas background: original image or transparent layer
         if draw_background:
             ax.imshow(image)
             ax.axis("off")
@@ -164,42 +181,42 @@ class Visualizer:
             if len(bg_color) == 4 and bg_color[3] == 0:
                 fig.patch.set_alpha(0)
 
-        # 2) colori per oggetti
+        # 2) Assign stable colors for each object (based on base class label)
         obj_colors = [self._pick_color(labels[i], i) for i in range(len(boxes))]
 
-        # 3) oggetti + label oggetto (ordinati per profondità)
+        # 3) Objects pass — draw masks/boxes respecting an approximate depth order.
+        #    Labels are staged and laid out later to reduce collisions.
         detection_labels_info: List[Tuple[Tuple[float, float], str, str]] = []
         placed_positions: List[Tuple[float, float]] = []
         overlap_threshold = 30
 
         centers: List[Tuple[float, float]] = []
         
-        # Crea lista di oggetti con i loro indici per ordinamento per profondità
+        # Compute a rough "depth index" for z-ordering (farther first, nearer last).
         objects_with_depth = []
         for i, box in enumerate(boxes):
-            # Estrai l'indice di profondità se presente nel label, altrimenti usa l'indice dell'oggetto
             depth_index = self._extract_depth_index(labels[i], i)
             objects_with_depth.append((i, box, depth_index))
         
-        # Ordina per profondità (più lontano prima = indice più alto)
+        # Draw shapes back-to-front so near objects appear above far ones.
         objects_with_depth.sort(key=lambda x: x[2], reverse=True)
         
-        # Prima pass: disegna solo segmentazioni/bbox in ordine di profondità
+        # First pass: only geometry (masks or boxes), no text yet.
         for original_idx, box, depth_idx in objects_with_depth:
             col = obj_colors[original_idx]
             x1, y1, x2, y2 = map(int, box[:4])
             
             best_mask = self._best_mask(original_idx, masks)
             
-            # Disegna segmentazione/bbox con z-order basato sulla profondità
-            z_order_seg = 1 + (len(boxes) - depth_idx) * 0.1  # più vicino = z-order più alto
+            # Higher z-order for nearer objects (slight increments).
+            z_order_seg = 1 + (len(boxes) - depth_idx) * 0.1
             
             if cfg.show_segmentation and best_mask is not None and best_mask.get("segmentation") is not None:
                 self._draw_mask(ax, best_mask["segmentation"], color=col, linewidth=cfg.bbox_linewidth, zorder=z_order_seg)
             elif cfg.show_bboxes:
                 self._draw_box(ax, x1, y1, x2, y2, color=col, linewidth=cfg.bbox_linewidth, zorder=z_order_seg)
         
-        # Seconda pass: calcola centri e prepara etichette (in ordine originale)
+        # Second pass: compute centers and stage labels for inside/outside placement.
         for i, box in enumerate(boxes):
             col = obj_colors[i]
             x1, y1, x2, y2 = map(int, box[:4])
@@ -213,6 +230,7 @@ class Visualizer:
                     image, box, best_mask, label_text, ax if cfg.measure_text_with_renderer else None
                 )
                 if place_inside:
+                    # Contrast-aware text color on top of the object color swatch
                     txt_col = text_color_for_bg(col)
                     ax.text(
                         (x1 + x2) / 2,
@@ -232,11 +250,12 @@ class Visualizer:
                         zorder=7,
                     )
                 else:
+                    # Stage an outside label anchored near the object center; avoid local overlap.
                     center_pt = self._adjust_position((cx, cy), placed_positions, overlap_threshold)
                     placed_positions.append(center_pt)
                     detection_labels_info.append((center_pt, label_text, col))
 
-        # 4) prepara relazioni
+        # 4) Prepare relationship geometry; defer text until arrows are placed.
         arrow_patches: List[patches.FancyArrowPatch] = []
         rel_texts: List[Any] = []
         rel_anchors: List[Tuple[float, float]] = []
@@ -244,10 +263,12 @@ class Visualizer:
         rel_label_specs: List[Dict[str, Any]] = []
 
         if cfg.display_relationships and rels:
+            # Track multiple arrows between same node pair and add curvature offsets.
             arrow_counts: Dict[Tuple[int, int], int] = {}
             for rel in rels:
                 s0, t0 = int(rel["src_idx"]), int(rel["tgt_idx"])
                 name = str(rel.get("relation", "")).lower()
+                # Spatial labels are rendered with visually consistent arrow direction.
                 s, t = (t0, s0) if any(k in name for k in self.SPATIAL_KEYS) else (s0, t0)
                 if not (0 <= s < len(centers) and 0 <= t < len(centers)):
                     continue
@@ -258,10 +279,11 @@ class Visualizer:
                 arrow_counts[(s, t)] = arrow_counts.get((s, t), 0) + 1
                 rad_offset = 0.2 + 0.1 * (arrow_counts[(s, t)] - 1)
 
-                # anchor "ideale" per testo relazione (midpoint + offset perpendicolare se curvata)
+                # Midpoint to seed a label position (later refined)
                 mid_x = (start[0] + end[0]) / 2.0
                 mid_y = (start[1] + end[1]) / 2.0
                 if rad_offset != 0:
+                    # Offset perpendicular to the segment when multiple arcs exist.
                     dx = end[0] - start[0]
                     dy = end[1] - start[1]
                     length = max(1e-6, (dx ** 2 + dy ** 2) ** 0.5)
@@ -276,7 +298,7 @@ class Visualizer:
 
                 rel_draw_data.append({"src_pt": start, "tgt_pt": end, "color": col, "rad": rad_offset})
 
-        # STEP 1: disegna label oggetti esterne e risolvi solo le loro sovrapposizioni
+        # STEP 1 — draw outside object labels and de-conflict among themselves only.
         obj_texts: List[Any] = []
         obj_anchors: List[Tuple[float, float]] = []
         for (pt, text, color) in detection_labels_info:
@@ -297,10 +319,10 @@ class Visualizer:
             fig.canvas.draw()
             self._resolve_object_overlaps_only(ax, obj_texts, obj_anchors)
 
-        # STEP 2: disegna frecce (solo frecce, senza etichette) e verifica non overlapping
+        # STEP 2 — draw relationship arrows (without labels yet); then fix arrow/arrow collisions.
         if cfg.display_relationships and rel_draw_data:
             fig.canvas.draw()
-            SHRINK_PX = 6
+            SHRINK_PX = 6  # keep arrow tails/heads out of object centers
             for d in rel_draw_data:
                 p0, p1 = self._shrink_segment_px(d["src_pt"], d["tgt_pt"], SHRINK_PX, ax)
                 arrow = patches.FancyArrowPatch(
@@ -316,15 +338,14 @@ class Visualizer:
                 ax.add_patch(arrow)
                 arrow_patches.append(arrow)
 
-            # Verifica e correggi sovrapposizioni tra frecce
+            # Try separating colliding arrows by incrementally adjusting curvature.
             if cfg.resolve_overlaps:
                 fig.canvas.draw()
                 self._resolve_arrow_overlaps(ax, arrow_patches, rel_draw_data)
 
-            # STEP 3: aggiungi etichette relazioni al centro delle frecce
+            # STEP 3 — place relation labels (midpoint/near-arrow), then resolve label overlaps.
             if cfg.display_relation_labels and rel_label_specs:
                 for spec, arrow in zip(rel_label_specs, arrow_patches):
-                    # Posiziona al centro della freccia o leggermente spostata se troppo piccola
                     center_pos = self._get_optimal_relation_label_position(ax, arrow, spec["text"])
                     
                     tr = ax.text(
@@ -341,22 +362,23 @@ class Visualizer:
                     rel_texts.append(tr)
                     rel_anchors.append(center_pos)
 
-                # STEP 4a: risolvi sovrapposizioni etichette relazioni vs etichette oggetti
+                # STEP 4a — de-conflict relation labels vs object labels (keep relation text near its arrow).
                 if cfg.resolve_overlaps:
                     fig.canvas.draw()
                     self._resolve_relation_vs_object_overlaps(ax, obj_texts, rel_texts, arrow_patches, cfg.relation_label_max_dist_px)
 
-                # STEP 4b: risolvi sovrapposizioni tra etichette relazioni
+                # STEP 4b — de-conflict relation labels among themselves.
                 if cfg.resolve_overlaps:
                     fig.canvas.draw()
                     self._resolve_relation_vs_relation_overlaps(ax, rel_texts, arrow_patches, cfg.relation_label_max_dist_px)
 
-        # 8) connector lines
+        # 8) Connector lines: outside object labels → their anchor points
         for t, pt in zip(obj_texts, obj_anchors):
             ax.annotate("", xy=pt, xytext=t.get_position(),
                         arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="-"),
                         zorder=6)
 
+        # Connector lines: relation labels → nearest point on corresponding arrow
         if cfg.display_relationships and cfg.display_relation_labels and rel_texts and arrow_patches:
             for t_rel, arrow in zip(rel_texts, arrow_patches):
                 xt, yt = t_rel.get_position()
@@ -365,7 +387,7 @@ class Visualizer:
                             arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="dotted"),
                             zorder=6)
 
-        # 9) legenda
+        # 9) Legend: at most 10 base classes for readability
         if cfg.display_legend and len(labels) > 0:
             uniq_base = sorted({lab.rsplit("_", 1)[0] for lab in labels})
             handles = [patches.Patch(color=self._pick_color(lb, 0), label=lb) for lb in uniq_base[:10]]
@@ -382,24 +404,25 @@ class Visualizer:
     # ------------------------------------------------------------------ pipeline methods
 
     def _extract_depth_index(self, label: str, fallback_index: int, metadata: Optional[Dict[str, Any]] = None) -> int:
-        """Estrae l'indice di profondità dal label, metadati o usa l'indice di fallback."""
-        # Prima prova con metadati espliciti
+        """Derive a sortable "depth index" from metadata or trailing digits in the label."""
+        # Prefer explicit metadata if present
         if metadata and self.cfg.depth_key in metadata:
             try:
                 return int(metadata[self.cfg.depth_key])
             except (ValueError, TypeError):
                 pass
         
-        # Poi cerca pattern nel label come "object_1", "person_2", etc.
+        # Fallback: parse patterns like "object_1", "person_2", ...
         import re
         match = re.search(r'_(\d+)$', label)
         if match:
             return int(match.group(1))
         
-        # Se non trova pattern, usa l'indice dell'oggetto
+        # Last resort: stable order based on original index
         return fallback_index
 
     def _draw_box(self, ax, x1: int, y1: int, x2: int, y2: int, color: str, linewidth: float, zorder: float = 2) -> None:
+        """Draw a rectangle box with no fill."""
         rect = patches.Rectangle(
             (x1, y1),
             max(1, x2 - x1),
@@ -412,7 +435,7 @@ class Visualizer:
         ax.add_patch(rect)
 
     def _draw_mask(self, ax, mask: np.ndarray, color: str, linewidth: float, zorder: float = 2) -> None:
-        """Contorno (sempre) e riempimento (se attivo) con z-order specificato."""
+        """Draw mask fill (optional) and contour (always). Falls back to imshow if OpenCV is missing."""
         if cv2 is None:
             ax.imshow(mask.astype(float), alpha=self.cfg.seg_fill_alpha, extent=(0, mask.shape[1], mask.shape[0], 0), zorder=zorder)
             return
@@ -430,11 +453,11 @@ class Visualizer:
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
             
-            # Riempimento con z-order per la profondità
+            # Fill polygon first (under the contour)
             if self.cfg.fill_segmentation:
                 ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=self.cfg.seg_fill_alpha, zorder=zorder)
             
-            # Contorno sempre sopra il riempimento
+            # Then stroke the outline slightly above the fill
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=0.95, zorder=zorder + 0.05)
 
     def _resolve_object_overlaps_only(
@@ -443,11 +466,9 @@ class Visualizer:
         obj_texts: List[Any],
         obj_anchors: List[Tuple[float, float]]
     ) -> None:
-        """STEP 1: Risolve solo sovrapposizioni tra etichette degli oggetti."""
+        """Pass 1: resolve collisions among object labels only (keeps anchors fixed)."""
         if not obj_texts:
             return
-            
-        # Usa il metodo esistente solo per gli oggetti
         self._resolve_overlaps(ax, movable_texts=obj_texts, movable_anchors=obj_anchors)
 
     def _resolve_arrow_overlaps(
@@ -456,7 +477,7 @@ class Visualizer:
         arrows: List[Any],
         arrow_data: List[Dict[str, Any]]
     ) -> None:
-        """STEP 2: Verifica e corregge sovrapposizioni tra frecce."""
+        """Pass 2: reduce arrow/arrow collisions by nudging curvature (arc radius)."""
         if not arrows:
             return
             
@@ -468,22 +489,20 @@ class Visualizer:
             moved = False
             arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
             
-            # Controlla sovrapposizioni tra frecce
+            # Pairwise overlap check; if two arrows overlap, bend them apart a bit.
             for i in range(len(arrow_bbs)):
                 for j in range(i + 1, len(arrow_bbs)):
                     if arrow_bbs[i].overlaps(arrow_bbs[j]):
-                        # Modifica leggermente la curvatura delle frecce sovrapposte
-                        # Aumenta il raggio di curvatura per separarle
+                        # Adjust arc radius in opposite directions
                         if i < len(arrow_data):
                             arrow_data[i]["rad"] += 0.05
                         if j < len(arrow_data):
                             arrow_data[j]["rad"] -= 0.05
                         
-                        # Rimuovi le frecce esistenti e ricreale
+                        # Re-create both arrows with updated curvature
                         arrows[i].remove()
                         arrows[j].remove()
                         
-                        # Ricrea frecce con nuova curvatura
                         for idx, arrow_idx in enumerate([i, j]):
                             d = arrow_data[arrow_idx]
                             p0, p1 = self._shrink_segment_px(d["src_pt"], d["tgt_pt"], 6, ax)
@@ -515,58 +534,49 @@ class Visualizer:
         arrow,
         text: str
     ) -> Tuple[float, float]:
-        """STEP 3: Calcola posizione ottimale per etichetta relazione (centro o spostata se freccia piccola)."""
-        # Calcola la lunghezza della freccia
+        """Choose a robust label position: centered if the arrow is long, otherwise offset perpendicular."""
+        # Estimate arrow length in display px
         arrow_length_px = self._get_arrow_length_px(ax, arrow)
         
-        # Stima dimensioni del testo
+        # Estimate text footprint to avoid placing a label larger than the arrow span
         text_width_px, text_height_px = self._estimate_text_px(ax, text, self.cfg.rel_fontsize)
         text_diagonal_px = np.sqrt(text_width_px**2 + text_height_px**2)
         
-        # Se la freccia è abbastanza lunga, posiziona al centro
         if arrow_length_px > text_diagonal_px * 1.5:
+            # Enough space: use the geometric center
             return self._get_arrow_center(ax, arrow)
         else:
-            # Freccia piccola: sposta leggermente di lato
+            # Short arrows: offset label along the local normal to reduce clutter
             center_pos = self._get_arrow_center(ax, arrow)
             offset_px = text_diagonal_px * 0.7
             
-            # Trova la direzione perpendicolare alla freccia
             verts_disp = self._arrow_vertices_disp(arrow)
             if len(verts_disp) >= 2:
-                # Calcola vettore tangente
+                # Tangent and normal at the arrow chord
                 tangent = verts_disp[-1] - verts_disp[0]
                 tangent_norm = max(np.linalg.norm(tangent), 1e-9)
                 tangent /= tangent_norm
-                
-                # Vettore normale (perpendicolare)
                 normal = np.array([-tangent[1], tangent[0]])
                 
-                # Converti offset in coordinate dati
                 to_data = ax.transData.inverted().transform
                 to_disp = ax.transData.transform
                 
                 center_disp = to_disp(center_pos)
                 offset_disp = center_disp + normal * offset_px
                 offset_data = to_data(offset_disp)
-                
                 return tuple(offset_data)
-            
             return center_pos
 
     def _get_arrow_length_px(self, ax, arrow) -> float:
-        """Calcola la lunghezza della freccia in pixel."""
+        """Polyline length of the arrow in display pixels (sum of segment lengths)."""
         try:
             verts_disp = self._arrow_vertices_disp(arrow)
             if len(verts_disp) < 2:
                 return 0.0
-            
-            # Somma delle distanze tra vertici consecutivi
             total_length = 0.0
             for i in range(len(verts_disp) - 1):
                 segment_vec = verts_disp[i + 1] - verts_disp[i]
                 total_length += np.linalg.norm(segment_vec)
-            
             return total_length
         except Exception:
             return 0.0
@@ -579,7 +589,7 @@ class Visualizer:
         arrows: List[Any],
         max_dist_px: float
     ) -> None:
-        """STEP 4a: Risolve sovrapposizioni tra etichette relazioni e oggetti."""
+        """Pass 4a: push relation labels away from object labels while clamping near their arrows."""
         if not obj_texts or not rel_texts:
             return
             
@@ -597,37 +607,30 @@ class Visualizer:
             obj_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in obj_texts]
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
             
-            # Controlla ogni etichetta relazione contro ogni etichetta oggetto
             for rel_idx, rel_bb in enumerate(rel_bbs):
                 for obj_bb in obj_bbs:
                     if rel_bb.overlaps(obj_bb):
-                        # Sposta solo l'etichetta della relazione
+                        # Push the relation label away from the object label center
                         rel_center = ((rel_bb.x0 + rel_bb.x1) / 2, (rel_bb.y0 + rel_bb.y1) / 2)
                         obj_center = ((obj_bb.x0 + obj_bb.x1) / 2, (obj_bb.y0 + obj_bb.y1) / 2)
-                        
-                        # Vettore di allontanamento
                         push_x = rel_center[0] - obj_center[0]
                         push_y = rel_center[1] - obj_center[1]
                         push_dist = max(np.sqrt(push_x**2 + push_y**2), 1e-6)
-                        
-                        # Normalizza e applica spinta
                         push_strength = 10.0
                         push_x = (push_x / push_dist) * push_strength
                         push_y = (push_y / push_dist) * push_strength
                         
-                        # Converti in coordinate dati e sposta
                         dx, dy = self._pixels_to_data(ax, push_x, push_y)
                         current_pos = rel_texts[rel_idx].get_position()
                         new_pos = (current_pos[0] + dx, current_pos[1] + dy)
                         rel_texts[rel_idx].set_position(new_pos)
                         moved = True
                         
-                        # Verifica vincolo distanza dalla freccia
+                        # Keep relation label close to its arrow
                         self._clamp_relation_to_arrow(ax, rel_texts[rel_idx], arrows[rel_idx] if rel_idx < len(arrows) else None, max_dist_px)
             
             if not moved:
                 break
-                
             fig.canvas.draw_idle()
 
     def _resolve_relation_vs_relation_overlaps(
@@ -637,7 +640,7 @@ class Visualizer:
         arrows: List[Any],
         max_dist_px: float
     ) -> None:
-        """STEP 4b: Risolve sovrapposizioni tra etichette delle relazioni."""
+        """Pass 4b: separate relation labels from each other symmetrically."""
         if len(rel_texts) < 2:
             return
             
@@ -651,40 +654,29 @@ class Visualizer:
             moved = False
             
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
-            
-            # Controlla sovrapposizioni tra etichette relazioni
             for i in range(len(rel_bbs)):
                 for j in range(i + 1, len(rel_bbs)):
                     if rel_bbs[i].overlaps(rel_bbs[j]):
-                        # Sposta entrambe le etichette in direzioni opposte
+                        # Move both labels in opposite directions
                         center_i = ((rel_bbs[i].x0 + rel_bbs[i].x1) / 2, (rel_bbs[i].y0 + rel_bbs[i].y1) / 2)
                         center_j = ((rel_bbs[j].x0 + rel_bbs[j].x1) / 2, (rel_bbs[j].y0 + rel_bbs[j].y1) / 2)
-                        
-                        # Vettore di separazione
                         sep_x = center_j[0] - center_i[0]
                         sep_y = center_j[1] - center_i[1]
                         sep_dist = max(np.sqrt(sep_x**2 + sep_y**2), 1e-6)
-                        
-                        # Normalizza e applica spinta
                         push_strength = 8.0
                         sep_x = (sep_x / sep_dist) * push_strength
                         sep_y = (sep_y / sep_dist) * push_strength
                         
-                        # Converti e sposta
                         dx_i, dy_i = self._pixels_to_data(ax, -sep_x * 0.5, -sep_y * 0.5)
                         dx_j, dy_j = self._pixels_to_data(ax, sep_x * 0.5, sep_y * 0.5)
                         
                         pos_i = rel_texts[i].get_position()
                         pos_j = rel_texts[j].get_position()
-                        
-                        new_pos_i = (pos_i[0] + dx_i, pos_i[1] + dy_i)
-                        new_pos_j = (pos_j[0] + dx_j, pos_j[1] + dy_j)
-                        
-                        rel_texts[i].set_position(new_pos_i)
-                        rel_texts[j].set_position(new_pos_j)
+                        rel_texts[i].set_position((pos_i[0] + dx_i, pos_i[1] + dy_i))
+                        rel_texts[j].set_position((pos_j[0] + dx_j, pos_j[1] + dy_j))
                         moved = True
                         
-                        # Verifica vincoli distanza dalle frecce
+                        # Keep both labels within a max distance from their arrows
                         if i < len(arrows):
                             self._clamp_relation_to_arrow(ax, rel_texts[i], arrows[i], max_dist_px)
                         if j < len(arrows):
@@ -692,7 +684,6 @@ class Visualizer:
             
             if not moved:
                 break
-                
             fig.canvas.draw_idle()
 
     def _clamp_relation_to_arrow(
@@ -702,7 +693,7 @@ class Visualizer:
         arrow,
         max_dist_px: float
     ) -> None:
-        """Mantiene un'etichetta relazione vicina alla sua freccia."""
+        """Ensure a relation label stays within max_dist_px of its arrow polyline."""
         if arrow is None:
             return
             
@@ -716,13 +707,10 @@ class Visualizer:
         if len(verts_disp) > 0:
             _, dist_sq = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
             current_dist_px = np.sqrt(dist_sq)
-            
-            # Se troppo lontana, riportala più vicina
             if current_dist_px > max_dist_px:
                 proj, _ = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
                 direction = np.array(rel_pos_disp) - proj
                 dir_norm = max(np.linalg.norm(direction), 1e-6)
-                
                 clamped_pos_disp = proj + (direction / dir_norm) * max_dist_px
                 clamped_pos_data = to_data(clamped_pos_disp)
                 rel_text.set_position(clamped_pos_data)
@@ -730,23 +718,19 @@ class Visualizer:
     # ------------------------------------------------------------------ internals (refactor)
 
     def _get_arrow_center(self, ax, arrow) -> Tuple[float, float]:
-        """Calcola il centro geometrico della freccia."""
+        """Geometric center of the arrow polyline (in data coords)."""
         try:
             verts_disp = self._arrow_vertices_disp(arrow)
             if len(verts_disp) == 0:
                 return (0.0, 0.0)
-            
-            # Centro geometrico dei vertici
             center_disp = np.mean(verts_disp, axis=0)
-            
-            # Converti in coordinate dati
             to_data = ax.transData.inverted().transform
             center_data = to_data(center_disp)
             return tuple(center_data)
         except Exception:
             return (0.0, 0.0)
 
-    # profilo parametri centralizzato
+    # Centralized tuning for adjust_text and micro pushes
     def _profile_params(self):
         dense = (self.cfg.adjust_text_profile == "dense")
         return dict(
@@ -754,9 +738,9 @@ class Visualizer:
             expand_text=(1.55, 1.55) if dense else (1.05, 1.05),
             expand_points=(1.45, 1.45) if dense else (1.05, 1.05),
             expand_objects=(1.45, 1.45) if dense else (1.05, 1.05),
-            push_tt=0.15 if dense else 0.08,  # testo↔testo
-            push_ta=0.12 if dense else 0.06,  # testo↔arrow
-            push_to=0.14 if dense else 0.08,  # testo↔objlabel
+            push_tt=0.15 if dense else 0.08,  # text↔text
+            push_ta=0.12 if dense else 0.06,  # text↔arrow
+            push_to=0.14 if dense else 0.08,  # text↔objlabel
         )
 
     def _adjust_position(
@@ -766,7 +750,7 @@ class Visualizer:
         overlap_thresh: float,
         max_iterations: int = 10,
     ) -> Tuple[float, float]:
-        """Soft-avoidance tra etichette esterne (semplice, locale)."""
+        """Small local repulsion to spread nearby outside labels (lightweight heuristic)."""
         new_candidate = np.array(candidate, dtype=float)
         eps = 1e-6
         for _ in range(max_iterations):
@@ -783,7 +767,7 @@ class Visualizer:
         return tuple(new_candidate)
 
     def _shrink_segment_px(self, p0, p1, shrink_px, ax):
-        """Accorcia p0→p1 di 'shrink_px' pixel alle estremità in spazio display."""
+        """Shorten a segment by shrink_px pixels at both ends (in display space)."""
         to_px = ax.transData.transform
         to_data = ax.transData.inverted().transform
         P0 = np.array(to_px(p0))
@@ -797,7 +781,7 @@ class Visualizer:
         P1n = P1 - v_norm * shrink_px
         return tuple(to_data(P0n)), tuple(to_data(P1n))
 
-    # ---------- overlap handling (UNIFICATO)
+    # ---------- overlap handling (UNIFIED)
 
     def _resolve_overlaps(
         self,
@@ -807,14 +791,13 @@ class Visualizer:
         fixed_texts: Sequence[Any] = (),
         arrows: Sequence[Any] = (),
     ) -> None:
-        """Sistema sovrapposizioni spostando SOLO 'movable_texts'.
-        'fixed_texts' e 'arrows' sono ostacoli."""
+        """Generic overlap solver that moves only 'movable_texts' around static obstacles."""
         if adjust_text is None or not movable_texts:
             return
 
         prof = self._profile_params()
 
-        # pass 1: adjust_text con ostacoli
+        # Pass 1: adjust_text provides a coarse separation using obstacles (arrows + fixed texts)
         adjust_text(
             movable_texts,
             x=[p[0] for p in movable_anchors],
@@ -832,7 +815,7 @@ class Visualizer:
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        # pass 2: micro-push locale
+        # Pass 2: micro push — gentle local nudges to finish separation.
         for _ in range(self.cfg.micro_push_iters):
             moved = False
 
@@ -840,7 +823,7 @@ class Visualizer:
             fix_bbs = [t.get_window_extent(renderer=renderer).expanded(1.02, 1.08) for t in fixed_texts] if fixed_texts else []
             arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
 
-            # (a) mobile ↔ mobile
+            # (a) movable vs movable
             for i in range(len(mov_bbs)):
                 for j in range(i + 1, len(mov_bbs)):
                     if mov_bbs[i].overlaps(mov_bbs[j]):
@@ -853,7 +836,7 @@ class Visualizer:
                         movable_texts[j].set_position((xj + dx * 0.5, yj + dy * 0.5))
                         moved = True
 
-            # (b) mobile ↔ arrow
+            # (b) movable vs arrows
             for k, bb in enumerate(mov_bbs):
                 for abb in arrow_bbs:
                     if bb.overlaps(abb):
@@ -864,7 +847,7 @@ class Visualizer:
                         movable_texts[k].set_position((x + dx, y + dy))
                         moved = True
 
-            # (c) mobile ↔ fixed text
+            # (c) movable vs fixed texts
             for k, bb in enumerate(mov_bbs):
                 for fbb in fix_bbs:
                     if bb.overlaps(fbb):
@@ -880,13 +863,14 @@ class Visualizer:
             fig.canvas.draw_idle()
 
     def _pixels_to_data(self, ax, dx_px, dy_px):
+        """Convert pixel deltas to data-space deltas using the current axes transform."""
         inv = ax.transData.inverted()
         x0, y0 = inv.transform((0, 0))
         x1, y1 = inv.transform((dx_px, dy_px))
         return x1 - x0, y1 - y0
 
     def _arrow_bboxes_px(self, arrows: Sequence[Any], renderer):
-        """BBox (in pixel) delle frecce come oggetti di collisione."""
+        """Return bounding boxes (display px) of arrow paths for collision checks."""
         bbs = []
         for a in arrows:
             try:
@@ -898,17 +882,17 @@ class Visualizer:
                 pass
         return bbs
 
-    # ---------- geometria frecce / punti più vicini
+    # ---------- arrow geometry / nearest-point helpers
 
     @staticmethod
     def _arrow_vertices_disp(arrow) -> np.ndarray:
-        """Ritorna i vertici della freccia in display-space."""
+        """Vertices of the arrow path in display space (px)."""
         path = arrow.get_path().transformed(arrow.get_transform())
         return np.asarray(path.vertices, dtype=float)
 
     @staticmethod
     def _nearest_point_on_polyline_disp(verts_disp: np.ndarray, P: np.ndarray) -> Tuple[np.ndarray, float]:
-        """Punto più vicino su una polilinea (display-space)."""
+        """Nearest point (and squared distance) from P to a display-space polyline."""
         best_d2 = float("inf")
         best = verts_disp[0]
         for i in range(len(verts_disp) - 1):
@@ -927,7 +911,7 @@ class Visualizer:
         return best, best_d2
 
     def _nearest_point_on_arrow(self, ax, arrow, x, y):
-        """Compat: dato (x,y) in data-space, ritorna il punto più vicino sulla freccia (data-space)."""
+        """Data-space nearest point on an arrow to (x, y) in data coords."""
         try:
             to_disp = ax.transData.transform
             to_data = ax.transData.inverted().transform
@@ -941,8 +925,7 @@ class Visualizer:
     def _label_pos_near_arrow(
         self, ax, arrow, query_pt: Tuple[float, float], offset_px: float
     ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        """Trova il punto più vicino sulla freccia a 'query_pt' e posiziona l'etichetta
-        a offset_px pixel lungo la normale in display-space. Ritorna (pos_data, anchor_data)."""
+        """Project a query point to the arrow path and offset along the local normal."""
         to_disp = ax.transData.transform
         to_data = ax.transData.inverted().transform
         verts_disp = self._arrow_vertices_disp(arrow)
@@ -954,14 +937,13 @@ class Visualizer:
         P = np.asarray(to_disp(query_pt), dtype=float)
         proj, _ = self._nearest_point_on_polyline_disp(verts_disp, P)
 
-        # tangente locale (prendi il segmento più vicino)
+        # Local tangent → normal
         idx = np.argmin(np.linalg.norm(verts_disp[:-1] + 0.5 * (verts_disp[1:] - verts_disp[:-1]) - proj, axis=1))
         a = verts_disp[idx]
         b = verts_disp[idx + 1]
         tangent = b - a
         L = max(np.linalg.norm(tangent), 1e-9)
         tangent /= L
-
         normal = np.array([-tangent[1], tangent[0]], dtype=float)
         normal /= max(np.linalg.norm(normal), 1e-9)
 
@@ -971,7 +953,7 @@ class Visualizer:
         return pos_data, anchor_data
 
     def _clamp_relation_labels_near_arrows(self, ax, texts: Sequence[Any], arrows: Sequence[Any], max_dist_px: float) -> None:
-        """Se una label è troppo lontana dalla sua freccia, riportala entro max_dist_px."""
+        """Clamp relation labels to lie within max_dist_px of their arrow polylines."""
         if not texts:
             return
         to_disp = ax.transData.transform
@@ -989,10 +971,10 @@ class Visualizer:
             x_new, y_new = to_data(tuple(newP))
             t.set_position((x_new, y_new))
 
-    # ---------- altre utility
+    # ---------- misc helpers
 
     def _pick_color(self, label: str, idx: int) -> str:
-        """Colore consistente per classe base (label senza suffisso _k)."""
+        """Stable per-class color (base label lowercased) with small HSV boost."""
         base = label.rsplit("_", 1)[0].lower()
         if base in self._label2color_cache:
             return self._label2color_cache[base]
@@ -1007,16 +989,17 @@ class Visualizer:
         return col
 
     def _best_mask(self, i: int, masks: Optional[Sequence[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        """Return the i-th mask dict if present; otherwise None (keeps indexing stable)."""
         if masks is None or i >= len(masks) or masks[i] is None:
             return None
         return masks[i]
 
     def _format_label_text(self, label: str, score: float, obj_index: int = 0) -> str:
-        """Testo etichetta oggetto."""
+        """Build object label string according to the selected label_mode."""
         mode = self.cfg.label_mode
         base = label.rsplit("_", 1)[0]
         if mode == "numeric":
-            text = str(obj_index + 1)  # Solo il numero
+            text = str(obj_index + 1)
         elif mode == "alphabetic":
             n = obj_index
             alphabet_label = ""
@@ -1026,16 +1009,15 @@ class Visualizer:
                 if n == 0:
                     break
                 n -= 1
-            text = alphabet_label  # Solo la lettera
-        else:  # mode == "original"
-            text = base  # Solo il nome base senza suffisso numerico
-        
+            text = alphabet_label
+        else:  # "original"
+            text = base
         if self.cfg.show_confidence:
             text = f"{text} ({score * 100:.0f}%)"
         return text
 
     def _estimate_text_px(self, ax, text: str, fontsize_px: int) -> Tuple[float, float]:
-        """Stima dimensioni del testo (renderer se disponibile)."""
+        """Estimate rendered text size; uses renderer if available, otherwise a heuristic."""
         if self.cfg.measure_text_with_renderer and ax is not None:
             t = ax.text(0, 0, text, fontsize=fontsize_px, alpha=0)
             fig = ax.figure
@@ -1056,7 +1038,7 @@ class Visualizer:
         label_text: str,
         ax=None,
     ) -> bool:
-        """Decide se posizionare l'etichetta all'interno dell'oggetto."""
+        """Decide if an object label can be safely drawn inside the object shape."""
         W, H = image.size
         area_img = float(W * H)
         x1, y1, x2, y2 = map(int, box[:4])
@@ -1082,6 +1064,7 @@ class Visualizer:
         half_diag = 0.5 * ((w_txt ** 2 + h_txt ** 2) ** 0.5)
         margin_px = float(self.cfg.inside_label_margin_px)
 
+        # Use distance transform if we have a mask + OpenCV; otherwise a bbox-based fallback radius.
         if mask_bool is not None and cv2 is not None:
             m = (mask_bool.astype(np.uint8) * 255)
             k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -1100,7 +1083,7 @@ class Visualizer:
     # ------------------------------------------------------------------ rel filtering
 
     def _filter_redundant_relations(self, relationships: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Mantiene la relazione più importante per coppia (priorità+confidence)."""
+        """Keep only the most informative relation per unordered object pair."""
         if not relationships:
             return list(relationships)
 
@@ -1118,6 +1101,7 @@ class Visualizer:
         return filtered_relations
 
     def _choose_best_relation(self, relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Rank relations by semantic priority, then by confidence surrogate."""
         best_rel = relations[0]
         best_priority = self._get_relation_priority(best_rel["relation"])  # type: ignore[index]
         best_confidence = self._get_relation_confidence(best_rel)
@@ -1129,7 +1113,7 @@ class Visualizer:
         return best_rel
 
     def _cap_relations_per_object(self, relationships: Sequence[Dict[str, Any]], boxes: Sequence[Sequence[float]]) -> List[Dict[str, Any]]:
-        """Limita relazioni in uscita per oggetto (priorità alta, distanza corta)."""
+        """Limit outgoing relations per object. Ensures minimum coverage using nearest neighbors."""
         if not relationships:
             return list(relationships)
 
@@ -1181,6 +1165,7 @@ class Visualizer:
         return out
 
     def _get_relation_priority(self, relation: str) -> int:
+        """Priority ladder: semantic > contact > generic proximity > directional > other."""
         rel_name = str(relation).lower()
         if any(k in rel_name for k in {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}):
             return 4
@@ -1193,6 +1178,7 @@ class Visualizer:
         return 0
 
     def _get_relation_confidence(self, relation: Dict[str, Any]) -> float:
+        """Confidence proxy: prefer CLIP similarity; otherwise inverse distance; else default."""
         if "clip_sim" in relation:
             return float(relation["clip_sim"])  # type: ignore[return-value]
         if "distance" in relation:
@@ -1204,6 +1190,7 @@ class Visualizer:
 
     @staticmethod
     def _humanize_relation(rel: str) -> str:
+        """Readable title-case label from snake/camel case (e.g., 'on_top_of' → 'On Top Of')."""
         s = str(rel)
         if any(c.isupper() for c in s):
             import re as _re

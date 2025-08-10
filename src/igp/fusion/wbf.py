@@ -7,21 +7,21 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from igp.types import Detection
 
 try:
-    # pip install ensemble-boxes
+    # Requires: pip install ensemble-boxes
     from ensemble_boxes import weighted_boxes_fusion as _wbf_impl  # type: ignore
     _HAVE_WBF = True
 except Exception:
     _HAVE_WBF = False
 
-# fallback a NMS se ensemble-boxes non è disponibile
+# Fallback to NMS if ensemble-boxes is not available
 try:
     from .nms import nms as _fallback_nms
 except Exception:
-    _fallback_nms = None  # verrà gestito runtime
+    _fallback_nms = None  # handled at runtime
 
 
 # ---------------------------------------------------------------------------
-# API PUBBLICA
+# PUBLIC API
 # ---------------------------------------------------------------------------
 
 def fuse_detections_wbf(
@@ -35,19 +35,19 @@ def fuse_detections_wbf(
     sort_desc: bool = True,
 ) -> List[Detection]:
     """
-    Esegue Weighted Boxes Fusion su una lista di Detection provenienti da più detector.
+    Perform Weighted Boxes Fusion (WBF) over detections coming from multiple detectors.
 
     Args:
-        detections: lista di Detection (box xyxy in pixel, label str, score float).
-        image_size: (width, height) dell'immagine.
-        iou_thr: soglia IoU per la fusione.
-        skip_box_thr: ignora box con score < skip_box_thr prima della fusione.
-        weights_by_source: pesi per sorgente (es. {"owlvit": 2.0, "yolov8": 1.5}).
-        default_weight: peso di default.
-        sort_desc: ordina il risultato per score decrescente.
+        detections: list of Detection (xyxy boxes in pixels, label str, score float).
+        image_size: (width, height) of the image in pixels.
+        iou_thr: IoU threshold used by WBF to group boxes.
+        skip_box_thr: drop boxes with score < skip_box_thr before fusion.
+        weights_by_source: per-source weights (e.g., {"owlvit": 2.0, "yolov8": 1.5}).
+        default_weight: weight to use when a source is not in weights_by_source.
+        sort_desc: sort fused detections by descending score.
 
     Returns:
-        Lista di Detection fuse (box in pixel).
+        List of fused Detection (boxes in pixel coordinates).
     """
     if not detections:
         return []
@@ -56,23 +56,23 @@ def fuse_detections_wbf(
     if W <= 0 or H <= 0:
         raise ValueError("image_size non valido: atteso (width>0, height>0)")
 
-    # Raggruppa per 'source'
+    # Group detections by 'source'
     by_src: Dict[str, List[Detection]] = defaultdict(list)
     for d in detections:
         by_src[_get_source(d)].append(d)
 
-    # Vocabolario label <-> id
+    # Label vocabulary ↔ numeric ids
     labels_sorted = sorted({_get_label(d) for d in detections})
     label2id = {lab: i for i, lab in enumerate(labels_sorted)}
     id2label = {i: lab for lab, i in label2id.items()}
 
-    # Prepara inputs per ensemble-boxes: liste per-modello
+    # Prepare inputs for ensemble-boxes: per-model lists
     list_boxes: List[List[List[float]]] = []
     list_scores: List[List[float]] = []
     list_labels: List[List[int]] = []
     weights: List[float] = []
 
-    # Pesi di default coerenti con la pipeline (OWL > YOLO > Detectron2)
+    # Sensible defaults for per-source weights consistent with the pipeline (OWL > YOLO > Detectron2)
     default_weights_map = {"owlvit": 2.0, "yolov8": 1.5, "yolo": 1.5, "detectron2": 1.0}
     wmap = dict(default_weights_map)
     if weights_by_source:
@@ -88,7 +88,7 @@ def fuse_detections_wbf(
             if score < skip_box_thr:
                 continue
             x1, y1, x2, y2 = _as_xyxy(d.box)
-            # normalizza in [0,1]
+            # Normalize into [0, 1]
             boxes_norm.append([x1 / W, y1 / H, x2 / W, y2 / H])
             scores_.append(score)
             labels_id.append(label2id[_get_label(d)])
@@ -98,7 +98,7 @@ def fuse_detections_wbf(
         list_labels.append(labels_id)
         weights.append(float(wmap.get(src, default_weight)))
 
-    # Se ensemble-boxes non è disponibile, fallback a NMS per classe
+    # If ensemble-boxes is not available, fall back to per-class NMS
     if not _HAVE_WBF:
         if _fallback_nms is None:
             raise RuntimeError(
@@ -106,7 +106,7 @@ def fuse_detections_wbf(
             )
         return _fallback_nms(detections, iou_thr=iou_thr, class_aware=True, sort_desc=sort_desc)
 
-    # Applica WBF
+    # Apply WBF
     b_fused, s_fused, l_fused = _wbf_impl(
         list_boxes, list_scores, list_labels,
         weights=weights,
@@ -114,7 +114,7 @@ def fuse_detections_wbf(
         skip_box_thr=float(skip_box_thr),
     )
 
-    # Denormalizza e re-istanza Detection
+    # Denormalize and instantiate Detection objects
     out: List[Detection] = []
     for b, s, l in zip(b_fused, s_fused, l_fused):
         x1 = float(b[0] * W)
@@ -134,7 +134,7 @@ def fuse_detections_wbf(
 # ---------------------------------------------------------------------------
 
 def _get_source(d: Detection) -> str:
-    # compat: supporta 'from'/'from_' oltre a 'source'
+    # Compatibility: support 'from'/'from_' in addition to 'source'
     src = getattr(d, "source", None)
     if src is None:
         src = getattr(d, "from_", None) or getattr(d, "from", None)

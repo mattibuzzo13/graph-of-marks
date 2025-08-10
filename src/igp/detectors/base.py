@@ -10,22 +10,22 @@ from igp.types import Detection
 
 class Detector(ABC):
     """
-    Base astratta per tutti i detector usati da ImageGraphPreprocessor.
+    Abstract base class for all detectors used by ImageGraphPreprocessor.
 
-    Requisiti per le sottoclassi:
-    - implementare `detect(image)` restituendo List[Detection] con coordinate
-      bbox in pixel (x1, y1, x2, y2) e score in [0,1];
-    - gestire la conversione del label in forma coerente (consigliato: lowercase);
-    - opzionale: override di `detect_batch`, `warmup`, `close`.
+    Subclass requirements:
+    - implement `detect(image)`, returning List[Detection] with bbox coordinates
+      in pixels (x1, y1, x2, y2) and a score in [0, 1];
+    - normalize labels consistently (recommended: lowercase);
+    - optional: override `detect_batch`, `warmup`, and `close`.
 
-    Questa classe fornisce:
-    - normalizzazione dell'immagine a RGB,
-    - filtro per soglia di score (se configurato),
-    - context manager (with ...),
-    - metodo `run()` come scorciatoia: RGB + detect + filtro soglia.
+    This class provides:
+    - image normalization to RGB,
+    - configurable score-threshold filtering,
+    - context manager support (`with ...`),
+    - `run()` convenience method: RGB → detect → threshold filter.
     """
 
-    #: Nome leggibile del detector (es. "yolov8", "owlvit", "detectron2")
+    #: Human-readable detector name (e.g., "yolov8", "owlvit", "detectron2")
     name: str
 
     def __init__(
@@ -37,7 +37,7 @@ class Detector(ABC):
     ) -> None:
         self.name = name
         
-        # ✅ GESTISCI device None con fallback intelligente
+        # Handle device=None with a sensible fallback (CUDA if available, else CPU).
         if device is None:
             try:
                 import torch
@@ -52,55 +52,55 @@ class Detector(ABC):
     # -------------------- lifecycle hooks --------------------
 
     def warmup(self) -> None:
-        """Hook opzionale, es. allocazione/modello in memoria."""
+        """Optional hook, e.g., to allocate/load models into memory."""
         return None
 
     def close(self) -> None:
-        """Hook opzionale per liberare risorse (GPU, file handle, ecc.)."""
+        """Optional hook to release resources (GPU memory, file handles, etc.)."""
         return None
 
-    # -------------------- capacità ----------------------------
+    # -------------------- capabilities -----------------------
 
     @property
     def supports_batch(self) -> bool:
-        """Indica se il detector supporta un'inferenza batched efficiente."""
+        """Whether the detector supports efficient batched inference."""
         return False
 
-    # -------------------- API obbligatoria --------------------
+    # -------------------- required API -----------------------
 
     @abstractmethod
     def detect(self, image: Image.Image) -> List[Detection]:
         """
-        Esegue la detection su una singola immagine PIL.
+        Run detection on a single PIL image.
 
-        Note:
-        - Accetta qualsiasi modalità input; consigliato chiamare `_ensure_rgb` prima di usare il tensore.
-        - Restituisce una lista di Detection in coordinate assolute (pixel).
-        - Non è necessario applicare qui la soglia: verrà gestita da `_apply_score_threshold`.
+        Notes:
+        - Accepts any input mode; call `_ensure_rgb` before tensor use.
+        - Returns a list of Detection in absolute pixel coordinates.
+        - Thresholding is not required here; `_apply_score_threshold` will handle it.
         """
         raise NotImplementedError
 
-    # -------------------- API opzionale/batch -----------------
+    # -------------------- optional/batch API -----------------
 
     def detect_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
         """
-        Implementazione di default: effettua `detect` immagine per immagine.
-        Le sottoclassi che supportano batching dovrebbero fare override.
+        Default implementation: calls `detect` for each image.
+        Subclasses with true batching should override this.
         """
         return [self.detect(img) for img in images]
 
-    # -------------------- helper generici ---------------------
+    # -------------------- generic helpers --------------------
 
     def _ensure_rgb(self, image: Image.Image) -> Image.Image:
-        """Converte l'immagine in modalità 'RGB' se necessario."""
+        """Convert image to 'RGB' mode if needed."""
         if image.mode != "RGB":
             return image.convert("RGB")
         return image
 
     def _apply_score_threshold(self, detections: List[Detection]) -> List[Detection]:
         """
-        Applica il filtro di soglia su score se `self.score_threshold` è impostata.
-        Se un Detection non ha l'attributo `score`, viene mantenuto in ogni caso.
+        Apply score-threshold filtering if `self.score_threshold` is set.
+        Detections without a `score` attribute are always kept.
         """
         th = self.score_threshold
         if th is None:
@@ -109,7 +109,7 @@ class Detector(ABC):
 
     def run(self, image: Image.Image) -> List[Detection]:
         """
-        Scorciatoia: normalizza immagine a RGB, chiama `detect` e filtra per soglia.
+        Convenience: normalize to RGB, run `detect`, then apply threshold filtering.
         """
         img = self._ensure_rgb(image)
         dets = self.detect(img)

@@ -1,4 +1,9 @@
 # igp/utils/clip_utils.py
+# Thin CLIP wrapper used across the pipeline:
+# - Loads a CLIP model/processor and exposes image/text embeddings.
+# - Provides cosine similarity utilities and simple label/relation matching.
+# - If CLIP/torch are unavailable, methods degrade gracefully (return None/empty).
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,13 +21,14 @@ from PIL import Image
 
 @dataclass
 class CLIPConfig:
+    # Hugging Face model ID and optional device override ("cpu"/"cuda").
     model_id: str = "openai/clip-vit-large-patch14"
     device: Optional[str] = None
 
 
 class CLIPWrapper:
     """
-    Utilità per embedding immagine/testo e similarità con CLIP.
+    Utility wrapper for CLIP image/text embeddings and similarities.
     """
     def __init__(self, config: CLIPConfig | None = None) -> None:
         self.config = config or CLIPConfig()
@@ -38,10 +44,15 @@ class CLIPWrapper:
         self.device = device
 
     def available(self) -> bool:
+        # Report whether CLIP dependencies are available.
         return self._ok
 
     @torch.inference_mode() 
     def image_features(self, images: Sequence[Image.Image]) -> "torch.Tensor | None":
+        """
+        Compute L2-normalized CLIP image embeddings for a batch of PIL images.
+        Returns None if CLIP is unavailable.
+        """
         if not self._ok:
             return None
         inputs = self.processor(images=list(images), return_tensors="pt").to(self.device)
@@ -50,6 +61,10 @@ class CLIPWrapper:
 
     @torch.inference_mode() 
     def text_features(self, texts: Sequence[str]) -> "torch.Tensor | None":
+        """
+        Compute L2-normalized CLIP text embeddings for a list of strings.
+        Returns None if CLIP is unavailable.
+        """
         if not self._ok:
             return None
         inputs = self.processor(text=list(texts), return_tensors="pt", padding=True, truncation=True).to(self.device)
@@ -58,12 +73,15 @@ class CLIPWrapper:
 
     @staticmethod
     def cosine_sim(a: "torch.Tensor", b: "torch.Tensor") -> "torch.Tensor":
+        # Cosine similarity via dot-product on normalized features.
         return a @ b.T
 
     @torch.inference_mode() 
     def best_labels_by_text(self, query: str, labels: Sequence[str], threshold: float = 0.25) -> List[Tuple[str, float]]:
         """
-        Trova le label più affini alla query testuale.
+        Rank labels by similarity to a text query and return those >= threshold.
+        Output is a list of (label, similarity) sorted descending.
+        Returns [] if CLIP or labels are missing.
         """
         if not self._ok or not labels:
             return []
@@ -77,7 +95,9 @@ class CLIPWrapper:
     @torch.inference_mode()
     def best_relation(self, crop: Image.Image, subj: str, obj: str, templates: Sequence[str]) -> Tuple[str, float]:
         """
-        Sceglie la relazione {tmpl.format(subj=..., obj=...)} con sim. massima.
+        Given an image crop and subject/object strings, choose the relation template
+        with maximum CLIP similarity. Templates may contain '{subj}'/'{obj}' placeholders.
+        Returns (rendered_text, similarity). If CLIP/templ. missing, returns ("", 0.0).
         """
         if not self._ok or not templates:
             return ("", 0.0)

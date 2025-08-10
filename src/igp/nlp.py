@@ -6,7 +6,7 @@ from typing import Iterable, Set, Tuple
 
 def ensure_nltk_corpora(names: Iterable[str] = ("wordnet", "omw-1.4")) -> None:
     """
-    Scarica (se assenti) i corpora NLTK necessari. Silenzioso se NLTK non è installato.
+    Download required NLTK corpora if missing. Silent no-op when NLTK is not installed.
     """
     try:
         import nltk
@@ -17,14 +17,14 @@ def ensure_nltk_corpora(names: Iterable[str] = ("wordnet", "omw-1.4")) -> None:
             except LookupError:
                 nltk.download(n, quiet=True)
     except Exception:
-        # NLTK non disponibile: semplicemente ignora.
+        # NLTK unavailable: ignore.
         pass
 
 
 def ensure_spacy_model(model_name: str = "en_core_web_md") -> bool:
     """
-    Verifica che il modello spaCy sia disponibile; prova a scaricarlo se assente.
-    Ritorna True se il modello è (o diventa) disponibile.
+    Ensure a spaCy model is available; attempt on-demand download if absent.
+    Returns True on success (loaded or downloaded), False otherwise.
     """
     try:
         import spacy
@@ -44,16 +44,17 @@ def ensure_spacy_model(model_name: str = "en_core_web_md") -> bool:
 
 def extract_question_terms(question: str) -> Tuple[Set[str], Set[str]]:
     """
-    Estrae (object_terms, relation_terms) dalla domanda.
-    - object_terms: token alfabetici non-stopword (fallback minimale)
-    - relation_terms: set canonico (above/below/left_of/right_of/on_top_of/…)
-    Se spaCy è installato, usa POS tagging per isolare (PROPN/NOUN) in modo più pulito.
+    Extract (object_terms, relation_terms) from a question.
+    - object_terms: alphabetic tokens excluding simple stopwords (fallback)
+      or NOUN/PROPN lemmas via spaCy if available.
+    - relation_terms: canonical labels inferred from simple synonyms
+      (above/below/left_of/right_of/on_top_of/...).
     """
     q = (question or "").strip().lower()
     if not q:
         return set(), set()
 
-    # relazioni canoniche + sinonimi base
+    # Canonical relations + basic synonyms
     rel_map = {
         "above": {"above"},
         "below": {"below", "under"},
@@ -67,7 +68,7 @@ def extract_question_terms(question: str) -> Tuple[Set[str], Set[str]]:
     }
     rel_terms = {canon for canon, vs in rel_map.items() if any(v in q for v in vs)}
 
-    # prova con spaCy per oggetti (NOUN/PROPN), altrimenti fallback
+    # Prefer spaCy (NOUN/PROPN lemmas); fallback to a minimal heuristic
     try:
         import spacy
 
@@ -80,7 +81,7 @@ def extract_question_terms(question: str) -> Tuple[Set[str], Set[str]]:
         }
         return objs, rel_terms
     except Exception:
-        # Fallback semplice
+        # Simple fallback
         tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if t.isalpha()]
         stop = {"the", "a", "an", "is", "are", "on", "in", "of", "to", "and", "or"}
         objs = {t for t in tokens if t not in stop}

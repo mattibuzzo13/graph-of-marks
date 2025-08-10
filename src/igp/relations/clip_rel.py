@@ -1,4 +1,8 @@
 # igp/relations/clip_rel.py
+# CLIP-based relation scoring between two detected objects.
+# Uses an image crop covering both boxes and compares against a small set of
+# relation text prompts; returns the best-matching relation and score.
+
 from __future__ import annotations
 
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -7,6 +11,7 @@ import torch
 from PIL import Image
 
 
+# Default natural-language relation templates queried with CLIP.
 _DEFAULT_TEMPLATES = [
     "on top of",
     "under",
@@ -19,7 +24,7 @@ _DEFAULT_TEMPLATES = [
     "behind",
 ]
 
-# Mappa di canonizzazione (spazi -> underscore e nomi coerenti con pipeline)
+# Canonicalization map (spaces → underscores; aligned with the pipeline labels).
 _CANON = {
     "on top of": "on_top_of",
     "under": "below",
@@ -34,7 +39,7 @@ _CANON = {
 
 
 def canonicalize_relation(text: str) -> str:
-    """Converte il testo della relazione in etichetta canonica."""
+    """Convert a free-text relation into the canonical label used by the pipeline."""
     key = " ".join(text.strip().lower().split())
     return _CANON.get(key, key.replace(" ", "_"))
 
@@ -45,8 +50,8 @@ def union_crop(
     box_b: Sequence[float],
 ) -> Image.Image:
     """
-    Ritaglia il rettangolo minimo che contiene i due box passati.
-    Coord input e output in pixel (xyxy).
+    Crop the minimal axis-aligned rectangle that contains both input boxes.
+    Input and output coordinates are in pixel (xyxy).
     """
     W, H = image_pil.size
     x1 = int(max(0, min(box_a[0], box_b[0])))
@@ -60,13 +65,13 @@ def union_crop(
 
 class ClipRelScorer:
     """
-    Valuta la relazione più plausibile tra (soggetto, oggetto) usando CLIP
-    su un ritaglio che include entrambi gli oggetti.
+    Score the most plausible relation between (subject, object) using CLIP on a
+    crop that includes both objects.
 
-    Dipendenze (iniezione):
+    Dependencies (passed in at init):
       - clip_processor: transformers.CLIPProcessor
       - clip_model: transformers.CLIPModel
-      - device: "cpu" o "cuda"
+      - device: "cpu" or "cuda"
     """
 
     def __init__(
@@ -93,24 +98,27 @@ class ClipRelScorer:
         templates: Optional[Iterable[str]] = None,
     ) -> Tuple[str, str, float]:
         """
-        Restituisce (relation_canonica, relation_raw, score) per la coppia (i, j).
+        Return (canonical_relation, raw_relation_text, score) for the pair (i, j).
+
+        The score is the cosine similarity between the crop image embedding and
+        the best-matching relation text embedding among the provided templates.
         """
         tmpl = list(templates) if templates else self.templates
 
         crop = union_crop(image_pil, box_i, box_j)
 
-        # 1) image features
+        # 1) Image features
         im_inputs = self.processor(images=crop, return_tensors="pt").to(self.device)
         im_feat = self.model.get_image_features(**im_inputs)
         im_feat = im_feat / im_feat.norm(dim=-1, keepdim=True)
 
-        # 2) text features – formattiamo come "{tmpl}" (no placeholders)
+        # 2) Text features — plain templates (no placeholders)
         texts = [t for t in tmpl]
         txt_inputs = self.processor(text=texts, return_tensors="pt", padding=True).to(self.device)
         txt_feat = self.model.get_text_features(**txt_inputs)
         txt_feat = txt_feat / txt_feat.norm(dim=-1, keepdim=True)
 
-        # 3) similarity
+        # 3) Similarity and argmax over templates
         sims = torch.matmul(im_feat, txt_feat.T).squeeze(0)  # [len(templates)]
         best = int(sims.argmax())
         best_sim = float(sims[best])

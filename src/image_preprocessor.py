@@ -10,12 +10,14 @@ from igp.pipeline.preprocessor import Preprocessor
 
 
 def _parse_args() -> argparse.Namespace:
+    # Parse CLI arguments for the Image Graph Preprocessor.
+    # The CLI exposes all pipeline knobs (I/O, detectors, segmentation, visualization, caching).
     p = argparse.ArgumentParser(
         description="Image Graph Preprocessor (CLI orchestrator)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # I/O e dataset
+    # I/O and dataset selection
     p.add_argument("--input_path", type=str, default=None, help="Percorso a immagine o cartella")
     p.add_argument("--json_file", type=str, default="", help="Batch JSON (override input_path/dataset)")
     p.add_argument("--output_folder", type=str, default="output_images")
@@ -24,7 +26,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--image_column", type=str, default="image")
     p.add_argument("--num_instances", type=int, default=-1, help="Se >0, elabora solo le prime N istanze")
 
-    # Domanda / NLP
+    # Question-driven filtering (object/relation priors from a textual query)
     p.add_argument("--question", type=str, default="", help="Domanda per filtrare oggetti/relazioni")
     p.add_argument("--disable_question_filter", action="store_true", help="Disattiva i filtri basati sulla domanda")
     p.add_argument("--aggressive_pruning", action="store_true",
@@ -34,25 +36,25 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--threshold_object_similarity", type=float, default=0.50)
     p.add_argument("--threshold_relation_similarity", type=float, default=0.50)
 
-    # Detector
+    # Object detectors and confidence thresholds
     p.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
                    help="Elenco detector separati da virgola")
     p.add_argument("--owl_threshold", type=float, default=0.40)
     p.add_argument("--yolo_threshold", type=float, default=0.80)
     p.add_argument("--detectron_threshold", type=float, default=0.80)
 
-    # Relazioni
+    # Relation inference constraints (geometry window and per-object limits)
     p.add_argument("--max_relations_per_object", type=int, default=3)
     p.add_argument("--min_relations_per_object", type=int, default=1)
     p.add_argument("--margin", type=int, default=20, help="Margine (px) per orientamento geometrico")
     p.add_argument("--min_distance", type=float, default=50)
     p.add_argument("--max_distance", type=float, default=20000)
 
-    # NMS e segmentazione
+    # Label-wise NMS and segmentation IoU threshold
     p.add_argument("--label_nms_threshold", type=float, default=0.50)
     p.add_argument("--seg_iou_threshold", type=float, default=0.70)
 
-    # SAM
+    # SAM segmentation backend configuration
     p.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
     p.add_argument("--sam_hq_model_type", type=str, choices=["vit_b", "vit_l", "vit_h"], default="vit_h")
     p.add_argument("--points_per_side", type=int, default=32)
@@ -61,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min_mask_region_area", type=int, default=100)
     p.add_argument("--preproc_device", type=str, default=None, help="Forza device (cpu/cuda)")
 
-    # Visualizzazione
+    # Visualization controls (labels, arrows, masks, typography, layout)
     p.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
     p.add_argument("--display_labels", action="store_true", help="Mostra etichette oggetti")
     p.add_argument("--display_relationships", action="store_true", help="Mostra frecce relazioni")
@@ -83,16 +85,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no_instances", action="store_true", help="Nasconde sia bbox che maschere (override)")
     p.add_argument("--show_confidence", action="store_true", help="Aggiunge la confidenza nelle etichette")
 
-    # Post-processing colori
+    # Global color tuning for overlays
     p.add_argument("--color_sat_boost", type=float, default=1.30)
     p.add_argument("--color_val_boost", type=float, default=1.15)
 
-    # Hole filling
+    # Mask post-processing (hole filling)
     p.add_argument("--close_holes", action="store_true", help="Chiudi buchi interni nelle maschere SAM")
     p.add_argument("--hole_kernel", type=int, default=7)
     p.add_argument("--min_hole_area", type=int, default=100)
 
-    # Output / salvataggi
+    # Output control (what artifacts to write)
     p.add_argument("--save_image_only", action="store_true", help="Salva solo immagine elaborata")
     p.add_argument("--skip_graph", action="store_true", help="Non salvare i file di grafo")
     p.add_argument("--skip_prompt", action="store_true", help="Non salvare il file Triples/Prompt")
@@ -100,7 +102,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--export_preproc_only", action="store_true",
                    help="Esporta anche overlay trasparente (solo preproc)")
 
-    # Cache
+    # Detection cache (speed/memory trade-offs)
     p.add_argument("--enable_detection_cache", action="store_true", help="Abilita cache detection")
     p.add_argument("--max_cache_size", type=int, default=100)
     p.add_argument("--clear_cache", action="store_true", help="Pulisce le cache e termina se non c'è altro da fare")
@@ -109,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
-    # Base config con default sensati
+    # Populate a PreprocessorConfig from CLI flags (no logic changes; 1:1 mapping).
     cfg = default_config()
 
     # I/O & dataset
@@ -121,7 +123,7 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.image_column = args.image_column
     cfg.num_instances = args.num_instances
 
-    # NLP / domanda
+    # NLP / question conditioning
     cfg.question = args.question
     cfg.apply_question_filter = not args.disable_question_filter
     cfg.aggressive_pruning = bool(args.aggressive_pruning)
@@ -129,24 +131,24 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.threshold_object_similarity = float(args.threshold_object_similarity)
     cfg.threshold_relation_similarity = float(args.threshold_relation_similarity)
 
-    # Detector
+    # Detectors and thresholds
     cfg.detectors_to_use = tuple(d.strip() for d in args.detectors.split(",") if d.strip())
     cfg.threshold_owl = float(args.owl_threshold)
     cfg.threshold_yolo = float(args.yolo_threshold)
     cfg.threshold_detectron = float(args.detectron_threshold)
 
-    # Relazioni
+    # Relation constraints
     cfg.max_relations_per_object = int(args.max_relations_per_object)
     cfg.min_relations_per_object = int(args.min_relations_per_object)
     cfg.margin = int(args.margin)
     cfg.min_distance = float(args.min_distance)
     cfg.max_distance = float(args.max_distance)
 
-    # NMS/seg
+    # NMS / segmentation
     cfg.label_nms_threshold = float(args.label_nms_threshold)
     cfg.seg_iou_threshold = float(args.seg_iou_threshold)
 
-    # SAM
+    # SAM backend
     cfg.sam_version = args.sam_version
     cfg.sam_hq_model_type = args.sam_hq_model_type
     cfg.points_per_side = int(args.points_per_side)
@@ -155,22 +157,23 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.min_mask_region_area = int(args.min_mask_region_area)
     cfg.preproc_device = args.preproc_device
 
-    # Visualizzazione
+    # Visualization switches
     cfg.label_mode = args.label_mode
     cfg.display_labels = bool(args.display_labels)
     cfg.display_relationships = bool(args.display_relationships)
     cfg.display_relation_labels = bool(args.display_relation_labels)
 
-    # override per no_instances: nasconde tutto
+    # Single toggle to hide both masks and boxes
     if args.no_instances:
         cfg.show_segmentation = False
         cfg.show_bboxes = False
     else:
-        # se no_masks è True, spegni segmentazione
+        # Mask toggle
         cfg.show_segmentation = bool(args.show_segmentation) and not args.no_masks
-        # se no_bboxes è True, spegni bbox
+        # Box toggle
         cfg.show_bboxes = not args.no_bboxes
 
+    # Style/typography parameters
     cfg.fill_segmentation = bool(args.fill_segmentation)
     cfg.display_legend = not args.no_legend
     cfg.seg_fill_alpha = float(args.seg_fill_alpha)
@@ -184,23 +187,23 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.resolve_overlaps = bool(args.resolve_overlaps)
     cfg.show_confidence = bool(args.show_confidence)
 
-    # Colori
+    # Global color tuning
     cfg.color_sat_boost = float(args.color_sat_boost)
     cfg.color_val_boost = float(args.color_val_boost)
 
-    # Hole filling
+    # Mask post-processing
     cfg.close_holes = bool(args.close_holes)
     cfg.hole_kernel = int(args.hole_kernel)
     cfg.min_hole_area = int(args.min_hole_area)
 
-    # Output / salvataggi
+    # Output artifact switches
     cfg.save_image_only = bool(args.save_image_only)
     cfg.skip_graph = bool(args.skip_graph)
     cfg.skip_prompt = bool(args.skip_prompt)
     cfg.skip_visualization = bool(args.skip_visualization)
     cfg.export_preproc_only = bool(args.export_preproc_only)
 
-    # Cache
+    # Detection cache config
     cfg.enable_detection_cache = bool(args.enable_detection_cache)
     cfg.max_cache_size = int(args.max_cache_size)
 
@@ -208,25 +211,27 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Entry point: parse args → build config → optional cache clear → run pipeline.
     args = _parse_args()
     cfg = _build_config(args)
 
-    # Se richiesto, pulizia delle cache prima di procedere
+    # Optional cache maintenance; exits early if no processing was requested.
     if args.clear_cache:
         pre = Preprocessor(cfg)
         try:
             pre.clear_caches()
             print("[INFO] Cache cleared.")
         finally:
-            # Se non è stato richiesto di processare nulla, termina
             if not (args.input_path or args.json_file or args.dataset):
                 print("[INFO] No processing requested. Exiting.")
                 return 0
 
+    # Run the preprocessor over the specified input source(s).
     preproc = Preprocessor(cfg)
     preproc.run()
     return 0
 
 
 if __name__ == "__main__":
+    # Standard CLI execution guard.
     raise SystemExit(main(sys.argv[1:]))
