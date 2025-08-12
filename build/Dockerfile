@@ -2,7 +2,7 @@
 # PyTorch 2.5.0 • CUDA 12.1 • cuDNN 9 • Ubuntu 22.04
 ###############################################################################
 FROM pytorch/pytorch:2.5.0-cuda12.1-cudnn9-devel
-LABEL maintainer="UniboNLP"
+
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 \
