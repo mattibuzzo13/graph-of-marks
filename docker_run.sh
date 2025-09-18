@@ -4,7 +4,7 @@ set -e
 # Pre-built Docker image name
 IMAGE_NAME="gom"
 # Hugging Face token (environment overrideable)
-HF_TOKEN="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"
+HF_TOKEN="Insert your Huggingface token"
 # Host-side HF cache mount
 HOST_HF_CACHE="$HOME/.cache/huggingface"
 mkdir -p "$HOST_HF_CACHE"
@@ -18,7 +18,7 @@ GPU_FLAG="--gpus device=$CUDA_VISIBLE_DEVICES"
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64
 
 echo "Starting Docker container with GPU flag: $GPU_FLAG"
-echo "🚀 Using modular igp pipeline"
+echo "Using modular igp pipeline"
 
 #------------------------------------------------------------------------------
 # Examples for the modular system
