@@ -1,40 +1,36 @@
-# 🔍 Graph Visual Reasoning
+# 🔍 Graph of Marks - Visual Reasoning Toolkit
 
-A powerful toolkit for visual reasoning on images using object detection, relationship extraction, and vision-language models.
+A powerful toolkit for visual reasoning on images using object detection, relation extraction, and vision-language models.
 
 ## 📋 Table of Contents
 
 - [Overview](#-overview)
 - [Repository Structure](#-repository-structure)
 - [Prerequisites](#-prerequisites)
-- [Dataset Downloads](#-dataset-downloads)
-  - [Available Datasets](#available-datasets)
-  - [Basic Usage](#basic-usage-for-datasets)
-  - [Advanced Options](#advanced-options-for-datasets)
-- [Image Graph Preprocessing](#-image-graph-preprocessing)
+- [Image Preprocessing](#-image-preprocessing)
   - [Features](#features)
   - [Basic Usage](#basic-usage)
-  - [Advanced Usage](#advanced-usage)
+  - [Advanced Options](#advanced-options)
   - [Output](#output)
 - [Visual Question Answering (VQA)](#-visual-question-answering-vqa)
   - [Features](#features-1)
-  - [Installation](#installation)
   - [Input Format](#input-format)
   - [Basic Usage](#basic-usage-1)
-  - [Advanced Options](#advanced-options)
-  - [Direct Usage](#direct-script-usage)
+  - [Advanced Options](#advanced-options-1)
+- [Dataset Download](#-dataset-download)
+  - [Available Datasets](#available-datasets)
+  - [Basic Usage](#basic-usage-for-datasets)
+  - [Advanced Options](#advanced-options-for-datasets)
 - [Customization](#-customization)
-  - [Custom Detectors](#adding-custom-detectors)
-  - [Custom VQA Models](#adding-custom-models)
 - [Evaluation](#-evaluation)
 
 ## 🌟 Overview
 
 This repository provides tools for comprehensive visual understanding of images through:
 
-1. **Object Detection & Segmentation**: Identify and segment objects in images using multiple detection methods
-2. **Relationship Extraction**: Determine spatial and semantic relationships between detected objects
-3. **Visual Question Answering**: Answer natural language questions about image content using vision-language models
+1. **Object Detection and Segmentation**: Identifies and segments objects using multiple detection methods
+2. **Relation Extraction**: Determines spatial and semantic relationships between detected objects
+3. **Visual Question Answering**: Answers natural language questions about image content using vision-language models
 
 The toolkit is designed for researchers and developers working on visual reasoning, scene understanding, and multimodal AI applications.
 
@@ -42,12 +38,22 @@ The toolkit is designed for researchers and developers working on visual reasoni
 
 ```
 graph-of-marks/
-├── src/                        # Source code directory
-│   ├── qa_generation.py        # Visual Question Answering module
-│   └── image_graph_preprocessor.py  # Image processing and graph creation
-├── Makefile                    # Command automation for all features
-├── run_preprocessing.sh        # Script for image preprocessing
-└── bench_vllm.py               # Benchmarking script for VLLM models
+├── src/
+│   ├── image_preprocessor.py       # Main script for image preprocessing
+│   ├── vqa.py                     # Main script for Visual Question Answering
+│   └── igp/                       # IGP modular package (Image Graph Processing)
+│       ├── detectors/             # Object detectors (OWL-ViT, YOLOv8, Detectron2)
+│       ├── segmentation/          # Segmentation modules (SAM, SAM2, SAM-HQ)
+│       ├── relations/             # Spatial and semantic relation extraction
+│       ├── fusion/                # Detection fusion (NMS, WBF)
+│       ├── graph/                 # Scene graph and prompt generation
+│       ├── viz/                   # Visualization and rendering
+│       ├── vqa/                   # Integrated VQA pipeline
+│       └── utils/                 # Various utilities
+├── build/
+│   ├── Dockerfile                 # Containerization
+│   └── requirements.txt           # Python dependencies
+└── Makefile                       # Command automation
 ```
 
 ## 🛠️ Prerequisites
@@ -55,114 +61,54 @@ graph-of-marks/
 Before using this repository, install the required dependencies:
 
 ```bash
-make install_deps     # Core dependencies for preprocessing
-make install_vqa_deps # Dependencies for Visual QA functionality
+make install_deps
 ```
 
-This will install Python packages and download necessary models for spaCy, NLTK, and vision-language processing.
+This will install the necessary Python packages and download models for spaCy, NLTK, and vision-language processing.
 
-## 📥 Dataset Downloads
+## 🖼️ Image Preprocessing
 
-The toolkit provides convenient methods to download standard benchmark datasets for visual reasoning tasks.
-
-### Available Datasets
-
-The following datasets are supported:
-
-- **COCO**: Common Objects in Context dataset for object detection and segmentation
-- **GQA**: Visual question answering dataset built on Visual Genome
-- **RefCOCO**: Dataset for referring expression comprehension
-- **VQA**: Visual Question Answering dataset
-- **TextVQA**: VQA dataset focused on text in images
-
-### Basic Usage for Datasets
-
-Download a specific dataset:
-
-```bash
-make download_dataset DATASET=coco
-```
-
-Or use specialized targets for each dataset:
-
-```bash
-make download_coco
-make download_gqa
-make download_refcoco
-make download_vqa
-make download_textvqa
-```
-
-### Advanced Options for Datasets
-
-Specify a custom output directory:
-
-```bash
-make download_coco DATASET_DIR=/path/to/data/coco
-```
-
-Or for the generic target:
-
-```bash
-make download_dataset DATASET=vqa DATASET_DIR=/path/to/data/vqa
-```
-
-### Direct Script Usage
-
-If you prefer to use the download script directly:
-
-```bash
-bash scripts/download/download_dataset.sh -d coco -o /path/to/output
-```
-
-Use the help option to see all available parameters:
-
-```bash
-bash scripts/download/download_dataset.sh --help
-```
-
-## 🖼️ Image Graph Preprocessing
-
-The image graph preprocessor creates structured representations of images by identifying objects, generating segmentation masks, and extracting relationships.
+The image preprocessor creates structured representations of images by identifying objects, generating segmentation masks, and extracting relationships.
 
 ### Features
 
 - ✅ **Multiple Detection Methods**: Choose from OWL-ViT, YOLOv8, or Detectron2
-- ✅ **Automatic Segmentation**: Generate precise object masks using SAM (Segment Anything Model)
-- ✅ **Spatial Relationships**: Extract relative positions (above, below, left_of, right_of)
-- ✅ **Rich Visualizations**: Generate annotated images showing detections and relationships
+- ✅ **Automatic Segmentation**: Generates precise object masks using SAM (Segment Anything Model)
+- ✅ **Spatial Relations**: Extracts relative positions (above, below, left_of, right_of)
+- ✅ **Rich Visualizations**: Generates annotated images showing detections and relationships
+- ✅ **Question-Guided Filtering**: Filters relevant objects for specific questions
+- ✅ **Multi-Detector Fusion**: Combines results from multiple detectors using NMS or WBF
+- ✅ **Scene Graph Generation**: Creates structured scene graphs
 
 ### Basic Usage
 
-Process a single image:
+Preprocess a single image:
 
 ```bash
 make preprocess INPUT_PATH=/path/to/image.jpg
 ```
 
-Process a directory of images:
+Preprocess with a specific question:
 
 ```bash
-make preprocess INPUT_PATH=/path/to/image/directory
+make preprocess INPUT_PATH=/path/to/image.jpg QUESTION="What color is the car?"
 ```
 
-Specify an output directory:
+Preprocess from a JSON file:
 
 ```bash
-make preprocess INPUT_PATH=/path/to/image.jpg OUTPUT_FOLDER=my_results
+make preprocess JSON_FILE=/path/to/data.json
 ```
 
-### Advanced Usage
+### Advanced Options
 
 #### Using Specific Detectors
-
-You can specify which detectors to use:
 
 ```bash
 make preprocess INPUT_PATH=/path/to/image.jpg DETECTORS=owlvit,yolov8
 ```
 
-Or use specialized targets for individual detectors:
+Or use specialized targets:
 
 ```bash
 make preprocess_owlvit INPUT_PATH=/path/to/image.jpg
@@ -170,90 +116,48 @@ make preprocess_yolo INPUT_PATH=/path/to/image.jpg
 make preprocess_detectron2 INPUT_PATH=/path/to/image.jpg
 ```
 
-#### Relationship Extraction
-
-Specify which spatial relationships to extract:
+#### Controlling Detection Thresholds
 
 ```bash
-make preprocess INPUT_PATH=/path/to/image.jpg RELATIONSHIP_TYPE=above,below
+make preprocess INPUT_PATH=/path/to/image.jpg \
+    OWL_THRESHOLD=0.3 YOLO_THRESHOLD=0.7 DETECTRON_THRESHOLD=0.6
 ```
 
-Limit the maximum number of relationships:
+#### Visualization Options
 
 ```bash
-make preprocess INPUT_PATH=/path/to/image.jpg MAX_RELATIONS=5
+make preprocess INPUT_PATH=/path/to/image.jpg \
+    DISPLAY_LABELS=true DISPLAY_RELATIONSHIPS=true DISPLAY_RELATION_LABELS=true
 ```
 
-#### Processing Subsets of Instances
-
-Process only specific ranges of instances in a directory:
+#### Processing from Datasets
 
 ```bash
-# Process instances from index 0 to 9 (inclusive)
-make preprocess INPUT_PATH=/path/to/directory START_INDEX=0 END_INDEX=9
-
-# Process just the first 5 instances 
-make preprocess INPUT_PATH=/path/to/directory NUM_INSTANCES=5
-
-# Process instances from index 10 to 19
-make preprocess INPUT_PATH=/path/to/directory START_INDEX=10 END_INDEX=19
-```
-
-These indexing options are particularly useful for:
-- Processing large datasets in chunks
-- Parallelizing processing across multiple machines
-- Debugging with a smaller subset before full execution
-
-#### Batch Processing
-
-Process all images in a directory, creating separate output folders for each:
-
-```bash
-make batch_preprocess INPUT_PATH=/path/to/image/directory
-```
-
-### Direct Script Usage
-
-If you prefer to use the script directly:
-
-```bash
-./run_preprocessing.sh --input /path/to/image.jpg --output my_results --detectors owlvit,yolov8 --relations all --max 8
-```
-
-You can also use indexing parameters:
-
-```bash
-./scripts/run_preprocessing.sh --input /path/to/directory --start 0 --end 9  # Process first 10 instances
-./scripts/run_preprocessing.sh --input /path/to/directory --num 5  # Process just 5 instances
-```
-
-Use the help option to see all available parameters:
-
-```bash
-./scripts/run_preprocessing.sh --help
+make preprocess DATASET=coco SPLIT=train NUM_INSTANCES=100
 ```
 
 ### Output
 
 The preprocessor generates:
 
-1. 📊 **Detection Files**: JSON files with object coordinates, labels, and confidence scores
+1. 📊 **Detection Files**: JSON with object coordinates, labels, and confidence scores
 2. 🎯 **Visualization Images**: Images with bounding boxes or segmentation masks
-3. 🔗 **Relationship Data**: JSON files detailing spatial relationships between objects
-4. 📈 **Combined Graphs**: Visual representations of objects and their relationships
+3. 🔗 **Relation Data**: JSON files with spatial relationships between objects
+4. 📈 **Scene Graph**: Structured representations of objects and relations
+5. 🤖 **Generated Prompts**: Textual descriptions for VQA models
 
 ## 🤖 Visual Question Answering (VQA)
 
-The VQA system enables natural language querying of image content using state-of-the-art vision-language models.
+The VQA system enables natural language queries of image content using state-of-the-art vision-language models.
 
 ### Features
 
-- ✅ **Multiple Model Support**: Compatible with LLaVA, BLIP, Pixtral, and more
-- ✅ **High-Performance Inference**: Integration with VLLM for efficient processing
+- ✅ **Multiple Model Support**: Compatible with LLaVA, BLIP, Pixtral, Qwen2.5-VL, and others
+- ✅ **High-Performance Inference**: VLLM integration for efficient processing
 - ✅ **Model Flexibility**: Support for both Hugging Face and VLLM backends
-- ✅ **Batch Processing**: Process multiple questions and images efficiently
-- ✅ **Evaluation Tools**: Compare generated answers against ground truth
-
+- ✅ **Batch Processing**: Efficiently processes multiple questions and images
+- ✅ **Integrated Pipeline**: Automatic preprocessing and VQA in a single command
+- ✅ **Scene Graph Enhancement**: Response enrichment with structural information
 
 ### Input Format
 
@@ -264,7 +168,7 @@ Create a JSON file with your VQA examples:
   {
     "image_path": "/path/to/image1.jpg",
     "question": "What color is the car?",
-    "answer": "red"  // Optional ground truth
+    "answer": "red"
   },
   {
     "image_path": "https://example.com/image2.jpg",
@@ -282,58 +186,85 @@ Run VQA on a set of examples:
 make run_vqa VQA_INPUT_FILE=/path/to/examples.json
 ```
 
-Specify an output file:
+VQA with automatic preprocessing:
 
 ```bash
-make run_vqa VQA_INPUT_FILE=/path/to/examples.json VQA_OUTPUT_FILE=my_results.json
+make run_vqa VQA_INPUT_FILE=/path/to/examples.json MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct
+```
+
+VQA on image folder only:
+
+```bash
+make run_vqa_folder IMAGE_FOLDER=/path/to/images FIXED_PROMPT="Describe this image"
 ```
 
 ### Advanced Options
 
 #### Model Selection
 
-Choose a different vision-language model:
-
 ```bash
 make run_vqa VQA_INPUT_FILE=/path/to/examples.json MODEL_NAME=mistralai/Pixtral-12B-2409
 ```
 
-#### Image Directory
-
-Specify a base directory for image paths (useful when image paths in the JSON are relative):
-
-```bash
-make run_vqa VQA_INPUT_FILE=/path/to/examples.json IMAGE_DIR=/path/to/images
-```
-
 #### Generation Parameters
 
-Adjust generation parameters:
-
 ```bash
-make run_vqa VQA_INPUT_FILE=/path/to/examples.json TEMPERATURE=0.7 TOP_P=0.95 MAX_LENGTH=1024
+make run_vqa VQA_INPUT_FILE=/path/to/examples.json \
+    TEMPERATURE=0.7 TOP_P=0.95 MAX_LENGTH=1024
 ```
 
 #### Multi-GPU Inference
-
-Use multiple GPUs for tensor parallelism:
 
 ```bash
 make run_vqa VQA_INPUT_FILE=/path/to/examples.json TENSOR_PARALLEL_SIZE=2
 ```
 
-### Direct Script Usage
-
-If you prefer to use the script directly:
+#### Preprocessing Only
 
 ```bash
-python src/qa_generation.py \
-  --input_file /path/to/examples.json \
-  --output_file results.json \
-  --model_name llava-hf/llava-1.5-7b-hf \
-  --temperature 0.2 \
-  --top_p 0.9 \
-  --max_length 512
+make run_vqa VQA_INPUT_FILE=/path/to/examples.json PREPROCESS_ONLY=true
+```
+
+#### With Scene Graph
+
+```bash
+make run_vqa VQA_INPUT_FILE=/path/to/examples.json INCLUDE_SCENE_GRAPH=true
+```
+
+## 📥 Dataset Download
+
+The toolkit provides convenient methods for downloading standard benchmark datasets for visual reasoning tasks.
+
+### Available Datasets
+
+- **COCO**: Common Objects in Context dataset
+- **GQA**: Visual question answering dataset based on Visual Genome
+- **RefCOCO**: Dataset for referring expression comprehension
+- **VQA**: Visual Question Answering dataset
+- **TextVQA**: VQA dataset focused on text in images
+
+### Basic Usage for Datasets
+
+```bash
+make download_dataset DATASET=coco
+```
+
+Or use specialized targets:
+
+```bash
+make download_coco
+make download_gqa
+make download_refcoco
+make download_vqa
+make download_textvqa
+```
+
+### Advanced Options for Datasets
+
+Specify a custom output directory:
+
+```bash
+make download_coco DATASET_DIR=/path/to/data/coco
 ```
 
 ## 🧩 Customization
@@ -342,30 +273,66 @@ python src/qa_generation.py \
 
 To add custom object detectors:
 
-1. Modify the `image_graph_preprocessor.py` file
-2. Implement your detector class following the existing pattern
-3. Update the `DETECTORS_TO_USE` list in the main function
-4. Your detector will be available as an option in the `--detectors` parameter
+1. Create a new class in `src/igp/detectors/` inheriting from `BaseDetector`
+2. Implement the required methods (`detect()`, `get_name()`)
+3. Register the detector in the configuration system
+4. Your detector will be available in the `--detectors` parameter
 
-### Adding Custom Models
+### Adding Custom VQA Models
 
 The VQA system supports two types of custom models:
 
-1. **VLLM Models**: 
-   - Update the `VLLMWrapper` class in `src/qa_generation.py`
-   - Add model-specific logic for handling image inputs
+1. **VLLM Models**: Update the `VLLMModel` class in `src/igp/vqa/models.py`
+2. **Hugging Face Models**: Update the `HFVisionLanguageModel` class
 
-2. **Hugging Face Models**:
-   - Update the `HFVisionLanguageModel` class
-   - Implement custom processing for your model architecture
+### Customizing Relations
+
+Add new relation types in `src/igp/relations/` by implementing the appropriate interface.
 
 ## 📊 Evaluation
 
-The VQA system generates comprehensive evaluation metrics:
+The system generates comprehensive evaluation metrics:
 
-1. **Complete Results**: JSON file with all questions, images, generated answers, and processing times
+1. **Complete Results**: JSON files with all questions, images, generated answers, and processing times
 2. **Performance Metrics**: 
-   - Exact match scores against ground truth answers
+   - Exact match scores against ground truth
    - Average processing time per question
    - Customizable evaluation metrics
 3. **Error Analysis**: Logging of failures and processing errors for debugging
+
+## 🐳 Docker Support
+
+The project includes containerization support:
+
+```bash
+# Build the image
+docker build -f build/Dockerfile -t graph-of-marks .
+
+# Run the container
+docker run --gpus all -v $(pwd):/workdir graph-of-marks make preprocess INPUT_PATH=test.jpg
+```
+
+## 📖 Complete Examples
+
+### Full VQA Pipeline
+
+```bash
+# 1. Preprocessing + VQA in one command
+make run_vqa VQA_INPUT_FILE=data.json MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct
+
+# 2. Preprocessing only
+make run_vqa VQA_INPUT_FILE=data.json PREPROCESS_ONLY=true
+
+# 3. VQA with scene graph enhancement
+make run_vqa VQA_INPUT_FILE=data.json INCLUDE_SCENE_GRAPH=true SKIP_PREPROCESSING=true
+```
+
+### Advanced Preprocessing
+
+```bash
+# Preprocessing with question filtering
+make preprocess INPUT_PATH=image.jpg QUESTION="What animals are visible?" ENABLE_Q_FILTER=true
+
+# Batch preprocessing with full visualizations
+make preprocess INPUT_PATH=images/ DISPLAY_LABELS=true DISPLAY_RELATIONSHIPS=true NUM_INSTANCES=50
+```

@@ -75,9 +75,9 @@ class VisualizerConfig:
     obj_fontsize_outside: int = 12
     rel_fontsize: int = 10
     legend_fontsize: int = 8
-    seg_fill_alpha: float = 0.2
-    bbox_linewidth: float = 2.0
-    rel_arrow_linewidth: float = 2.0
+    seg_fill_alpha: float = 0.6
+    bbox_linewidth: float = 1.0
+    rel_arrow_linewidth: float = 1.5
     rel_arrow_mutation_scale: float = 22.0
 
     # Relationship post-processing

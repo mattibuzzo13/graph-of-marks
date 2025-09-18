@@ -81,14 +81,14 @@ docker run --rm ${GPU_FLAG} --memory=30g \
   -e HF_TOKEN=$HF_TOKEN \
   -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
   -v "$(pwd)":/workdir \
-  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
-  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_rels_num_related":/output_preprocessed \
+  -v "/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/original_RefCOCOg":/input_images \
+  -v "/datasets/VisualQA_Datasets/RefCOCOg/GoM_num":/output_preprocessed \
   -v "$HOST_HF_CACHE":/root/.cache/huggingface \
   "$IMAGE_NAME" \
   run_vqa \
-    VQA_INPUT_FILE=/workdir/VQAV2.json \
+    VQA_INPUT_FILE=/workdir/paragraphs_refcocog_subset_1938.json \
     IMAGE_DIR=/input_images \
-    MAX_IMAGES=3 \
+    MAX_IMAGES=-1 \
     MAX_QUESTIONS_PER_IMAGE=-1 \
     PREPROC_FOLDER=/output_preprocessed \
     OUTPUT_FOLDER=/output_preprocessed \
@@ -99,8 +99,8 @@ docker run --rm ${GPU_FLAG} --memory=30g \
     SKIP_GRAPH=true \
     SKIP_PROMPT=true \
     DETECTORS=owlvit,yolov8,detectron2 \
-    LABEL_MODE=original \
-    DISPLAY_RELATION_LABELS=true \
+    LABEL_MODE=numeric \
+    DISPLAY_RELATION_LABELS=false \
     DISPLAY_RELATIONSHIPS=true \
     DISPLAY_LABELS=true \
     NO_LEGEND=true \
@@ -110,7 +110,7 @@ docker run --rm ${GPU_FLAG} --memory=30g \
     TEMPERATURE=0.3 \
     MAX_LENGTH=512 \
     TOP_P=0.9 \
-    PROMPT_TEMPLATE="Answer with only one word.\nQuestion: {question}\nAnswer:"
+    PROMPT_TEMPLATE="I have labeled a bright numeric ID at the center for each visual object in the image. Please tell me the IDs for: \n{question}\nAnswer:"
 
 # VQA inference only (skip preprocessing)
 #docker run --rm ${GPU_FLAG} --memory=30g \
