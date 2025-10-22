@@ -39,8 +39,8 @@ except Exception:
 
 # Color helpers (prefer fast function import; fall back to ColorCycler if unavailable)
 try:
-    from igp.utils.colors import color_for_label, text_color_for_bg
-except ImportError:
+    from igp.utils.colors import color_for_label, text_color_for_bg  # type: ignore
+except Exception:
     # Fallback: use existing ColorCycler for consistent per-class coloring
     from igp.utils.colors import ColorCycler, text_color_for_bg  # type: ignore
 
@@ -100,7 +100,7 @@ class VisualizerConfig:
     resolve_overlaps: bool = True
     adjust_text_profile: str = "dense"  # "balanced" | "dense"
     micro_push_iters: int = 60
-    
+
     # Depth handling
     use_depth_ordering: bool = True
     depth_key: str = "depth"
@@ -152,7 +152,7 @@ class Visualizer:
         labels: Sequence[str],
         scores: Sequence[float],
         relationships: Sequence[Dict[str, Any]],
-        masks: Optional[Sequence[Dict[str, Any]]] = None,
+        masks: Optional[Sequence[Dict[str, Any] | np.ndarray]] = None,
         save_path: Optional[str] = None,
         draw_background: bool = True,
         bg_color: Tuple[float, float, float, float] = (1, 1, 1, 0),
@@ -185,37 +185,36 @@ class Visualizer:
         obj_colors = [self._pick_color(labels[i], i) for i in range(len(boxes))]
 
         # 3) Objects pass — draw masks/boxes respecting an approximate depth order.
-        #    Labels are staged and laid out later to reduce collisions.
         detection_labels_info: List[Tuple[Tuple[float, float], str, str]] = []
         placed_positions: List[Tuple[float, float]] = []
         overlap_threshold = 30
 
         centers: List[Tuple[float, float]] = []
-        
+
         # Compute a rough "depth index" for z-ordering (farther first, nearer last).
         objects_with_depth = []
         for i, box in enumerate(boxes):
             depth_index = self._extract_depth_index(labels[i], i)
             objects_with_depth.append((i, box, depth_index))
-        
+
         # Draw shapes back-to-front so near objects appear above far ones.
         objects_with_depth.sort(key=lambda x: x[2], reverse=True)
-        
+
         # First pass: only geometry (masks or boxes), no text yet.
         for original_idx, box, depth_idx in objects_with_depth:
             col = obj_colors[original_idx]
             x1, y1, x2, y2 = map(int, box[:4])
-            
+
             best_mask = self._best_mask(original_idx, masks)
-            
+
             # Higher z-order for nearer objects (slight increments).
-            z_order_seg = 1 + (len(boxes) - depth_idx) * 0.1
-            
+            z_order_seg = 1 + (len(boxes) - min(depth_idx, len(boxes))) * 0.1
+
             if cfg.show_segmentation and best_mask is not None and best_mask.get("segmentation") is not None:
                 self._draw_mask(ax, best_mask["segmentation"], color=col, linewidth=cfg.bbox_linewidth, zorder=z_order_seg)
             elif cfg.show_bboxes:
                 self._draw_box(ax, x1, y1, x2, y2, color=col, linewidth=cfg.bbox_linewidth, zorder=z_order_seg)
-        
+
         # Second pass: compute centers and stage labels for inside/outside placement.
         for i, box in enumerate(boxes):
             col = obj_colors[i]
@@ -347,7 +346,7 @@ class Visualizer:
             if cfg.display_relation_labels and rel_label_specs:
                 for spec, arrow in zip(rel_label_specs, arrow_patches):
                     center_pos = self._get_optimal_relation_label_position(ax, arrow, spec["text"])
-                    
+
                     tr = ax.text(
                         center_pos[0],
                         center_pos[1],
@@ -374,18 +373,26 @@ class Visualizer:
 
         # 8) Connector lines: outside object labels → their anchor points
         for t, pt in zip(obj_texts, obj_anchors):
-            ax.annotate("", xy=pt, xytext=t.get_position(),
-                        arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="-"),
-                        zorder=6)
+            ax.annotate(
+                "",
+                xy=pt,
+                xytext=t.get_position(),
+                arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="-"),
+                zorder=6,
+            )
 
         # Connector lines: relation labels → nearest point on corresponding arrow
         if cfg.display_relationships and cfg.display_relation_labels and rel_texts and arrow_patches:
             for t_rel, arrow in zip(rel_texts, arrow_patches):
                 xt, yt = t_rel.get_position()
                 near_pt = self._nearest_point_on_arrow(ax, arrow, xt, yt)
-                ax.annotate("", xy=near_pt, xytext=(xt, yt),
-                            arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="dotted"),
-                            zorder=6)
+                ax.annotate(
+                    "",
+                    xy=near_pt,
+                    xytext=(xt, yt),
+                    arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="dotted"),
+                    zorder=6,
+                )
 
         # 9) Legend: at most 10 base classes for readability
         if cfg.display_legend and len(labels) > 0:
@@ -396,7 +403,12 @@ class Visualizer:
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, bbox_inches="tight", transparent=(not draw_background and (len(bg_color) == 4 and bg_color[3] == 0)))
+            plt.savefig(
+                save_path,
+                bbox_inches="tight",
+                transparent=(not draw_background and (len(bg_color) == 4 and bg_color[3] == 0)),
+                dpi=200,
+            )
             plt.close(fig)
         else:
             plt.show()
@@ -411,13 +423,13 @@ class Visualizer:
                 return int(metadata[self.cfg.depth_key])
             except (ValueError, TypeError):
                 pass
-        
+
         # Fallback: parse patterns like "object_1", "person_2", ...
         import re
-        match = re.search(r'_(\d+)$', label)
+        match = re.search(r"_(\d+)$", label)
         if match:
             return int(match.group(1))
-        
+
         # Last resort: stable order based on original index
         return fallback_index
 
@@ -439,56 +451,46 @@ class Visualizer:
         if cv2 is None:
             ax.imshow(mask.astype(float), alpha=self.cfg.seg_fill_alpha, extent=(0, mask.shape[1], mask.shape[0], 0), zorder=zorder)
             return
-        
+
         mask_uint8 = (mask.astype(np.uint8) * 255) if mask.dtype != np.uint8 else mask.copy()
         if mask_uint8.max() == 1:
             mask_uint8 *= 255
-        
+
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return
-        
+
         for cnt in contours:
             cnt = cnt.squeeze()
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
-            
+
             # Fill polygon first (under the contour)
             if self.cfg.fill_segmentation:
                 ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=self.cfg.seg_fill_alpha, zorder=zorder)
-            
+
             # Then stroke the outline slightly above the fill
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=0.95, zorder=zorder + 0.05)
 
-    def _resolve_object_overlaps_only(
-        self,
-        ax,
-        obj_texts: List[Any],
-        obj_anchors: List[Tuple[float, float]]
-    ) -> None:
+    def _resolve_object_overlaps_only(self, ax, obj_texts: List[Any], obj_anchors: List[Tuple[float, float]]) -> None:
         """Pass 1: resolve collisions among object labels only (keeps anchors fixed)."""
         if not obj_texts:
             return
         self._resolve_overlaps(ax, movable_texts=obj_texts, movable_anchors=obj_anchors)
 
-    def _resolve_arrow_overlaps(
-        self,
-        ax,
-        arrows: List[Any],
-        arrow_data: List[Dict[str, Any]]
-    ) -> None:
+    def _resolve_arrow_overlaps(self, ax, arrows: List[Any], arrow_data: List[Dict[str, Any]]) -> None:
         """Pass 2: reduce arrow/arrow collisions by nudging curvature (arc radius)."""
         if not arrows:
             return
-            
+
         fig = ax.figure
         renderer = fig.canvas.get_renderer()
         max_iterations = 10
-        
-        for iteration in range(max_iterations):
+
+        for _ in range(max_iterations):
             moved = False
             arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
-            
+
             # Pairwise overlap check; if two arrows overlap, bend them apart a bit.
             for i in range(len(arrow_bbs)):
                 for j in range(i + 1, len(arrow_bbs)):
@@ -498,16 +500,17 @@ class Visualizer:
                             arrow_data[i]["rad"] += 0.05
                         if j < len(arrow_data):
                             arrow_data[j]["rad"] -= 0.05
-                        
+
                         # Re-create both arrows with updated curvature
                         arrows[i].remove()
                         arrows[j].remove()
-                        
-                        for idx, arrow_idx in enumerate([i, j]):
+
+                        for arrow_idx in (i, j):
                             d = arrow_data[arrow_idx]
                             p0, p1 = self._shrink_segment_px(d["src_pt"], d["tgt_pt"], 6, ax)
                             new_arrow = patches.FancyArrowPatch(
-                                p0, p1,
+                                p0,
+                                p1,
                                 arrowstyle="->",
                                 color=d["color"],
                                 linewidth=self.cfg.rel_arrow_linewidth,
@@ -517,31 +520,26 @@ class Visualizer:
                             )
                             ax.add_patch(new_arrow)
                             arrows[arrow_idx] = new_arrow
-                        
+
                         moved = True
                         break
                 if moved:
                     break
-            
+
             if not moved:
                 break
-            
+
             fig.canvas.draw()
 
-    def _get_optimal_relation_label_position(
-        self,
-        ax,
-        arrow,
-        text: str
-    ) -> Tuple[float, float]:
+    def _get_optimal_relation_label_position(self, ax, arrow, text: str) -> Tuple[float, float]:
         """Choose a robust label position: centered if the arrow is long, otherwise offset perpendicular."""
         # Estimate arrow length in display px
         arrow_length_px = self._get_arrow_length_px(ax, arrow)
-        
+
         # Estimate text footprint to avoid placing a label larger than the arrow span
         text_width_px, text_height_px = self._estimate_text_px(ax, text, self.cfg.rel_fontsize)
         text_diagonal_px = np.sqrt(text_width_px**2 + text_height_px**2)
-        
+
         if arrow_length_px > text_diagonal_px * 1.5:
             # Enough space: use the geometric center
             return self._get_arrow_center(ax, arrow)
@@ -549,7 +547,7 @@ class Visualizer:
             # Short arrows: offset label along the local normal to reduce clutter
             center_pos = self._get_arrow_center(ax, arrow)
             offset_px = text_diagonal_px * 0.7
-            
+
             verts_disp = self._arrow_vertices_disp(arrow)
             if len(verts_disp) >= 2:
                 # Tangent and normal at the arrow chord
@@ -557,10 +555,10 @@ class Visualizer:
                 tangent_norm = max(np.linalg.norm(tangent), 1e-9)
                 tangent /= tangent_norm
                 normal = np.array([-tangent[1], tangent[0]])
-                
+
                 to_data = ax.transData.inverted().transform
                 to_disp = ax.transData.transform
-                
+
                 center_disp = to_disp(center_pos)
                 offset_disp = center_disp + normal * offset_px
                 offset_data = to_data(offset_disp)
@@ -587,26 +585,24 @@ class Visualizer:
         obj_texts: List[Any],
         rel_texts: List[Any],
         arrows: List[Any],
-        max_dist_px: float
+        max_dist_px: float,
     ) -> None:
         """Pass 4a: push relation labels away from object labels while clamping near their arrows."""
         if not obj_texts or not rel_texts:
             return
-            
+
         fig = ax.figure
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
-        
+
         max_iterations = 15
-        to_disp = ax.transData.transform
-        to_data = ax.transData.inverted().transform
-        
-        for iteration in range(max_iterations):
+
+        for _ in range(max_iterations):
             moved = False
-            
+
             obj_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in obj_texts]
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
-            
+
             for rel_idx, rel_bb in enumerate(rel_bbs):
                 for obj_bb in obj_bbs:
                     if rel_bb.overlaps(obj_bb):
@@ -619,40 +615,34 @@ class Visualizer:
                         push_strength = 10.0
                         push_x = (push_x / push_dist) * push_strength
                         push_y = (push_y / push_dist) * push_strength
-                        
+
                         dx, dy = self._pixels_to_data(ax, push_x, push_y)
                         current_pos = rel_texts[rel_idx].get_position()
                         new_pos = (current_pos[0] + dx, current_pos[1] + dy)
                         rel_texts[rel_idx].set_position(new_pos)
                         moved = True
-                        
+
                         # Keep relation label close to its arrow
                         self._clamp_relation_to_arrow(ax, rel_texts[rel_idx], arrows[rel_idx] if rel_idx < len(arrows) else None, max_dist_px)
-            
+
             if not moved:
                 break
             fig.canvas.draw_idle()
 
-    def _resolve_relation_vs_relation_overlaps(
-        self,
-        ax,
-        rel_texts: List[Any],
-        arrows: List[Any],
-        max_dist_px: float
-    ) -> None:
+    def _resolve_relation_vs_relation_overlaps(self, ax, rel_texts: List[Any], arrows: List[Any], max_dist_px: float) -> None:
         """Pass 4b: separate relation labels from each other symmetrically."""
         if len(rel_texts) < 2:
             return
-            
+
         fig = ax.figure
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
-        
+
         max_iterations = 15
-        
-        for iteration in range(max_iterations):
+
+        for _ in range(max_iterations):
             moved = False
-            
+
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
             for i in range(len(rel_bbs)):
                 for j in range(i + 1, len(rel_bbs)):
@@ -666,44 +656,38 @@ class Visualizer:
                         push_strength = 8.0
                         sep_x = (sep_x / sep_dist) * push_strength
                         sep_y = (sep_y / sep_dist) * push_strength
-                        
+
                         dx_i, dy_i = self._pixels_to_data(ax, -sep_x * 0.5, -sep_y * 0.5)
                         dx_j, dy_j = self._pixels_to_data(ax, sep_x * 0.5, sep_y * 0.5)
-                        
+
                         pos_i = rel_texts[i].get_position()
                         pos_j = rel_texts[j].get_position()
                         rel_texts[i].set_position((pos_i[0] + dx_i, pos_i[1] + dy_i))
                         rel_texts[j].set_position((pos_j[0] + dx_j, pos_j[1] + dy_j))
                         moved = True
-                        
+
                         # Keep both labels within a max distance from their arrows
                         if i < len(arrows):
                             self._clamp_relation_to_arrow(ax, rel_texts[i], arrows[i], max_dist_px)
                         if j < len(arrows):
                             self._clamp_relation_to_arrow(ax, rel_texts[j], arrows[j], max_dist_px)
-            
+
             if not moved:
                 break
             fig.canvas.draw_idle()
 
-    def _clamp_relation_to_arrow(
-        self,
-        ax,
-        rel_text,
-        arrow,
-        max_dist_px: float
-    ) -> None:
+    def _clamp_relation_to_arrow(self, ax, rel_text, arrow, max_dist_px: float) -> None:
         """Ensure a relation label stays within max_dist_px of its arrow polyline."""
         if arrow is None:
             return
-            
+
         to_disp = ax.transData.transform
         to_data = ax.transData.inverted().transform
-        
+
         current_pos = rel_text.get_position()
         rel_pos_disp = to_disp(current_pos)
         verts_disp = self._arrow_vertices_disp(arrow)
-        
+
         if len(verts_disp) > 0:
             _, dist_sq = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
             current_dist_px = np.sqrt(dist_sq)
@@ -732,7 +716,7 @@ class Visualizer:
 
     # Centralized tuning for adjust_text and micro pushes
     def _profile_params(self):
-        dense = (self.cfg.adjust_text_profile == "dense")
+        dense = self.cfg.adjust_text_profile == "dense"
         return dict(
             force_text=0.8 if dense else 0.4,
             expand_text=(1.55, 1.55) if dense else (1.05, 1.05),
@@ -922,9 +906,7 @@ class Visualizer:
         except Exception:
             return (x, y)
 
-    def _label_pos_near_arrow(
-        self, ax, arrow, query_pt: Tuple[float, float], offset_px: float
-    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    def _label_pos_near_arrow(self, ax, arrow, query_pt: Tuple[float, float], offset_px: float) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         """Project a query point to the arrow path and offset along the local normal."""
         to_disp = ax.transData.transform
         to_data = ax.transData.inverted().transform
@@ -988,11 +970,16 @@ class Visualizer:
         self._label2color_cache[base] = col
         return col
 
-    def _best_mask(self, i: int, masks: Optional[Sequence[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
-        """Return the i-th mask dict if present; otherwise None (keeps indexing stable)."""
+    def _best_mask(self, i: int, masks: Optional[Sequence[Dict[str, Any] | np.ndarray]]) -> Optional[Dict[str, Any]]:
+        """Return a dict with 'segmentation' for the i-th mask if present; supports dict or raw array."""
         if masks is None or i >= len(masks) or masks[i] is None:
             return None
-        return masks[i]
+        m = masks[i]
+        if isinstance(m, dict):
+            return m
+        if isinstance(m, np.ndarray):
+            return {"segmentation": m}
+        return None
 
     def _format_label_text(self, label: str, score: float, obj_index: int = 0) -> str:
         """Build object label string according to the selected label_mode."""
@@ -1061,7 +1048,7 @@ class Visualizer:
             return False
 
         w_txt, h_txt = self._estimate_text_px(ax, label_text, self.cfg.obj_fontsize_inside)
-        half_diag = 0.5 * ((w_txt ** 2 + h_txt ** 2) ** 0.5)
+        half_diag = 0.5 * ((w_txt**2 + h_txt**2) ** 0.5)
         margin_px = float(self.cfg.inside_label_margin_px)
 
         # Use distance transform if we have a mask + OpenCV; otherwise a bbox-based fallback radius.
@@ -1134,6 +1121,7 @@ class Visualizer:
             return 1e9
 
         from collections import defaultdict, Counter
+
         rels_by_src: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for r in relationships:
             rels_by_src[int(r.get("src_idx", -1))].append(r)

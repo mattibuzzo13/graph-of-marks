@@ -21,8 +21,12 @@ _SAM_URLS = {
 
 class Sam1Segmenter(Segmenter):
     """
-    Segment Anything v1 (Meta). Requires the `segment_anything` package.
-    Uses a bounding-box prompt with a robust fallback to a single center point.
+    Segment Anything v1 (Meta).
+    - Singolo embedding immagine (predictor.set_image) per tutte le box
+    - Batch dei prompt box via predict_torch (multimask_output=True)
+    - Autocast FP16 su CUDA, fallback a float32
+    - Fallback compatibile a percorso sequenziale (predict) per versioni vecchie
+    - Postprocess: chiusura fori e rimozione componenti piccole (via SegmenterConfig)
     """
 
     def __init__(
@@ -30,10 +34,10 @@ class Sam1Segmenter(Segmenter):
         checkpoint: Optional[str] = None,
         model_type: str = "vit_h",
         *,
-        points_per_side: int = 32,                  # kept for API compatibility; unused here
-        pred_iou_thresh: float = 0.8,               # not used directly
-        stability_score_thresh: float = 0.85,       # not used directly
-        min_mask_region_area: int = 300,            # not used directly
+        points_per_side: int = 32,                  # mantenuto per compatibilità API
+        pred_iou_thresh: float = 0.8,               # non usato direttamente
+        stability_score_thresh: float = 0.85,       # non usato direttamente
+        min_mask_region_area: int = 300,            # non usato direttamente
         config: Optional[SegmenterConfig] = None,
         auto_download: bool = True,
     ) -> None:
@@ -45,189 +49,237 @@ class Sam1Segmenter(Segmenter):
             from segment_anything import sam_model_registry, SamPredictor  # type: ignore
         except Exception as e:
             raise ImportError(
-                "segment_anything is not installed. Install from: "
+                "segment_anything non è installato. Installa da:\n"
                 "https://github.com/facebookresearch/segment-anything"
             ) from e
 
         ckpt_path = self._resolve_checkpoint(checkpoint, model_type, auto_download)
-        self._sam_predictor_cls = SamPredictor
+        self._SamPredictor = SamPredictor
         self._sam_model = sam_model_registry[model_type](checkpoint=str(ckpt_path)).to(self.device).eval()
         self._predictor = SamPredictor(self._sam_model)
+
+        # dtype preferita su CUDA
+        self._amp_enabled = (self.device == "cuda")
+        self._amp_dtype = torch.float16 if self._amp_enabled else torch.float32
 
     # ----------------- public API -----------------
 
     @torch.inference_mode()
     def segment(self, image_pil: Image.Image, boxes: Sequence[Sequence[float]]) -> List[Dict[str, Any]]:
         """
-        Segment objects using SAM 1.0 with BATCH PROCESSING (5-8x faster).
-        
-        Args:
-            image_pil: Input PIL Image
-            boxes: List of [x1, y1, x2, y2] boxes
-        
-        Returns:
-            List of segmentation results with masks and metadata
+        Segmenta gli oggetti con SAM 1.0, usando BATCH dei box per massima velocità.
+        Ritorna liste di dict con:
+          - 'segmentation': np.ndarray(bool, H, W)
+          - 'bbox': [x, y, w, h] (xywh)
+          - 'predicted_iou': float
         """
         if not boxes:
             return []
-        
+
         image_np = np.array(image_pil)
         H, W = image_np.shape[:2]
+
+        # Pre-clamp per sicurezza
+        boxes_clamped = [self.clamp_box_xyxy(b, W, H) for b in boxes]
+
+        # Prepara predictor e embedding
         self._predictor.set_image(image_np)
-        
-        out: List[Dict[str, Any]] = []
-        
+
         try:
-            # NEW: Try batch processing first (5-8x faster)
-            out = self._segment_batch(image_np, boxes, H, W)
-            if out:  # Success with batch mode
-                return out
+            # Percorso preferito: batching su torch
+            results = self._segment_boxes_batched(image_np, boxes_clamped, H, W)
         except Exception as e:
-            print(f"[SAM1] Batch processing failed: {e}, falling back to sequential")
-        
-        # FALLBACK: Sequential processing (original code)
-        try:
-            for box in boxes:
-                x1, y1, x2, y2 = self.clamp_box_xyxy(box, W, H)
+            print(f"[SAM1] Batch fallito, fallback a sequenziale: {e}")
+            results = self._segment_boxes_sequential(image_np, boxes_clamped, H, W)
 
-                # Try progressively shrunken boxes for robustness
-                mask_ok = None
-                score_ok = 0.0
-                for shrink in (0, 2, 4, 8, 12, 16):
-                    xs = max(0, x1 + shrink)
-                    ys = max(0, y1 + shrink)
-                    xe = max(xs + 1, x2 - shrink)
-                    ye = max(ys + 1, y2 - shrink)
-                    if xe <= xs or ye <= ys:
-                        continue
+        # Post-process maschere e bounding box
+        final: List[Dict[str, Any]] = []
+        for res in results:
+            mask = res["segmentation"].astype(bool)
+            # Postprocessing configurabile (close holes + remove_small_components)
+            mask = self.postprocess_mask(mask)
+            bbox_xywh = self.bbox_from_mask(mask)
+            final.append({
+                "segmentation": mask,
+                "bbox": bbox_xywh,
+                "predicted_iou": float(res.get("predicted_iou", 0.0)),
+            })
 
-                    box_arr = np.asarray([[xs, ys, xe, ye]], dtype=float)
-                    masks_box, scores_box, _ = self._predictor.predict(
-                        box=box_arr, multimask_output=True
-                    )
-                    best = int(scores_box.argmax())
-                    mask = masks_box[best]
-                    score = float(scores_box[best])
+        # Libera embedding
+        self._predictor.reset_image()
+        if hasattr(self._predictor, "features"):
+            try:
+                delattr(self._predictor, "features")
+            except Exception:
+                pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-                    if mask.sum() < 50:
-                        cx, cy = (xs + xe) // 2, (ys + ye) // 2
+        return final
+
+    # ----------------- internals -----------------
+
+    def _segment_boxes_batched(
+        self,
+        image_np: np.ndarray,
+        boxes_xyxy: Sequence[Sequence[float]],
+        H: int,
+        W: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Batch inference con predict_torch e chunking adattivo per evitare OOM.
+        """
+        device = self.device
+        results: List[Dict[str, Any]] = []
+
+        # Trasforma box in coordinate del modello SAM
+        boxes_tensor = torch.as_tensor(boxes_xyxy, dtype=torch.float32, device=device)
+        boxes_trans = self._predictor.transform.apply_boxes_torch(boxes_tensor, image_np.shape[:2])
+
+        # Chunking adattivo
+        chunk = self._adaptive_chunk_size(H, W, len(boxes_xyxy))
+        for start in range(0, len(boxes_xyxy), chunk):
+            end = min(start + chunk, len(boxes_xyxy))
+            bx = boxes_trans[start:end]
+
+            with torch.autocast(device_type="cuda", dtype=self._amp_dtype, enabled=self._amp_enabled), torch.inference_mode():
+                # predict_torch ritorna (B, 3, H, W) e (B, 3)
+                masks_t, ious_t, _ = self._predictor.predict_torch(
+                    point_coords=None,
+                    point_labels=None,
+                    boxes=bx,
+                    multimask_output=True,
+                )
+
+            # Per ciascun box scegli la mask con IoU predetto maggiore
+            for i in range(masks_t.shape[0]):
+                m3 = masks_t[i]          # (3, H, W)
+                s3 = ious_t[i]           # (3,)
+                best_idx = int(s3.argmax().item())
+                best_mask = m3[best_idx].detach().to("cpu").numpy().astype(bool)
+                best_score = float(s3[best_idx].item())
+
+                # Fallback: se maschera quasi vuota, prova punto centrale
+                if best_mask.sum() < 50:
+                    x1, y1, x2, y2 = boxes_xyxy[start + i]
+                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                    try:
                         masks_pt, scores_pt, _ = self._predictor.predict(
                             point_coords=np.array([[cx, cy]]),
                             point_labels=np.array([1]),
                             multimask_output=False,
                         )
-                        mask = masks_pt[0]
-                        score = float(scores_pt[0])
+                        best_mask = masks_pt[0].astype(bool)
+                        best_score = float(scores_pt[0])
+                    except Exception:
+                        pass
 
-                    mask = mask.astype(bool)
-                    if self.config.close_holes:
-                        mask = self.close_mask_holes(mask)
-
-                    mask_ok, score_ok = mask, score
-                    break
-
-                if mask_ok is None:
-                    mask_ok = np.zeros((H, W), dtype=bool)
-                    score_ok = 0.0
-
-                bbox_xywh = self.bbox_from_mask(mask_ok)
-                out.append({
-                    "segmentation": mask_ok,
-                    "bbox": bbox_xywh,
-                    "predicted_iou": float(score_ok),
+                results.append({
+                    "segmentation": best_mask,
+                    "predicted_iou": best_score,
                 })
-            return out
-        finally:
-            self._predictor.reset_image()
-            if hasattr(self._predictor, "features"):
-                delattr(self._predictor, "features")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
-    def _segment_batch(
+        return results
+
+    def _segment_boxes_sequential(
         self,
         image_np: np.ndarray,
-        boxes: Sequence[Sequence[float]],
+        boxes_xyxy: Sequence[Sequence[float]],
         H: int,
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        NEW METHOD: Batch SAM inference - processes all boxes in one forward pass.
+        Fallback compatibile: loop per box con predictor.predict.
         """
-        # Convert boxes to tensor and clamp
-        boxes_clamped = []
-        for box in boxes:
-            x1, y1, x2, y2 = self.clamp_box_xyxy(box, W, H)
-            boxes_clamped.append([x1, y1, x2, y2])
-        
-        boxes_tensor = torch.tensor(boxes_clamped, dtype=torch.float32, device=self.device)
-        
-        # Transform boxes to SAM's input format
-        transformed_boxes = self._predictor.transform.apply_boxes_torch(
-            boxes_tensor,
-            image_np.shape[:2]
-        )
-        
-        # Single forward pass for ALL boxes
-        masks, iou_scores, _ = self._predictor.predict_torch(
-            point_coords=None,
-            point_labels=None,
-            boxes=transformed_boxes,
-            multimask_output=True  # Returns 3 masks per box
-        )
-        
-        # Process results
-        results = []
-        for idx, box in enumerate(boxes_clamped):
-            # Get best mask for this box (highest IoU)
-            box_masks = masks[idx]  # Shape: (3, H, W)
-            box_scores = iou_scores[idx]  # Shape: (3,)
-            
-            best_idx = box_scores.argmax().item()
-            best_mask = box_masks[best_idx].cpu().numpy()
-            best_score = box_scores[best_idx].item()
-            
-            # Convert to boolean mask
-            best_mask = best_mask.astype(bool)
-            
-            # Apply hole closing if enabled
-            if self.config.close_holes:
-                best_mask = self.close_mask_holes(best_mask)
-            
-            # Fallback for empty masks: try center point
-            if best_mask.sum() < 50:
-                x1, y1, x2, y2 = box
-                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                try:
-                    masks_pt, scores_pt, _ = self._predictor.predict(
-                        point_coords=np.array([[cx, cy]]),
-                        point_labels=np.array([1]),
-                        multimask_output=False,
-                    )
-                    best_mask = masks_pt[0].astype(bool)
-                    best_score = float(scores_pt[0])
-                    if self.config.close_holes:
-                        best_mask = self.close_mask_holes(best_mask)
-                except Exception:
-                    best_mask = np.zeros((H, W), dtype=bool)
-                    best_score = 0.0
-            
-            bbox_xywh = self.bbox_from_mask(best_mask)
-            results.append({
-                "segmentation": best_mask,
-                "bbox": bbox_xywh,
-                "predicted_iou": float(best_score),
-            })
-        
-        return results
+        out: List[Dict[str, Any]] = []
+        for (x1, y1, x2, y2) in boxes_xyxy:
+            mask_ok = None
+            score_ok = 0.0
 
-    # ----------------- internals -----------------
+            # Prova box shrinking progressivo per robustezza
+            for shrink in (0, 2, 4, 8, 12, 16):
+                xs = max(0, x1 + shrink)
+                ys = max(0, y1 + shrink)
+                xe = max(xs + 1, x2 - shrink)
+                ye = max(ys + 1, y2 - shrink)
+                if xe <= xs or ye <= ys:
+                    continue
+
+                box_arr = np.asarray([[xs, ys, xe, ye]], dtype=float)
+                masks_box, scores_box, _ = self._predictor.predict(
+                    box=box_arr, multimask_output=True
+                )
+                best = int(scores_box.argmax())
+                mask = masks_box[best].astype(bool)
+                score = float(scores_box[best])
+
+                # Fallback su punto centrale se maschera è troppo piccola
+                if mask.sum() < 50:
+                    cx, cy = (xs + xe) // 2, (ys + ye) // 2
+                    try:
+                        masks_pt, scores_pt, _ = self._predictor.predict(
+                            point_coords=np.array([[cx, cy]]),
+                            point_labels=np.array([1]),
+                            multimask_output=False,
+                        )
+                        mask = masks_pt[0].astype(bool)
+                        score = float(scores_pt[0])
+                    except Exception:
+                        pass
+
+                mask_ok, score_ok = mask, score
+                break
+
+            if mask_ok is None:
+                mask_ok = np.zeros((H, W), dtype=bool)
+                score_ok = 0.0
+
+            out.append({
+                "segmentation": mask_ok,
+                "predicted_iou": float(score_ok),
+            })
+
+        return out
+
+    def _adaptive_chunk_size(self, H: int, W: int, n_boxes: int) -> int:
+        """
+        Stima una dimensione di chunk sicura in base alla VRAM e ai megapixel.
+        """
+        if not torch.cuda.is_available() or self.device != "cuda":
+            return min(64, max(1, n_boxes))
+
+        try:
+            total_mem = torch.cuda.get_device_properties(0).total_memory
+            gb = total_mem / (1024**3)
+        except Exception:
+            gb = 8.0
+
+        # base per VRAM
+        if gb >= 40:
+            base = 512
+        elif gb >= 24:
+            base = 384
+        elif gb >= 16:
+            base = 256
+        elif gb >= 12:
+            base = 192
+        else:
+            base = 128
+
+        # riduci per immagini molto grandi
+        mp = (H * W) / 1_000_000.0
+        if mp > 4:
+            base //= 2
+        if mp > 8:
+            base //= 2
+
+        return int(max(1, min(base, n_boxes)))
 
     def _resolve_checkpoint(self, checkpoint: Optional[str], model_type: str, auto_download: bool) -> Path:
         if checkpoint:
             p = Path(checkpoint)
             if not p.exists():
-                raise FileNotFoundError(f"SAM-1 checkpoint not found: {checkpoint}")
+                raise FileNotFoundError(f"SAM-1 checkpoint non trovato: {checkpoint}")
             return p
 
         # Default filename per model type
@@ -241,8 +293,8 @@ class Sam1Segmenter(Segmenter):
 
         if not p.exists():
             if not auto_download:
-                raise FileNotFoundError(f"Missing SAM-1 checkpoint: {p}")
-            # Download from official URL if absent
+                raise FileNotFoundError(f"Checkpoint SAM-1 mancante: {p}")
+            # Download dall’URL ufficiale
             url = _SAM_URLS.get(model_type, _SAM_URLS["vit_h"])
             from torch.hub import download_url_to_file
             download_url_to_file(url, str(p))

@@ -25,7 +25,7 @@ YOLO_THRESHOLD          ?= 0.5
 DETECTRON_THRESHOLD     ?= 0.5
 
 # SAM parameters
-SAM_VERSION             ?= 1
+SAM_VERSION             ?= hq
 
 # Visualization options
 LABEL_MODE              ?= original
