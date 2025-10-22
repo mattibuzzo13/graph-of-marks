@@ -40,7 +40,7 @@ echo "Using modular igp pipeline"
 #    OUTPUT_FOLDER=/output_images
 
 # Batch preprocessing with multiple detectors
-#docker run --rm ${GPU_FLAG} \
+# docker run --rm ${GPU_FLAG} \
 #  -v "$(pwd)":/workdir \
 #  -v "/datasets/VisualQA_Datasets/coco/images/train2017":/input_data \
 #  -v "$(pwd)/output_images_COCO":/output_images \
@@ -74,43 +74,43 @@ echo "Using modular igp pipeline"
 #    SKIP_PREPROCESSING=true
 
 # Preprocessing + VQA inference
-docker run --rm ${GPU_FLAG} --memory=30g \
-  -e CUDA_LAUNCH_BLOCKING=1 \
-  -e HF_HOME=/root/.cache/huggingface \
-  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-  -e HF_TOKEN=$HF_TOKEN \
-  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
-  -v "$(pwd)":/workdir \
-  -v "/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/original_RefCOCOg":/input_images \
-  -v "/datasets/VisualQA_Datasets/RefCOCOg/GoM_num":/output_preprocessed \
-  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
-  "$IMAGE_NAME" \
-  run_vqa \
-    VQA_INPUT_FILE=/workdir/paragraphs_refcocog_subset_1938.json \
-    IMAGE_DIR=/input_images \
-    MAX_IMAGES=-1 \
-    MAX_QUESTIONS_PER_IMAGE=-1 \
-    PREPROC_FOLDER=/output_preprocessed \
-    OUTPUT_FOLDER=/output_preprocessed \
-    SKIP_PREPROCESSING=false \
-    ENABLE_Q_FILTER=true \
-    PREPROCESS_ONLY=false \
-    SAVE_IMAGE_ONLY=true \
-    SKIP_GRAPH=true \
-    SKIP_PROMPT=true \
-    DETECTORS=owlvit,yolov8,detectron2 \
-    LABEL_MODE=numeric \
-    DISPLAY_RELATION_LABELS=false \
-    DISPLAY_RELATIONSHIPS=true \
-    DISPLAY_LABELS=true \
-    NO_LEGEND=true \
-    VQA_OUTPUT_FILE=/output_preprocessed/results.json \
-    MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
-    USE_VLLM=false \
-    TEMPERATURE=0.3 \
-    MAX_LENGTH=512 \
-    TOP_P=0.9 \
-    PROMPT_TEMPLATE="I have labeled a bright numeric ID at the center for each visual object in the image. Please tell me the IDs for: \n{question}\nAnswer:"
+#docker run --rm ${GPU_FLAG} --memory=30g \
+#  -e CUDA_LAUNCH_BLOCKING=1 \
+#  -e HF_HOME=/root/.cache/huggingface \
+#  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+#  -e HF_TOKEN=$HF_TOKEN \
+#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256 \
+#  -v "$(pwd)":/workdir \
+#  -v "/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/original_RefCOCOg":/input_images \
+#  -v "/datasets/VisualQA_Datasets/RefCOCOg/GoM_rel_alphabetic":/output_preprocessed \
+#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
+#  "$IMAGE_NAME" \
+#  run_vqa \
+#    VQA_INPUT_FILE=/workdir/paragraphs_refcocog_subset_1938.json \
+#    IMAGE_DIR=/input_images \
+#    MAX_IMAGES=-1 \
+#    MAX_QUESTIONS_PER_IMAGE=-1 \
+#    PREPROC_FOLDER=/output_preprocessed \
+#    OUTPUT_FOLDER=/output_preprocessed \
+#    SKIP_PREPROCESSING=false \
+#    ENABLE_Q_FILTER=true \
+#    PREPROCESS_ONLY=false \
+#    SAVE_IMAGE_ONLY=true \
+#    SKIP_GRAPH=true \
+#    SKIP_PROMPT=true \
+#    DETECTORS=owlvit,yolov8,detectron2 \
+#    LABEL_MODE=original \
+#    DISPLAY_RELATION_LABELS=false \
+#    DISPLAY_RELATIONSHIPS=true \
+#    DISPLAY_LABELS=true \
+#    NO_LEGEND=true \
+#    VQA_OUTPUT_FILE=/output_preprocessed/results.json \
+#    MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct \
+#    USE_VLLM=false \
+#    TEMPERATURE=0.3 \
+#    MAX_LENGTH=512 \
+#    TOP_P=0.9 \
+#    PROMPT_TEMPLATE="I have labeled a bright numeric ID at the center for each visual object in the image. Please tell me the Alphabetic IDs for: \n{question}\nAnswer:"
 
 # VQA inference only (skip preprocessing)
 #docker run --rm ${GPU_FLAG} --memory=30g \
@@ -133,36 +133,37 @@ docker run --rm ${GPU_FLAG} --memory=30g \
 #    SKIP_PREPROCESSING=true
 
 # Preprocessing only (no inference)
-#docker run --rm ${GPU_FLAG} --memory=30g \
-#  -e CUDA_LAUNCH_BLOCKING=1 \
-#  -e HF_HOME=/root/.cache/huggingface \
-#  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
-#  -e HF_TOKEN=$HF_TOKEN \
-#  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64 \
-#  -v "$(pwd)":/workdir \
-#  -v "/datasets/VisualQA_Datasets/Preprocessing/VQAV2/original_VQAV2/vqav2_imgs_1000":/input_images \
-#  -v "/datasets/VisualQA_Datasets/VQAV2/GoM_rels_num":/output_preprocessed \
-#  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
-#  "$IMAGE_NAME" \
-#  run_vqa \
-#    VQA_INPUT_FILE=/workdir/VQAV2.json \
-#    IMAGE_DIR=/input_images \
-#    MAX_IMAGES=3 \
-#    MAX_QUESTIONS_PER_IMAGE=-1 \
-#    PREPROC_FOLDER=/output_preprocessed \
-#    OUTPUT_FOLDER=/output_preprocessed \
-#    SKIP_PREPROCESSING=false \
-#    ENABLE_Q_FILTER=true \
-#    PREPROCESS_ONLY=true \
-#    SAVE_IMAGE_ONLY=true \
-#    SKIP_GRAPH=true \
-#    SKIP_PROMPT=true \
-#    DETECTORS=owlvit,yolov8,detectron2 \
-#    LABEL_MODE=numeric \
-#    DISPLAY_RELATION_LABELS=true \
-#    DISPLAY_RELATIONSHIPS=true \
-#    DISPLAY_LABELS=true \
-#    NO_LEGEND=true
+echo "=== Optimized test (10 immagini) ==="
+time docker run --rm ${GPU_FLAG} --memory=30g \
+  -e CUDA_LAUNCH_BLOCKING=1 \
+  -e HF_HOME=/root/.cache/huggingface \
+  -e TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256 \
+  -v "$(pwd)":/workdir \
+  -v "/datasets/VisualQA_Datasets/Preprocessing/RefCOCOg/original_RefCOCOg":/input_images \
+  -v "/datasets/VisualQA_Datasets/RefCOCOg/test_output":/output_preprocessed \
+  -v "$HOST_HF_CACHE":/root/.cache/huggingface \
+  "$IMAGE_NAME" \
+  run_vqa \
+    VQA_INPUT_FILE=/workdir/paragraphs_refcocog_subset_1938.json \
+    IMAGE_DIR=/input_images \
+    MAX_IMAGES=10 \
+    MAX_QUESTIONS_PER_IMAGE=1 \
+    PREPROC_FOLDER=/output_preprocessed \
+    OUTPUT_FOLDER=/output_preprocessed \
+    SKIP_PREPROCESSING=false \
+    ENABLE_Q_FILTER=true \
+    PREPROCESS_ONLY=true \
+    SAVE_IMAGE_ONLY=true \
+    SKIP_GRAPH=true \
+    SKIP_PROMPT=true \
+    DETECTORS=owlvit,yolov8,detectron2 \
+    LABEL_MODE=original \
+    DISPLAY_RELATION_LABELS=true \
+    DISPLAY_RELATIONSHIPS=true \
+    DISPLAY_LABELS=true \
+    NO_LEGEND=true
 
 # VQA with scene graph input
 #docker run --rm ${GPU_FLAG} --memory=30g \

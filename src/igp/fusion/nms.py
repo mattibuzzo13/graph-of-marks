@@ -1,245 +1,427 @@
 # igp/fusion/nms.py
-# NMS/Soft-NMS utilities operating on `Detection` objects.
-# Includes IoU computation and a per-label NMS that returns kept indices.
+# Efficient NMS utilities with NumPy backend and optional Torch/Torchvision acceleration.
+# Provides:
+# - nms: flexible API (array boxes -> indices OR list[Detection] -> filtered list[Detection])
+# - soft_nms: simple NumPy soft-NMS implementation (returns indices)
+# - iou: vectorized IoU matrix
+# - labelwise_nms: per-class NMS (returns indices)
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
+import numpy as np
 
-from igp.types import Detection
+try:
+    import torch
+    from torchvision.ops import nms as tv_nms  # type: ignore
+    _HAS_TORCHVISION = True
+except Exception:
+    torch = None  # type: ignore
+    tv_nms = None  # type: ignore
+    _HAS_TORCHVISION = False
+
+try:
+    from igp.types import Detection
+except Exception:
+    Detection = None  # type: ignore
 
 
-# ---------------------------------------------------------------------------
-# PUBLIC API
-# ---------------------------------------------------------------------------
+ArrayLike = Union[np.ndarray, Sequence[float]]
 
-def nms(
-    detections: List[Detection],
-    *,
-    iou_thr: float = 0.55,
-    class_aware: bool = True,
-    sort_desc: bool = True,
-) -> List[Detection]:
+
+def _ensure_np1d(x, dtype=None) -> np.ndarray:
+    arr = np.asarray(x, dtype=dtype)
+    return arr.reshape(-1)
+
+
+def _ensure_np2d(x, dtype=None) -> np.ndarray:
+    arr = np.asarray(x, dtype=dtype)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 4)
+    return arr
+
+
+def iou(boxes1: ArrayLike, boxes2: ArrayLike) -> np.ndarray:
     """
-    Non-Maximum Suppression over a list of Detection objects.
-
-    Args:
-        detections: list of detections (xyxy box, label, score).
-        iou_thr: IoU threshold for suppression.
-        class_aware: if True, apply NMS independently per class; otherwise global.
-        sort_desc: sort final results by descending score.
-
-    Returns:
-        Filtered list of Detection.
+    Vectorized IoU between boxes1 (N,4) and boxes2 (M,4).
+    Boxes in xyxy format.
+    Returns (N, M) IoU matrix.
     """
-    if not detections:
-        return []
+    a = _ensure_np2d(boxes1, np.float32)
+    b = _ensure_np2d(boxes2, np.float32)
+    if a.size == 0 or b.size == 0:
+        return np.zeros((a.shape[0], b.shape[0]), dtype=np.float32)
 
-    groups: Dict[str, List[Detection]] = defaultdict(list)
-    if class_aware:
-        for d in detections:
-            groups[_get_label(d)].append(d)
+    ax1, ay1, ax2, ay2 = a.T
+    bx1, by1, bx2, by2 = b.T
+
+    inter_x1 = np.maximum(ax1[:, None], bx1[None, :])
+    inter_y1 = np.maximum(ay1[:, None], by1[None, :])
+    inter_x2 = np.minimum(ax2[:, None], bx2[None, :])
+    inter_y2 = np.minimum(ay2[:, None], by2[None, :])
+
+    inter_w = np.clip(inter_x2 - inter_x1, 0, None)
+    inter_h = np.clip(inter_y2 - inter_y1, 0, None)
+    inter = inter_w * inter_h
+
+    area_a = np.clip(ax2 - ax1, 0, None) * np.clip(ay2 - ay1, 0, None)
+    area_b = np.clip(bx2 - bx1, 0, None) * np.clip(by2 - by1, 0, None)
+
+    union = area_a[:, None] + area_b[None, :] - inter
+    return inter / (union + 1e-7)
+
+
+def nms_numpy(boxes: ArrayLike, scores: ArrayLike, iou_thr: float = 0.5, topk: Optional[int] = None) -> np.ndarray:
+    """
+    Pure NumPy NMS. Returns indices of kept boxes in original order.
+    """
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32)
+
+    N = boxes.shape[0]
+    if N == 0:
+        return np.empty((0,), dtype=np.int64)
+
+    order = scores.argsort()[::-1]
+    if topk is not None:
+        order = order[: int(topk)]
+
+    x1 = boxes[order, 0]
+    y1 = boxes[order, 1]
+    x2 = boxes[order, 2]
+    y2 = boxes[order, 3]
+    areas = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        if order.size == 1:
+            break
+
+        xx1 = np.maximum(x1[0], x1[1:])
+        yy1 = np.maximum(y1[0], y1[1:])
+        xx2 = np.minimum(x2[0], x2[1:])
+        yy2 = np.minimum(y2[0], y2[1:])
+
+        w = np.clip(xx2 - xx1, 0, None)
+        h = np.clip(yy2 - yy1, 0, None)
+        inter = w * h
+        iou_vals = inter / (areas[0] + areas[1:] - inter + 1e-7)
+        keep_mask = np.where(iou_vals <= iou_thr)[0] + 1
+        order = order[keep_mask]
+        x1, y1, x2, y2 = x1[keep_mask], y1[keep_mask], x2[keep_mask], y2[keep_mask]
+        areas = areas[keep_mask]
+
+    return np.asarray(keep, dtype=np.int64)
+
+
+def nms_torch(boxes: ArrayLike, scores: ArrayLike, iou_thr: float = 0.5, topk: Optional[int] = None, device: Optional[str] = None) -> np.ndarray:
+    """
+    Torch/Torchvision NMS wrapper. Returns kept indices relative to original input.
+    """
+    if not _HAS_TORCHVISION:
+        return nms_numpy(boxes, scores, iou_thr=iou_thr, topk=topk)
+
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32)
+    dev = device or ("cuda" if (torch is not None and torch.cuda.is_available()) else "cpu")  # type: ignore
+
+    t_boxes = torch.as_tensor(boxes, device=dev)  # type: ignore
+    t_scores = torch.as_tensor(scores, device=dev)  # type: ignore
+
+    if topk is not None and boxes.shape[0] > topk:
+        order = torch.argsort(t_scores, descending=True)[: int(topk)]  # type: ignore
+        t_boxes_sub = t_boxes[order]
+        t_scores_sub = t_scores[order]
+        kept_rel = tv_nms(t_boxes_sub, t_scores_sub, float(iou_thr))  # type: ignore
+        kept = order[kept_rel]
     else:
-        groups["__all__"] = list(detections)
+        kept = tv_nms(t_boxes, t_scores, float(iou_thr))  # type: ignore
 
-    kept: List[Detection] = []
-    for _, dets in groups.items():
-        # sort by confidence score
-        dets_sorted = sorted(dets, key=lambda d: float(_get_score(d)), reverse=True)
-        suppress = [False] * len(dets_sorted)
+    return kept.detach().cpu().numpy().astype(np.int64)
 
-        for i in range(len(dets_sorted)):
-            if suppress[i]:
-                continue
-            kept.append(dets_sorted[i])
-            box_i = _as_xyxy(dets_sorted[i].box)
-            for j in range(i + 1, len(dets_sorted)):
-                if suppress[j]:
-                    continue
-                if iou(box_i, _as_xyxy(dets_sorted[j].box)) >= iou_thr:
-                    suppress[j] = True
 
-    if sort_desc:
-        kept.sort(key=lambda d: float(_get_score(d)), reverse=True)
-    return kept
+# ---------- robust helpers for labels/scores coercion ----------
+
+def _as_float_array(arr) -> Optional[np.ndarray]:
+    """
+    Try to convert to float32 array; return None if not possible.
+    """
+    try:
+        a = np.asarray(arr)
+        if a.dtype.kind in ("f", "i", "u"):
+            return a.astype(np.float32, copy=False)
+        return a.astype(np.float32)
+    except Exception:
+        return None
+
+
+def _labels_to_ids(arr) -> np.ndarray:
+    """
+    Convert labels array (str/int/float) to stable int32 ids.
+    - int/uint -> cast to int32
+    - float -> if all near-integers, cast; else map unique values to ids
+    - str/object -> map sorted unique strings to ids
+    """
+    a = np.asarray(arr)
+    kind = a.dtype.kind
+    if kind in ("i", "u"):
+        return a.astype(np.int32, copy=False)
+    if kind == "f":
+        rounded = np.rint(a)
+        if np.allclose(a, rounded):
+            return rounded.astype(np.int32, copy=False)
+        uniq_vals = [float(v) for v in np.unique(a)]
+        mapping = {v: i for i, v in enumerate(uniq_vals)}
+        return np.asarray([mapping[float(v)] for v in a], dtype=np.int32)
+    # Strings / objects
+    as_str = a.astype(str)
+    uniq = sorted(set(as_str.tolist()))
+    mapping = {s: i for i, s in enumerate(uniq)}
+    return np.asarray([mapping[s] for s in as_str], dtype=np.int32)
+
+
+def _coerce_labels_scores(
+    a2: ArrayLike,
+    a3: ArrayLike,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Infer which is labels vs scores without assuming numeric dtypes for labels.
+    Priority:
+      - If a2 looks like labels (str/object/int) and a3 can be float -> (labels=a2, scores=a3)
+      - Else if a3 looks like labels and a2 can be float -> (labels=a3, scores=a2)
+      - Else fall back to favor the one that can convert to float as scores.
+    Returns (labels_np:int32, scores_np:float32).
+    """
+    a2_np = np.asarray(a2)
+    a3_np = np.asarray(a3)
+    s2 = _as_float_array(a2_np)
+    s3 = _as_float_array(a3_np)
+
+    a2_label_like = a2_np.dtype.kind in ("i", "u", "O", "U", "S")
+    a3_label_like = a3_np.dtype.kind in ("i", "u", "O", "U", "S")
+
+    if a2_label_like and s3 is not None:
+        return _labels_to_ids(a2_np), s3
+    if a3_label_like and s2 is not None:
+        return _labels_to_ids(a3_np), s2
+
+    # If both numeric, prefer integer-like as labels and float as scores
+    if s2 is not None and a3_np.dtype.kind in ("i", "u") and s3 is None:
+        return _labels_to_ids(a3_np), s2
+    if s3 is not None and a2_np.dtype.kind in ("i", "u") and s2 is None:
+        return _labels_to_ids(a2_np), s3
+
+    # Fallbacks: choose the one convertible to float as scores
+    if s3 is not None:
+        return _labels_to_ids(a2_np), s3
+    if s2 is not None:
+        return _labels_to_ids(a3_np), s2
+
+    raise ValueError("Cannot infer labels and scores: provide numeric scores and label-like array.")
+
+
+# ---------- APIs ----------
+
+def labelwise_nms(
+    boxes: ArrayLike,
+    a2: ArrayLike,
+    a3: Optional[ArrayLike] = None,
+    iou_thr: float = 0.5,
+    iou_threshold: Optional[float] = None,
+    topk_per_class: Optional[int] = None,
+    backend: str = "auto",
+    device: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Run per-class NMS and return kept indices (relative to input arrays).
+
+    Backward-compat:
+    - Supports both orderings:
+        (boxes, scores, labels)
+        (boxes, labels, scores)
+    - Accepts `iou_threshold` as alias for `iou_thr`.
+    """
+    if iou_threshold is not None:
+        iou_thr = float(iou_threshold)
+
+    boxes_np = _ensure_np2d(boxes, np.float32)
+    if a3 is None:
+        raise ValueError("labelwise_nms requires both labels and scores arrays.")
+    labels_np, scores_np = _coerce_labels_scores(a2, a3)
+
+    if boxes_np.shape[0] == 0:
+        return np.empty((0,), dtype=np.int64)
+
+    kept: List[int] = []
+    for cls in np.unique(labels_np):
+        mask = (labels_np == cls)
+        idxs = np.nonzero(mask)[0]
+        if idxs.size == 0:
+            continue
+
+        sub_boxes = boxes_np[idxs]
+        sub_scores = scores_np[idxs]
+
+        if backend == "torch" or (backend == "auto" and _HAS_TORCHVISION):
+            kept_rel = nms_torch(sub_boxes, sub_scores, iou_thr=iou_thr, topk=topk_per_class, device=device)
+        else:
+            kept_rel = nms_numpy(sub_boxes, sub_scores, iou_thr=iou_thr, topk=topk_per_class)
+
+        kept.extend(idxs[kept_rel].tolist())
+
+    kept = np.asarray(kept, dtype=np.int64)
+    order = scores_np[kept].argsort()[::-1]
+    return kept[order]
 
 
 def soft_nms(
-    detections: List[Detection],
-    *,
-    iou_thr: float = 0.55,
+    boxes: ArrayLike,
+    scores: ArrayLike,
+    iou_thr: float = 0.5,
     sigma: float = 0.5,
-    score_thresh: float = 1e-3,
-    class_aware: bool = True,
-    method: str = "linear",  # "linear" | "gaussian"
+    method: str = "linear",
+    score_thr: float = 0.001,
+) -> np.ndarray:
+    """
+    Simple NumPy Soft-NMS implementation.
+    Returns indices of boxes with final score >= score_thr, sorted by final score desc.
+    method: "linear" | "gaussian" | "original" (original uses IoU suppression)
+    """
+    boxes = _ensure_np2d(boxes, np.float32).copy()
+    scores = _ensure_np1d(scores, np.float32).copy()
+    N = boxes.shape[0]
+    if N == 0:
+        return np.empty((0,), dtype=np.int64)
+
+    idxs = np.arange(N)
+    keep = []
+
+    while idxs.size > 0:
+        max_idx = np.argmax(scores[idxs])
+        current = idxs[max_idx]
+        keep.append(current)
+        if idxs.size == 1:
+            break
+        others = np.delete(idxs, max_idx)
+
+        # compute IoU between current and others
+        iou_vals = iou(boxes[[current]], boxes[others])[0]
+
+        if method == "linear":
+            decay = np.where(iou_vals > iou_thr, 1 - iou_vals, 1.0)
+        elif method == "gaussian":
+            decay = np.exp(- (iou_vals ** 2) / sigma)
+        else:  # original
+            decay = np.where(iou_vals > iou_thr, 0.0, 1.0)
+
+        scores[others] = scores[others] * decay
+        idxs = np.array([i for i in idxs if scores[i] >= score_thr])
+
+    # sort keep by final score desc
+    keep_scores = scores[keep]
+    order = np.argsort(keep_scores)[::-1]
+    return np.asarray(keep, dtype=np.int64)[order]
+
+
+def _detection_to_arrays(dets: List["Detection"]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    """
+    Helper to convert list[Detection] -> (boxes, scores, labels_idx, labels_str)
+    labels_idx will be numeric ids assigned deterministically from sorted unique labels.
+    """
+    boxes = []
+    scores = []
+    labels_str = []
+    for d in dets:
+        b = getattr(d, "box", (0, 0, 0, 0))
+        boxes.append([float(b[0]), float(b[1]), float(b[2]), float(b[3])])
+        scores.append(float(getattr(d, "score", 1.0)))
+        labels_str.append(str(getattr(d, "label", "")))
+    boxes = np.asarray(boxes, dtype=np.float32)
+    scores = np.asarray(scores, dtype=np.float32)
+    uniq = sorted(set(labels_str))
+    lab2id = {l: i for i, l in enumerate(uniq)}
+    labels_idx = np.asarray([lab2id[l] for l in labels_str], dtype=np.int32)
+    return boxes, scores, labels_idx, uniq
+
+
+def _make_detection_from_original(d: "Detection"):
+    return d
+
+
+def nms(
+    arg: Union[List["Detection"], ArrayLike],
+    *,
+    scores: Optional[ArrayLike] = None,
+    labels: Optional[ArrayLike] = None,
+    iou_thr: float = 0.5,
+    class_aware: bool = False,
     sort_desc: bool = True,
-) -> List[Detection]:
+    topk: Optional[int] = None,
+    topk_per_class: Optional[int] = None,
+    backend: str = "auto",
+    device: Optional[str] = None,
+) -> Union[np.ndarray, List["Detection"]]:
     """
-    Soft-NMS (linear or gaussian) over Detection objects.
-
-    Notes:
-        - Simple in-place style on a copy; NumPy not required.
-        - 'method' selects score decay strategy.
+    Flexible NMS API:
+    - If `arg` is an array of boxes -> requires scores, returns indices kept.
+    - If `arg` is list[Detection] -> returns filtered list[Detection] (kept).
+      Use class_aware=True to run per-class NMS for Detection list.
     """
-    if not detections:
-        return []
+    # list[Detection] case
+    if isinstance(arg, list) and (len(arg) == 0 or Detection is None or hasattr(arg[0], "box")):
+        dets: List["Detection"] = arg  # type: ignore
+        if not dets:
+            return []
+        boxes_np, scores_np, labels_idx, uniq_labels = _detection_to_arrays(dets)
 
-    def _decay_fn(iou_val: float) -> float:
-        if method == "gaussian":
-            # gaussian weighting
-            from math import exp
-            return exp(-(iou_val ** 2) / sigma)
-        # linear weighting
-        return max(0.0, 1.0 - iou_val) if iou_val > iou_thr else 1.0
+        if class_aware:
+            kept_idxs = labelwise_nms(
+                boxes_np,
+                labels_idx,  # support (boxes, labels, scores)
+                scores_np,
+                iou_thr=iou_thr,
+                topk_per_class=topk_per_class,
+                backend=backend,
+                device=device,
+            )
+        else:
+            if backend == "torch" or (backend == "auto" and _HAS_TORCHVISION):
+                kept_idxs = nms_torch(boxes_np, scores_np, iou_thr=iou_thr, topk=topk, device=device)
+            else:
+                kept_idxs = nms_numpy(boxes_np, scores_np, iou_thr=iou_thr, topk=topk)
 
-    groups: Dict[str, List[Detection]] = defaultdict(list)
+        kept_list = [dets[int(i)] for i in kept_idxs.tolist()]
+        if sort_desc:
+            kept_list.sort(key=lambda d: float(getattr(d, "score", 0.0)), reverse=True)
+        return kept_list
+
+    # array boxes case
+    boxes_np = _ensure_np2d(arg, np.float32)  # type: ignore
+    if scores is None and labels is None:
+        raise ValueError("scores/labels must be provided when first argument is array of boxes")
     if class_aware:
-        for d in detections:
-            groups[_get_label(d)].append(_clone_det(d))
+        if scores is None or labels is None:
+            raise ValueError("labels and scores are required when class_aware=True for array input")
+        # support both (boxes, scores, labels) and (boxes, labels, scores)
+        labels_np, scores_np = _coerce_labels_scores(labels, scores)
+        return labelwise_nms(
+            boxes_np,
+            labels_np,
+            scores_np,
+            iou_thr=iou_thr,
+            topk_per_class=topk_per_class,
+            backend=backend,
+            device=device,
+        )
     else:
-        groups["__all__"] = [_clone_det(d) for d in detections]
-
-    kept: List[Detection] = []
-    for _, dets in groups.items():
-        # operate on a mutable list of copies
-        work = dets[:]
-        while work:
-            # pick current best
-            work.sort(key=lambda d: float(_get_score(d)), reverse=True)
-            best = work[0]
-            kept.append(best)
-            box_best = _as_xyxy(best.box)
-
-            # decay the rest
-            rest: List[Detection] = []
-            for d in work[1:]:
-                ov = iou(box_best, _as_xyxy(d.box))
-                new_score = float(_get_score(d)) * _decay_fn(ov)
-                if new_score >= score_thresh:
-                    _set_score(d, new_score)
-                    rest.append(d)
-            work = rest
-
-    if sort_desc:
-        kept.sort(key=lambda d: float(_get_score(d)), reverse=True)
-    return kept
-
-
-# ---------------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------------
-
-def iou(b1: Sequence[float], b2: Sequence[float]) -> float:
-    """Intersection-over-Union for two boxes in (x1, y1, x2, y2) format."""
-    x1, y1, x2, y2 = _as_xyxy(b1)
-    X1, Y1, X2, Y2 = _as_xyxy(b2)
-    ix1 = max(x1, X1)
-    iy1 = max(y1, Y1)
-    ix2 = min(x2, X2)
-    iy2 = min(y2, Y2)
-    iw = max(0.0, ix2 - ix1)
-    ih = max(0.0, iy2 - iy1)
-    inter = iw * ih
-    if inter <= 0.0:
-        return 0.0
-    a1 = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1))
-    a2 = max(0.0, (X2 - X1)) * max(0.0, (Y2 - Y1))
-    union = a1 + a2 - inter
-    return float(inter / union) if union > 0.0 else 0.0
-
-
-def _as_xyxy(box_like: Sequence[float]) -> Tuple[float, float, float, float]:
-    x1, y1, x2, y2 = box_like[:4]
-    return float(x1), float(y1), float(x2), float(y2)
-
-
-def _get_label(d: Detection) -> str:
-    return str(getattr(d, "label", ""))
-
-
-def _get_score(d: Detection) -> float:
-    return float(getattr(d, "score", 0.0))
-
-
-def _set_score(d: Detection, new_score: float) -> None:
-    try:
-        d.score = float(new_score)  # type: ignore[attr-defined]
-    except Exception:
-        # If Detection is immutable, we'd create a new instance,
-        # but here we assume mutability as elsewhere in the project.
-        pass
-
-def labelwise_nms(
-    boxes: List[List[float]], 
-    labels: List[str], 
-    scores: List[float], 
-    iou_threshold: float = 0.5
-) -> List[int]:
-    """
-    Apply NMS separately per class and return indices to keep.
-    
-    Args:
-        boxes: list of boxes [x1, y1, x2, y2].
-        labels: corresponding labels.
-        scores: confidence scores.
-        iou_threshold: IoU threshold for suppression.
-        
-    Returns:
-        Indices of detections to keep, sorted by descending score.
-    """
-    if not boxes or len(boxes) != len(labels) or len(boxes) != len(scores):
-        return []
-    
-    # Group indices by label
-    label_groups: Dict[str, List[int]] = defaultdict(list)
-    for i, label in enumerate(labels):
-        label_groups[label].append(i)
-    
-    keep_indices = []
-    
-    # NMS within each label group
-    for label, indices in label_groups.items():
-        if not indices:
-            continue
-            
-        # Sort by score (desc)
-        indices_sorted = sorted(indices, key=lambda i: scores[i], reverse=True)
-        
-        suppressed = set()
-        
-        for i in indices_sorted:
-            if i in suppressed:
-                continue
-                
-            keep_indices.append(i)
-            box_i = boxes[i]
-            
-            # Suppress high-overlap detections
-            for j in indices_sorted:
-                if j == i or j in suppressed:
-                    continue
-                    
-                if iou(box_i, boxes[j]) >= iou_threshold:
-                    suppressed.add(j)
-    
-    # Final ordering by score (desc)
-    keep_indices.sort(key=lambda i: scores[i], reverse=True)
-    return keep_indices
-
-def _clone_det(d: Detection) -> Detection:
-    # Shallow copy using canonical fields; preserve 'source' when present.
-    x1, y1, x2, y2 = _as_xyxy(d.box)
-    label = _get_label(d)
-    score = _get_score(d)
-    source = getattr(d, "source", None)
-    try:
-        return Detection(box=(x1, y1, x2, y2), label=label, score=score, source=source)
-    except TypeError:
-        try:
-            return Detection(box=(x1, y1, x2, y2), label=label, score=score)
-        except TypeError:
-            return Detection(box=(x1, y1, x2, y2), label=label)
+        if scores is None:
+            raise ValueError("scores must be provided for non class-aware array NMS")
+        scores_np = _ensure_np1d(scores, np.float32)
+        if backend == "torch" or (backend == "auto" and _HAS_TORCHVISION):
+            return nms_torch(boxes_np, scores_np, iou_thr=iou_thr, topk=topk, device=device)
+        return nms_numpy(boxes_np, scores_np, iou_thr=iou_thr, topk=topk)
 
 
 __all__ = ["nms", "soft_nms", "iou", "labelwise_nms"]

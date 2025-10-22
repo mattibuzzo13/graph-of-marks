@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import List, Optional, Sequence
 
 import numpy as np
+import torch
 from PIL import Image
 
 from igp.types import Detection
@@ -56,9 +57,17 @@ class Detectron2Detector(Detector):
         self.cfg = self._build_cfg(
             model_config=model_config,
             weights=weights,
-            device=device,
+            device=device if device is not None else getattr(self, "device", None),
             score_threshold=score_threshold,
         )
+
+        # Disable mask branch if not needed (speed-up)
+        try:
+            if not self.return_masks and hasattr(self.cfg.MODEL, "MASK_ON"):
+                self.cfg.MODEL.MASK_ON = False
+        except Exception:
+            pass
+
         self.predictor = DefaultPredictor(self.cfg)
 
         # Class names (use provided list or try to fetch from MetadataCatalog).
@@ -78,14 +87,10 @@ class Detectron2Detector(Detector):
     def close(self) -> None:
         """Release predictor resources (notably GPU memory)."""
         try:
-            # Explicitly drop main fields.
             del self.predictor
         except Exception:
             pass
-        # Clear CUDA cache if available.
         try:
-            import torch
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
@@ -94,9 +99,14 @@ class Detectron2Detector(Detector):
     # --------------- core API -----------------
 
     def detect(self, image: Image.Image) -> List[Detection]:
-        img_np = np.array(image)  # H, W, 3 (RGB)
+        # PIL provides RGB; DefaultPredictor expects BGR input.
+        # Always convert to BGR; DefaultPredictor will flip only if cfg expects RGB.
+        img_np = np.array(image)[:, :, ::-1].copy()  # RGB -> BGR
 
-        outputs = self.predictor(img_np)
+        use_cuda_amp = str(self.cfg.MODEL.DEVICE).lower().startswith("cuda") and torch.cuda.is_available()
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda_amp):
+            outputs = self.predictor(img_np)
+
         instances = outputs["instances"].to("cpu")
 
         # Base predictions.
@@ -128,13 +138,61 @@ class Detectron2Detector(Detector):
             det = self._make_detection(box=box, label=label, score=score, mask=mask)
             detections.append(det)
 
-        # Return raw detections; any global score threshold may be applied by the caller.
         return detections
 
     def detect_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
-        # Simple fallback: run single-image inference.
-        # For speed, a true batched path would be preferable, but DefaultPredictor is per-image.
-        return [self.detect(img) for img in images]
+        """
+        Batched inference path using the underlying Detectron2 model.
+        Falls back to per-image when input is empty.
+        """
+        if not images:
+            return []
+
+        inputs = []
+        fmt = getattr(self.cfg.INPUT, "FORMAT", "BGR")
+        aug = getattr(self.predictor, "aug", None)
+
+        for img in images:
+            arr = np.array(img)  # RGB
+            # Convert to model's expected format prior to augmentation.
+            if fmt == "BGR":
+                arr = arr[:, :, ::-1]  # RGB -> BGR
+            height, width = arr.shape[:2]
+            if aug is not None:
+                arr = aug.get_transform(arr).apply_image(arr)
+            tensor = torch.as_tensor(arr.astype("float32").transpose(2, 0, 1))
+            inputs.append({"image": tensor, "height": height, "width": width})
+
+        use_cuda_amp = str(self.cfg.MODEL.DEVICE).lower().startswith("cuda") and torch.cuda.is_available()
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda_amp):
+            outputs = self.predictor.model(inputs)
+
+        results: List[List[Detection]] = []
+        for out in outputs:
+            instances = out["instances"].to("cpu")
+            boxes = instances.pred_boxes.tensor.numpy().tolist() if instances.has("pred_boxes") else []
+            scores = instances.scores.numpy().tolist() if instances.has("scores") else []
+            classes = instances.pred_classes.numpy().tolist() if instances.has("pred_classes") else []
+            masks_np = (
+                instances.pred_masks.numpy().astype(bool)
+                if self.return_masks and instances.has("pred_masks")
+                else None
+            )
+
+            dets: List[Detection] = []
+            num = min(len(boxes), len(scores), len(classes))
+            for i in range(num):
+                box = boxes[i]
+                score = float(scores[i])
+                cls_id = int(classes[i])
+                label = (
+                    str(self.classes[cls_id]) if self.classes and 0 <= cls_id < len(self.classes) else str(cls_id)
+                )
+                mask = masks_np[i] if (masks_np is not None and i < masks_np.shape[0]) else None
+                dets.append(self._make_detection(box=box, label=label, score=score, mask=mask))
+            results.append(dets)
+
+        return results
 
     # --------------- helpers ------------------
 
@@ -197,7 +255,6 @@ class Detectron2Detector(Detector):
                 except TypeError:
                     # Minimal fallback — check the concrete Detection definition.
                     from igp.types import Detection as DetectionType
-                    # Use only required fields.
                     return DetectionType(box=b, label=label, score=score)
 
 

@@ -1,13 +1,21 @@
 # igp/fusion/wbf.py
+# Weighted Boxes Fusion (WBF) helper with optional ensemble-boxes backend.
+# - Aggregates detections from multiple detectors
+# - Uses ensemble_boxes.weighted_boxes_fusion when available
+# - Falls back to per-class NMS if WBF implementation is not installed
+# - Expects Detection objects with .box (xyxy), .label, .score, optional .source
+
 from __future__ import annotations
 
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 from igp.types import Detection
 
 try:
-    # Requires: pip install ensemble-boxes
+    # Optional dependency: pip install ensemble-boxes
     from ensemble_boxes import weighted_boxes_fusion as _wbf_impl  # type: ignore
     _HAVE_WBF = True
 except Exception:
@@ -23,6 +31,32 @@ except Exception:
 # ---------------------------------------------------------------------------
 # PUBLIC API
 # ---------------------------------------------------------------------------
+def compute_iou_vectorized(boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
+    """
+    Vectorized IoU computation.
+    boxes1: (N,4) [x1,y1,x2,y2], boxes2: (M,4)
+    Returns: (N,M) IoU matrix.
+    """
+    boxes1 = np.asarray(boxes1, dtype=np.float32)
+    boxes2 = np.asarray(boxes2, dtype=np.float32)
+    if boxes1.size == 0 or boxes2.size == 0:
+        return np.zeros((boxes1.shape[0], boxes2.shape[0]), dtype=np.float32)
+
+    x1_max = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])
+    y1_max = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])
+    x2_min = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])
+    y2_min = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])
+
+    inter_w = np.maximum(0.0, x2_min - x1_max)
+    inter_h = np.maximum(0.0, y2_min - y1_max)
+    inter_area = inter_w * inter_h
+
+    area1 = np.maximum(0.0, boxes1[:, 2] - boxes1[:, 0]) * np.maximum(0.0, boxes1[:, 3] - boxes1[:, 1])
+    area2 = np.maximum(0.0, boxes2[:, 2] - boxes2[:, 0]) * np.maximum(0.0, boxes2[:, 3] - boxes2[:, 1])
+
+    union_area = area1[:, None] + area2[None, :] - inter_area
+    return inter_area / np.maximum(union_area, 1e-6)
+
 
 def fuse_detections_wbf(
     detections: List[Detection],
@@ -35,33 +69,33 @@ def fuse_detections_wbf(
     sort_desc: bool = True,
 ) -> List[Detection]:
     """
-    Perform Weighted Boxes Fusion (WBF) over detections coming from multiple detectors.
+    Perform Weighted Boxes Fusion over detections from multiple detectors.
 
     Args:
         detections: list of Detection (xyxy boxes in pixels, label str, score float).
-        image_size: (width, height) of the image in pixels.
-        iou_thr: IoU threshold used by WBF to group boxes.
+        image_size: (width, height) in pixels.
+        iou_thr: IoU threshold for grouping boxes.
         skip_box_thr: drop boxes with score < skip_box_thr before fusion.
         weights_by_source: per-source weights (e.g., {"owlvit": 2.0, "yolov8": 1.5}).
-        default_weight: weight to use when a source is not in weights_by_source.
-        sort_desc: sort fused detections by descending score.
+        default_weight: fallback weight for unknown sources.
+        sort_desc: sort output by descending score.
 
     Returns:
-        List of fused Detection (boxes in pixel coordinates).
+        List[Detection] fused (boxes in pixel coordinates).
     """
     if not detections:
         return []
 
     W, H = image_size
     if W <= 0 or H <= 0:
-        raise ValueError("image_size non valido: atteso (width>0, height>0)")
+        raise ValueError("image_size must be (width>0, height>0)")
 
-    # Group detections by 'source'
+    # Group by source
     by_src: Dict[str, List[Detection]] = defaultdict(list)
     for d in detections:
         by_src[_get_source(d)].append(d)
 
-    # Label vocabulary ↔ numeric ids
+    # Build label vocabulary
     labels_sorted = sorted({_get_label(d) for d in detections})
     label2id = {lab: i for i, lab in enumerate(labels_sorted)}
     id2label = {i: lab for lab, i in label2id.items()}
@@ -72,7 +106,7 @@ def fuse_detections_wbf(
     list_labels: List[List[int]] = []
     weights: List[float] = []
 
-    # Sensible defaults for per-source weights consistent with the pipeline (OWL > YOLO > Detectron2)
+    # Sensible defaults for per-source weights consistent with the pipeline
     default_weights_map = {"owlvit": 2.0, "yolov8": 1.5, "yolo": 1.5, "detectron2": 1.0}
     wmap = dict(default_weights_map)
     if weights_by_source:
@@ -88,7 +122,7 @@ def fuse_detections_wbf(
             if score < skip_box_thr:
                 continue
             x1, y1, x2, y2 = _as_xyxy(d.box)
-            # Normalize into [0, 1]
+            # Normalize to [0, 1]
             boxes_norm.append([x1 / W, y1 / H, x2 / W, y2 / H])
             scores_.append(score)
             labels_id.append(label2id[_get_label(d)])
@@ -98,12 +132,10 @@ def fuse_detections_wbf(
         list_labels.append(labels_id)
         weights.append(float(wmap.get(src, default_weight)))
 
-    # If ensemble-boxes is not available, fall back to per-class NMS
+    # If ensemble-boxes not installed, fallback to per-class NMS
     if not _HAVE_WBF:
         if _fallback_nms is None:
-            raise RuntimeError(
-                "ensemble-boxes non disponibile e fallback NMS non importabile."
-            )
+            raise RuntimeError("ensemble-boxes not available and fallback NMS not importable.")
         return _fallback_nms(detections, iou_thr=iou_thr, class_aware=True, sort_desc=sort_desc)
 
     # Apply WBF
@@ -114,7 +146,7 @@ def fuse_detections_wbf(
         skip_box_thr=float(skip_box_thr),
     )
 
-    # Denormalize and instantiate Detection objects
+    # Denormalize and build Detection objects
     out: List[Detection] = []
     for b, s, l in zip(b_fused, s_fused, l_fused):
         x1 = float(b[0] * W)

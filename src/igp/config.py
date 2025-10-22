@@ -102,7 +102,7 @@ except Exception as _exc:
 
         # detection cache
         enable_detection_cache: bool = True
-        max_cache_size: int = 100
+        max_cache_size: int = 500
 
         # color tweaks
         color_sat_boost: float = 1.30

@@ -1,7 +1,9 @@
 # igp/detectors/owlvit.py
-# Wrapper around OWL-ViT (Owlv2) for open-vocabulary object detection.
-# Provides single-image inference, optional horizontal TTA, and robust
-# creation of `Detection` objects without altering core logic.
+# Wrapper OWL-ViT (Owlv2) per open-vocabulary object detection.
+# - Batch inference reale
+# - FP16/autocast su GPU
+# - TTA orizzontale opzionale (per detect singolo)
+# - Creazione Detection robusta
 
 from __future__ import annotations
 
@@ -9,7 +11,6 @@ from typing import List, Optional, Sequence
 
 import torch
 from PIL import Image
-import numpy as np
 
 from transformers import Owlv2Processor, Owlv2ForObjectDetection
 
@@ -17,7 +18,7 @@ from igp.detectors.base import Detector
 from igp.types import Detection
 
 
-# Default open-vocabulary queries (COCO-like plus a few extras).
+# Queries di default (COCO-like + extra)
 _DEFAULT_QUERIES: Sequence[str] = (
     "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
     "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
@@ -38,15 +39,12 @@ class OwlViTDetector(Detector):
     """
     OWL-ViT (Owlv2) open-vocabulary object detector.
 
-    - Uses Hugging Face Owlv2Processor / Owlv2ForObjectDetection.
-    - Requires a list of text queries (defaults to a COCO-like set).
-    - Returns List[Detection] with (xyxy box as float, label str, score float).
+    - Usa Hugging Face Owlv2Processor / Owlv2ForObjectDetection.
+    - Richiede una lista di query testuali (default COCO-like).
+    - Ritorna List[Detection] con box (x1,y1,x2,y2), label (str), score (float).
+    - Il filtraggio per score viene demandato alla logica della pipeline (base Detector).
     """
 
-# NOTE: The class is redeclared below and will override this stub definition at import time.
-
-
-class OwlViTDetector(Detector):
     def __init__(
         self,
         *,
@@ -58,21 +56,17 @@ class OwlViTDetector(Detector):
         fp16: bool = True,
         low_cpu_mem_usage: bool = True,
     ) -> None:
-        # Initialize base class (sets name, device selection, and score threshold).
-        super().__init__(
-            name="owlvit",
-            device=device,
-            score_threshold=score_threshold
-        )
-        
+        super().__init__(name="owlvit", device=device, score_threshold=score_threshold)
+
         self.model_name = model_name
         self.queries: Sequence[str] = list(queries) if queries is not None else list(_DEFAULT_QUERIES)
-        # `self.device` and `self.score_threshold` are already defined by the base class.
         self.tta_hflip = bool(tta_hflip)
 
-        # Load processor/model; pick dtype based on device and fp16 flag.
+        # Processor + modello
         self.processor = Owlv2Processor.from_pretrained(model_name)
-        dtype = torch.float16 if (fp16 and self.device == "cuda") else torch.float32
+
+        # Dtype scelto in base al device e flag fp16
+        dtype = torch.float16 if (fp16 and str(self.device).startswith("cuda") and torch.cuda.is_available()) else torch.float32
         self.model = Owlv2ForObjectDetection.from_pretrained(
             model_name,
             torch_dtype=dtype,
@@ -80,47 +74,107 @@ class OwlViTDetector(Detector):
         ).to(self.device)
         self.model.eval()
 
-    # ----------------- Base API -----------------
+    # ----------------- API -----------------
 
     def detect(self, image: Image.Image) -> List[Detection]:
         """
-        Single-image inference.
-        Note: `_ensure_rgb` and score filtering are handled by `run()` in the base class.
+        Inference su singola immagine.
+        Il filtraggio per score viene applicato dalla pipeline a valle.
         """
         dets = self._detect_once(image)
 
-        # Optional TTA: horizontal flip + box re-projection.
         if self.tta_hflip:
             flipped = image.transpose(Image.FLIP_LEFT_RIGHT)
             dets_flip = self._detect_once(flipped)
             W = image.size[0]
+            remapped: List[Detection] = []
             for d in dets_flip:
-                x1, y1, x2, y2 = d.box
+                x1, y1, x2, y2 = d.box[:4]
                 new_box = (W - x2, y1, W - x1, y2)
-                d = self._rebox(d, new_box)
-                dets.append(d)
+                remapped.append(self._rebox(d, new_box))
+            dets.extend(remapped)
 
-        return dets  # Do not threshold here; `run()` applies the global score filter.
+        return dets
 
-    # ----------------- Internal helpers -----------------
+    @property
+    def supports_batch(self) -> bool:
+        return True
+
+    def detect_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
+        if not images:
+            return []
+
+        # Prepara batch: ripeti le stesse query per ciascuna immagine
+        batch_text = [self.queries] * len(images)
+
+        encoding = self.processor(
+            images=list(images),
+            text=batch_text,
+            return_tensors="pt",
+        )
+        # Move su device
+        encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
+
+        use_amp = (self.model.device.type == "cuda")
+        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=use_amp):
+            outputs = self.model(**encoding)
+
+        # Post-process: target_sizes = (H, W) per immagine
+        target_sizes = torch.tensor(
+            [[img.height, img.width] for img in images],
+            device=self.device,
+        )
+        results = self.processor.post_process_grounded_object_detection(
+            outputs=outputs,
+            target_sizes=target_sizes,
+        )
+
+        all_dets: List[List[Detection]] = []
+        for res in results:
+            boxes_t = res.get("boxes", torch.empty(0, 4)).detach().cpu()
+            scores_t = res.get("scores", torch.empty(0)).detach().cpu()
+            labels_t = res.get("labels", torch.empty(0, dtype=torch.long)).detach().cpu()
+
+            dets: List[Detection] = []
+            for box, score, lab_idx in zip(boxes_t.tolist(), scores_t.tolist(), labels_t.tolist()):
+                label = self._safe_label(lab_idx)
+                dets.append(self._make_detection(box, label, float(score)))
+            all_dets.append(dets)
+
+        return all_dets
+
+    def close(self) -> None:
+        try:
+            del self.model
+        except Exception:
+            pass
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    # ----------------- Interni -----------------
 
     @torch.inference_mode()
     def _detect_once(self, image: Image.Image) -> List[Detection]:
-        # OWLv2 expects batched inputs; wrap single image.
         encoding = self.processor(
             images=[image],
-            text=self.queries,           # list of query strings
+            text=self.queries,
             return_tensors="pt",
         )
-        # Move tensors to the selected device.
         encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
 
-        outputs = self.model(**encoding)
+        use_amp = (self.model.device.type == "cuda")
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            outputs = self.model(**encoding)
 
-        # Post-process to image size.
         w, h = image.size
         target_sizes = torch.tensor([[h, w]], device=self.device)
-        results = self.processor.post_process_grounded_object_detection(outputs=outputs, target_sizes=target_sizes)
+        results = self.processor.post_process_grounded_object_detection(
+            outputs=outputs,
+            target_sizes=target_sizes,
+        )
 
         if not results:
             return []
@@ -130,27 +184,20 @@ class OwlViTDetector(Detector):
         scores_t = res.get("scores", torch.empty(0)).detach().cpu()
         labels_t = res.get("labels", torch.empty(0, dtype=torch.long)).detach().cpu()
 
-        boxes = boxes_t.tolist()
-        scores = scores_t.tolist()
-        labels = labels_t.tolist()
-        
-        detections: List[Detection] = []
-        for box, score, lab_idx in zip(boxes, scores, labels):
-            # Thresholding is deferred; the base `run()` method will handle it.
+        dets: List[Detection] = []
+        for box, score, lab_idx in zip(boxes_t.tolist(), scores_t.tolist(), labels_t.tolist()):
             label = self._safe_label(lab_idx)
-            detections.append(self._make_detection(box, label, float(score)))
+            dets.append(self._make_detection(box, label, float(score)))
 
-        return detections
+        return dets
 
     def _safe_label(self, idx: int) -> str:
-        # Resolve label from query list; fall back to the index as string.
         try:
             return str(self.queries[idx])
         except Exception:
             return str(idx)
 
     def _make_detection(self, box_xyxy: Sequence[float], label: str, score: float) -> Detection:
-        # Create Detection robustly against variations of the dataclass signature.
         b = tuple(float(x) for x in box_xyxy[:4])
         try:
             return Detection(box=b, label=label, score=score, source="owlvit")
@@ -158,11 +205,9 @@ class OwlViTDetector(Detector):
             try:
                 return Detection(box=b, label=label, score=score)
             except TypeError:
-                # Minimal compatibility fallback.
                 return Detection(box=b, label=label)
 
     def _rebox(self, det: Detection, new_box_xyxy: Sequence[float]) -> Detection:
-        # Return a copy of `det` with a new box; handles immutable dataclasses.
         b = tuple(float(x) for x in new_box_xyxy[:4])
         try:
             return Detection(
