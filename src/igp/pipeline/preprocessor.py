@@ -40,6 +40,14 @@ from igp.utils.depth import DepthEstimator, DepthConfig
 from igp.utils.clip_utils import CLIPWrapper  
 from igp.utils.boxes import iou, clamp_xyxy  
 from igp.utils.colors import base_label
+from igp.utils.cache_advanced import ImageDetectionCache  # 🚀 Advanced LRU cache
+
+# ---------- GPU memory management ----------
+try:
+    from igp.utils.gpu_memory import get_gpu_manager, gpu_memory_context
+    GPU_MEMORY_AVAILABLE = True
+except ImportError:
+    GPU_MEMORY_AVAILABLE = False
 
 # ---------- relations ----------
 from igp.relations.inference import RelationsConfig, RelationInferencer
@@ -236,9 +244,11 @@ class ImageGraphPreprocessor:
             )
         )
 
-        # In-memory detection cache (per-image + per-params).
-        self._detection_cache: Dict[str, Dict[str, Any]] = {}
-        self._det_cache: Dict[str, Dict[str, Any]] = {}
+        # 🚀 Advanced LRU detection cache with memory-aware eviction
+        self._detection_cache = ImageDetectionCache(
+            max_items=self.cfg.max_cache_size,
+            max_size_mb=500.0  # 500 MB max cache size
+        )
 
     # ----------------------------- setup helpers -----------------------------
 
@@ -285,35 +295,36 @@ class ImageGraphPreprocessor:
     # ----------------------------- cache helpers -----------------------------
 
     def _generate_cache_key(self, image_pil: Image.Image, question: str = "") -> str:
-        """Hash the raw image bytes + relevant pipeline params to cache detections."""
-        img_hash = hashlib.md5(image_pil.tobytes()).hexdigest()[:16]
-        param_str = json.dumps(
-            {
-                "detectors": sorted(self.cfg.detectors_to_use),
-                "owl_thr": self.cfg.threshold_owl,
-                "yolo_thr": self.cfg.threshold_yolo,
-                "det2_thr": self.cfg.threshold_detectron,
-                "question": (question or self.cfg.question).strip().lower(),
-            },
-            sort_keys=True,
+        """
+        Generate deterministic cache key using advanced hashing.
+        🚀 Optimized: delegates to ImageDetectionCache for consistent key generation.
+        """
+        thresholds = {
+            "owl": self.cfg.threshold_owl,
+            "yolo": self.cfg.threshold_yolo,
+            "detectron": self.cfg.threshold_detectron,
+        }
+        return ImageDetectionCache.generate_key(
+            image=image_pil,
+            detectors=self.cfg.detectors_to_use,
+            thresholds=thresholds,
+            question=question or self.cfg.question
         )
-        param_hash = hashlib.md5(param_str.encode()).hexdigest()[:8]
-        return f"{img_hash}_{param_hash}"
 
     def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
-        """Read detection results from cache if enabled."""
+        """Read detection results from advanced LRU cache."""
         if not self.cfg.enable_detection_cache:
             return None
         return self._detection_cache.get(key)
 
     def _cache_put(self, key: str, value: Dict[str, Any]) -> None:
-        """Write detection results to cache with simple capacity control."""
+        """
+        Write detection results to advanced LRU cache.
+        🚀 Optimized: automatic memory-aware eviction, no manual size checks needed.
+        """
         if not self.cfg.enable_detection_cache:
             return
-        if len(self._detection_cache) >= int(self.cfg.max_cache_size):
-            oldest = next(iter(self._detection_cache))
-            self._detection_cache.pop(oldest, None)
-        self._detection_cache[key] = value
+        self._detection_cache.put(key, value)
 
     # ----------------------------- pipeline core -----------------------------
 
@@ -325,7 +336,12 @@ class ImageGraphPreprocessor:
         counts: Dict[str, int] = {}
         
         def _run_detector(det):
-            out = det.run(image_pil)
+            # Use GPU memory context if available for automatic cleanup
+            if GPU_MEMORY_AVAILABLE:
+                with gpu_memory_context(clear_after=True, verbose=False):
+                    out = det.run(image_pil)
+            else:
+                out = det.run(image_pil)
             src_name = det.__class__.__name__
             return src_name, out
         
@@ -335,6 +351,10 @@ class ImageGraphPreprocessor:
                 results = list(executor.map(_run_detector, self.detectors))
         else:
             results = [_run_detector(self.detectors[0])]
+        
+        # Clear GPU cache after all detectors complete
+        if GPU_MEMORY_AVAILABLE:
+            get_gpu_manager().clear_cache(verbose=False)
         
         for src_name, out in results:
             counts[src_name] = len(out)
@@ -637,7 +657,13 @@ class ImageGraphPreprocessor:
                     print(f"[FALLBACK] Restored {len(boxes)} total objects")
 
         # 3) SEGMENTATION (SAM) + optional union with Detectron2 masks
-        masks = self.segmenter.segment(image_pil, boxes)
+        # Use GPU memory management for automatic cleanup
+        if GPU_MEMORY_AVAILABLE:
+            with gpu_memory_context(clear_after=True, verbose=False):
+                masks = self.segmenter.segment(image_pil, boxes)
+        else:
+            masks = self.segmenter.segment(image_pil, boxes)
+        
         for i in range(len(masks)):
             d2m = det2_for_mask[i].get("det2_mask")
             if d2m is not None:
@@ -650,14 +676,26 @@ class ImageGraphPreprocessor:
         # 5) DEPTH (at box centers)
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         # Prefer a single full-depth inference if available
-        if hasattr(self.depth_est, "depth_map"):
-            try:
-                dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
-                depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
-            except Exception:
-                depths = self.depth_est.relative_depth_at(image_pil, centers)
+        # Use GPU memory context for depth estimation
+        if GPU_MEMORY_AVAILABLE:
+            with gpu_memory_context(clear_after=True, verbose=False):
+                if hasattr(self.depth_est, "depth_map"):
+                    try:
+                        dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
+                        depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
+                    except Exception:
+                        depths = self.depth_est.relative_depth_at(image_pil, centers)
+                else:
+                    depths = self.depth_est.relative_depth_at(image_pil, centers)
         else:
-            depths = self.depth_est.relative_depth_at(image_pil, centers)
+            if hasattr(self.depth_est, "depth_map"):
+                try:
+                    dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
+                    depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
+                except Exception:
+                    depths = self.depth_est.relative_depth_at(image_pil, centers)
+            else:
+                depths = self.depth_est.relative_depth_at(image_pil, centers)
 
         # 6) RELATIONS (geometry + CLIP)
         r_cfg = RelationsConfig(

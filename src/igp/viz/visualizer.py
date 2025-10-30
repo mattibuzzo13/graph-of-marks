@@ -56,6 +56,17 @@ except Exception:
         """Minimal wrapper over ColorCycler.color_for_label for stable class colors."""
         return _color_cycler.color_for_label(label)
 
+# Rendering optimizations
+try:
+    from igp.viz.rendering_opt import (
+        VectorizedMaskRenderer,
+        BatchTextRenderer,
+        GeometricOptimizer,
+    )
+    RENDERING_OPT_AVAILABLE = True
+except ImportError:
+    RENDERING_OPT_AVAILABLE = False
+
 
 @dataclass
 class VisualizerConfig:
@@ -216,11 +227,22 @@ class Visualizer:
                 self._draw_box(ax, x1, y1, x2, y2, color=col, linewidth=cfg.bbox_linewidth, zorder=z_order_seg)
 
         # Second pass: compute centers and stage labels for inside/outside placement.
+        # Use vectorized operations if available for performance
+        if RENDERING_OPT_AVAILABLE and len(boxes) > 0:
+            boxes_array = np.array(boxes)
+            centers_array = GeometricOptimizer.compute_centers_vectorized(boxes_array)
+            centers = [(float(x), float(y)) for x, y in centers_array]
+        else:
+            # Fallback to sequential computation
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, box[:4])
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                centers.append((cx, cy))
+        
         for i, box in enumerate(boxes):
             col = obj_colors[i]
             x1, y1, x2, y2 = map(int, box[:4])
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            centers.append((cx, cy))
+            cx, cy = centers[i]  # Get pre-computed center
 
             if cfg.display_labels:
                 best_mask = self._best_mask(i, masks)
@@ -471,6 +493,36 @@ class Visualizer:
 
             # Then stroke the outline slightly above the fill
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=0.95, zorder=zorder + 0.05)
+    
+    def _draw_masks_batch(self, ax, masks: List[np.ndarray], colors: List[str], linewidth: float, zorder: float = 2) -> None:
+        """Optimized batch rendering for multiple masks using vectorized operations."""
+        if not masks or RENDERING_OPT_AVAILABLE is False or cv2 is None:
+            # Fallback to sequential rendering
+            for mask, color in zip(masks, colors):
+                self._draw_mask(ax, mask, color, linewidth, zorder)
+            return
+        
+        # Use vectorized mask renderer for batch blending
+        renderer = VectorizedMaskRenderer()
+        if self.cfg.fill_segmentation:
+            # Blend all masks at once (much faster than individual ax.fill calls)
+            blended = renderer.blend_multiple_masks(
+                masks, colors, alpha=self.cfg.seg_fill_alpha
+            )
+            ax.imshow(blended, extent=(0, blended.shape[1], blended.shape[0], 0), zorder=zorder)
+        
+        # Draw contours individually (still optimized)
+        for mask, color in zip(masks, colors):
+            mask_uint8 = (mask.astype(np.uint8) * 255) if mask.dtype != np.uint8 else mask.copy()
+            if mask_uint8.max() == 1:
+                mask_uint8 *= 255
+
+            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                cnt = cnt.squeeze()
+                if cnt.ndim != 2 or len(cnt) < 3:
+                    continue
+                ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=0.95, zorder=zorder + 0.05)
 
     def _resolve_object_overlaps_only(self, ax, obj_texts: List[Any], obj_anchors: List[Tuple[float, float]]) -> None:
         """Pass 1: resolve collisions among object labels only (keeps anchors fixed)."""

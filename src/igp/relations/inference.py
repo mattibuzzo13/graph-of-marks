@@ -11,6 +11,10 @@ import math
 import numpy as np
 from PIL import Image
 
+# Parallel processing
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
 from .clip_rel import ClipRelScorer
 from .geometry import (
     as_xyxy,
@@ -97,6 +101,8 @@ class RelationInferencer:
     Combines geometric heuristics and CLIP scoring to derive object relations.
     Returns a list of dicts:
       { "src_idx", "tgt_idx", "relation", "distance", ["relation_raw", "clip_sim"] }
+    
+    Supports parallel inference for improved performance on multi-core systems.
     """
 
     def __init__(
@@ -106,11 +112,91 @@ class RelationInferencer:
         margin_px: int = 20,
         min_distance: float = 5.0,
         max_distance: float = 20000.0,
+        enable_parallel: bool = True,
+        max_workers: Optional[int] = None,
     ) -> None:
         self.clip = clip_scorer
         self.margin_px = int(margin_px)
         self.min_distance = float(min_distance)
         self.max_distance = float(max_distance)
+        self.enable_parallel = enable_parallel
+        self.max_workers = max_workers or min(4, (os.cpu_count() or 1))
+        self.min_distance = float(min_distance)
+        self.max_distance = float(max_distance)
+    
+    def _compute_directional_relation_pair(
+        self,
+        i: int,
+        j: int,
+        boxes: Sequence[Sequence[float]],
+        centers: List[Tuple[float, float]],
+    ) -> List[dict]:
+        """
+        Compute directional relations (above/below/left/right) for a pair (i, j).
+        Returns list of relations (can be 0, 1, or 2 relations for bidirectional).
+        """
+        rels = []
+        
+        cx1, cy1 = centers[i]
+        cx2, cy2 = centers[j]
+        dx, dy = cx2 - cx1, cy2 - cy1
+        dist = math.hypot(dx, dy)
+        
+        if dist < self.min_distance or dist > self.max_distance:
+            return rels
+        
+        # Calculate box dimensions for scale-aware thresholds
+        box_i = boxes[i]
+        box_j = boxes[j]
+        w_i = box_i[2] - box_i[0]
+        h_i = box_i[3] - box_i[1]
+        w_j = box_j[2] - box_j[0]
+        h_j = box_j[3] - box_j[1]
+        avg_size = (w_i + h_i + w_j + h_j) / 4.0
+        
+        # Scale-aware margin
+        margin = max(self.margin_px, avg_size * 0.15)
+        
+        # Check for significant overlap
+        iou_val = iou(box_i, box_j)
+        if iou_val > 0.3:
+            return rels  # Skip highly overlapping boxes
+        
+        # Determine primary direction
+        if abs(dy) >= abs(dx) and abs(dy) > margin:
+            # Vertical relation
+            relation = "below" if dy < 0 else "above"
+            v_overlap = vertical_overlap(box_i, box_j)
+            if v_overlap > max(h_i, h_j) * 0.5:
+                return rels  # Too much vertical overlap
+        elif abs(dx) > margin:
+            # Horizontal relation
+            relation = "left_of" if dx > 0 else "right_of"
+            h_overlap = horizontal_overlap(box_i, box_j)
+            if h_overlap > max(w_i, w_j) * 0.5:
+                return rels  # Too much horizontal overlap
+        else:
+            return rels
+        
+        # Add the primary relation (i -> j)
+        rels.append(
+            {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
+        )
+        
+        # Add the inverse relation (j -> i)
+        inverse_relation = {
+            "left_of": "right_of",
+            "right_of": "left_of",
+            "above": "below",
+            "below": "above",
+        }.get(relation)
+        
+        if inverse_relation:
+            rels.append(
+                {"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist}
+            )
+        
+        return rels
 
     def infer(
         self,
@@ -189,76 +275,35 @@ class RelationInferencer:
         # ---------- 3) Geometry: above/below/left/right with improved criteria ----------
         if use_geometry:
             centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
-            for i in range(n):
-                for j in range(i + 1, n):  # Only check each pair once (i < j)
-                    cx1, cy1 = centers[i]
-                    cx2, cy2 = centers[j]
-                    dx, dy = cx2 - cx1, cy2 - cy1
-                    dist = math.hypot(dx, dy)
+            
+            # Generate all unique pairs (i, j) where i < j
+            pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+            
+            # Parallel or sequential processing based on configuration and pair count
+            if self.enable_parallel and len(pairs) > 10:
+                # Parallel processing for better performance with many objects
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            self._compute_directional_relation_pair,
+                            i, j, boxes, centers
+                        ): (i, j)
+                        for i, j in pairs
+                    }
                     
-                    if dist < self.min_distance or dist > self.max_distance:
-                        continue
-                    
-                    # Calculate box dimensions for scale-aware thresholds
-                    box_i = boxes[i]
-                    box_j = boxes[j]
-                    w_i = box_i[2] - box_i[0]
-                    h_i = box_i[3] - box_i[1]
-                    w_j = box_j[2] - box_j[0]
-                    h_j = box_j[3] - box_j[1]
-                    avg_size = (w_i + h_i + w_j + h_j) / 4.0
-                    
-                    # Scale-aware margin (more robust than fixed margin)
-                    margin = max(self.margin_px, avg_size * 0.15)
-                    
-                    # Check for significant overlap (if high, directional relations might be incorrect)
-                    iou_val = iou(box_i, box_j)
-                    if iou_val > 0.3:
-                        continue  # Skip highly overlapping boxes for directional relations
-                    
-                    # Determine primary direction with improved logic
-                    # Natural semantics: relation describes i's position relative to j
-                    # e.g., if i is left of j, we want: i --left_of--> j
-                    if abs(dy) >= abs(dx) and abs(dy) > margin:
-                        # Vertical relation
-                        # dy = cy2 - cy1 (j.y - i.y)
-                        # if dy < 0: j is above i, so i is below j
-                        # if dy > 0: j is below i, so i is above j
-                        relation = "below" if dy < 0 else "above"
-                        # Verify with vertical overlap (should be minimal for clear above/below)
-                        v_overlap = vertical_overlap(box_i, box_j)
-                        if v_overlap > max(h_i, h_j) * 0.5:
-                            continue  # Too much vertical overlap
-                    elif abs(dx) > margin:
-                        # Horizontal relation
-                        # dx = cx2 - cx1 (j.x - i.x)
-                        # if dx > 0: j is right of i, so i is left_of j
-                        # if dx < 0: j is left of i, so i is right_of j
-                        relation = "left_of" if dx > 0 else "right_of"
-                        # Verify with horizontal overlap (should be minimal for clear left/right)
-                        h_overlap = horizontal_overlap(box_i, box_j)
-                        if h_overlap > max(w_i, w_j) * 0.5:
-                            continue  # Too much horizontal overlap
-                    else:
-                        continue
-                    
-                    # Add the primary relation (i -> j)
-                    rels.append(
-                        {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
-                    )
-                    
-                    # Add the inverse relation (j -> i)
-                    inverse_relation = {
-                        "left_of": "right_of",
-                        "right_of": "left_of",
-                        "above": "below",
-                        "below": "above",
-                    }.get(relation)
-                    
-                    if inverse_relation:
-                        rels.append(
-                            {"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist}
-                        )
+                    for future in as_completed(futures):
+                        try:
+                            pair_rels = future.result()
+                            rels.extend(pair_rels)
+                        except Exception as e:
+                            # Log error but continue processing other pairs
+                            i, j = futures[future]
+                            print(f"Warning: Error computing relation for pair ({i}, {j}): {e}")
+            else:
+                # Sequential processing for small object counts or if parallel disabled
+                for i, j in pairs:
+                    pair_rels = self._compute_directional_relation_pair(i, j, boxes, centers)
+                    rels.extend(pair_rels)
 
         # ---------- 4) CLIP scoring ----------
         if use_clip and self.clip is not None:
