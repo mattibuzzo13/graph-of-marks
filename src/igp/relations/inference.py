@@ -1,6 +1,7 @@
 # igp/relations/inference.py
 # Combines geometric heuristics and CLIP-based scoring to infer relationships
 # between detected objects. Keeps comments concise for paper readability.
+# 🚀 SOTA: Added LLM-guided, 3D spatial, and physics-informed reasoning
 
 from __future__ import annotations
 
@@ -30,6 +31,31 @@ from .geometry import (
     vertical_overlap,
 )
 
+# 🚀 SOTA modules (optional)
+try:
+    from .llm_guided import LLMRelationInferencer, LLMRelationsConfig
+    LLM_AVAILABLE = True
+except ImportError:
+    LLMRelationInferencer = None  # type: ignore
+    LLMRelationsConfig = None  # type: ignore
+    LLM_AVAILABLE = False
+
+try:
+    from .spatial_3d import Spatial3DReasoner, Spatial3DConfig
+    SPATIAL_3D_AVAILABLE = True
+except ImportError:
+    Spatial3DReasoner = None  # type: ignore
+    Spatial3DConfig = None  # type: ignore
+    SPATIAL_3D_AVAILABLE = False
+
+try:
+    from .physics import PhysicsReasoner, PhysicsConfig
+    PHYSICS_AVAILABLE = True
+except ImportError:
+    PhysicsReasoner = None  # type: ignore
+    PhysicsConfig = None  # type: ignore
+    PHYSICS_AVAILABLE = False
+
 __all__ = [
     "RelationsConfig",
     "RelationInferencer",
@@ -54,6 +80,23 @@ class RelationsConfig:
     filter_redundant: bool = True
     filter_relations_by_question: bool = True
     threshold_relation_similarity: float = 0.50
+    
+    # 🚀 SOTA: LLM-guided relations (optional)
+    use_llm_relations: bool = False
+    llm_backend: str = "gpt4v"  # "gpt4v" | "llava" | "mock"
+    llm_api_key: Optional[str] = None
+    llm_confidence_threshold: float = 0.6
+    
+    # 🚀 SOTA: 3D spatial reasoning (optional)
+    use_3d_reasoning: bool = False
+    depth_threshold: float = 0.1
+    use_occlusion: bool = True
+    
+    # 🚀 SOTA: Physics-informed filtering (optional)
+    use_physics_filtering: bool = False
+    filter_impossible: bool = True
+    check_support: bool = True
+    check_stability: bool = True
 
 _SPATIAL_KEYS = (
     "left_of",

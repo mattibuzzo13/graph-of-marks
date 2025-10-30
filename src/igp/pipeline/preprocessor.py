@@ -25,6 +25,14 @@ from igp.detectors.owlvit import OwlViTDetector
 from igp.detectors.yolov8 import YOLOv8Detector
 from igp.detectors.detectron2 import Detectron2Detector
 
+# 🚀 SOTA detector (optional)
+try:
+    from igp.detectors.grounding_dino import GroundingDINODetector
+    GROUNDING_DINO_AVAILABLE = True
+except ImportError:
+    GroundingDINODetector = None  # type: ignore
+    GROUNDING_DINO_AVAILABLE = False
+
 # ---------- fusion ----------
 from igp.fusion.wbf import fuse_detections_wbf as weighted_boxes_fusion
 from igp.fusion.nms import labelwise_nms
@@ -35,12 +43,52 @@ from igp.segmentation.sam1 import Sam1Segmenter
 from igp.segmentation.sam2 import Sam2Segmenter
 from igp.segmentation.samhq import SamHQSegmenter
 
+# 🚀 SOTA segmenters (optional)
+try:
+    from igp.segmentation.fastsam import FastSAMSegmenter, MobileSAMSegmenter
+    FASTSAM_AVAILABLE = True
+except ImportError:
+    FastSAMSegmenter = None  # type: ignore
+    MobileSAMSegmenter = None  # type: ignore
+    FASTSAM_AVAILABLE = False
+
 # ---------- utils ----------
 from igp.utils.depth import DepthEstimator, DepthConfig
 from igp.utils.clip_utils import CLIPWrapper  
 from igp.utils.boxes import iou, clamp_xyxy  
 from igp.utils.colors import base_label
 from igp.utils.cache_advanced import ImageDetectionCache  # 🚀 Advanced LRU cache
+
+# 🚀 SOTA post-processing (optional)
+try:
+    from igp.utils.tta import TTADetector, TTAConfig
+    from igp.utils.calibration import ConfidenceCalibrator, CalibrationConfig
+    from igp.utils.ensemble import DetectorEnsemble, SegmenterEnsemble, EnsembleConfig
+    TTA_AVAILABLE = True
+    ENSEMBLE_AVAILABLE = True
+except ImportError:
+    TTADetector = None  # type: ignore
+    TTAConfig = None  # type: ignore
+    ConfidenceCalibrator = None  # type: ignore
+    CalibrationConfig = None  # type: ignore
+    DetectorEnsemble = None  # type: ignore
+    SegmenterEnsemble = None  # type: ignore
+    EnsembleConfig = None  # type: ignore
+    TTA_AVAILABLE = False
+    ENSEMBLE_AVAILABLE = False
+
+# 🚀 Performance optimizations (optional)
+try:
+    from igp.utils.model_registry import ModelRegistry
+    from igp.utils.mixed_precision import MixedPrecisionManager
+    from igp.utils.batch_processing import BatchProcessor, BatchConfig
+    OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    ModelRegistry = None  # type: ignore
+    MixedPrecisionManager = None  # type: ignore
+    BatchProcessor = None  # type: ignore
+    BatchConfig = None  # type: ignore
+    OPTIMIZATION_AVAILABLE = False
 
 # ---------- GPU memory management ----------
 try:
@@ -108,6 +156,12 @@ class PreprocessorConfig:
     threshold_owl: float = 0.40
     threshold_yolo: float = 0.80
     threshold_detectron: float = 0.80
+    
+    # 🚀 SOTA detector: Grounding DINO (optional, better than OWL-ViT)
+    threshold_grounding_dino: float = 0.35
+    grounding_dino_model: str = "base"  # "tiny", "base", "large"
+    grounding_dino_text_prompt: Optional[str] = None  # Auto-detect if None
+    grounding_dino_text_threshold: float = 0.25
 
     # per-object relation limits
     max_relations_per_object: int = 3
@@ -123,12 +177,51 @@ class PreprocessorConfig:
     max_distance: float = 20000
 
     # SAM
-    sam_version: str = "1"  # "1" | "2" | "hq"
+    sam_version: str = "1"  # "1" | "2" | "hq" | "fast" | "mobile"
     sam_hq_model_type: str = "vit_h"
     points_per_side: int = 32
     pred_iou_thresh: float = 0.90
     stability_score_thresh: float = 0.92
     min_mask_region_area: int = 100
+    
+    # 🚀 SOTA segmentation: FastSAM (10x speed) or MobileSAM (60x speed)
+    fastsam_imgsz: int = 1024
+    fastsam_conf: float = 0.4
+    fastsam_iou: float = 0.9
+    fastsam_retina_masks: bool = True
+    # Mask refinement (SOTA quality improvement)
+    refine_masks: bool = False  # Apply edge-aware refinement
+    refine_edge_aware: bool = True
+    refine_fill_holes: bool = True
+    refine_boundary: bool = False  # Expensive (GrabCut)
+    
+    # 🚀 SOTA: Test-Time Augmentation (Phase 4)
+    use_tta: bool = False  # Apply TTA for detection (+2-4% mAP)
+    tta_scales: Tuple[float, ...] = (0.75, 1.0, 1.25, 1.5)
+    tta_flip_horizontal: bool = True
+    tta_flip_vertical: bool = False
+    tta_fusion_method: str = "wbf"  # "wbf" | "nms" | "soft_nms"
+    tta_iou_threshold: float = 0.5
+    
+    # 🚀 SOTA: Confidence Calibration (Phase 4)
+    use_calibration: bool = False  # Calibrate confidence scores
+    calibration_method: str = "temperature"  # "temperature" | "platt" | "isotonic"
+    calibration_cache_path: Optional[str] = None  # Path to calibration params
+    temperature: float = 1.5  # Temperature for scaling (>1 = softer)
+    
+    # 🚀 SOTA: Ensemble Methods (Phase 5)
+    use_detector_ensemble: bool = False  # Ensemble multiple detectors
+    ensemble_fusion_method: str = "wbf"  # "wbf" | "voting" | "weighted_avg" | "nms"
+    ensemble_detector_weights: Optional[Dict[str, float]] = None  # Model weights
+    ensemble_min_votes: int = 2  # For voting method
+    ensemble_iou_threshold: float = 0.5
+    use_segmenter_ensemble: bool = False  # Ensemble multiple segmenters
+    
+    # 🚀 Performance Optimizations
+    use_model_cache: bool = True  # Use ModelRegistry for caching
+    use_mixed_precision: bool = False  # Enable FP16/BF16 (2x speedup)
+    batch_size: int = 1  # Batch processing (1=disabled, 4-8 recommended)
+    mixed_precision_dtype: str = "auto"  # "auto" | "fp16" | "bf16" | "fp32"
 
     # device
     preproc_device: Optional[str] = None  # e.g., "cpu" or "cuda"
@@ -245,6 +338,52 @@ class ImageGraphPreprocessor:
         )
 
         # 🚀 Advanced LRU detection cache with memory-aware eviction
+        if self.cfg.enable_detection_cache:
+            from igp.utils.cache_advanced import ImageDetectionCache
+            self.detection_cache = ImageDetectionCache(max_items=self.cfg.max_cache_size)
+        else:
+            self.detection_cache = None
+        
+        # 🚀 Performance optimizations
+        self._init_performance_optimizations()
+
+    def _init_performance_optimizations(self) -> None:
+        """Initialize performance optimization modules."""
+        if not OPTIMIZATION_AVAILABLE:
+            return
+        
+        # Model Registry for caching (uses class methods, no instance needed)
+        if self.cfg.use_model_cache:
+            # Just verify it's available, no need to store instance
+            self.model_registry = ModelRegistry  # Store class reference
+            print("[Performance] Model Registry enabled (caching models)")
+        else:
+            self.model_registry = None
+        
+        # Mixed Precision Manager
+        if self.cfg.use_mixed_precision:
+            dtype = self.cfg.mixed_precision_dtype
+            if dtype == "auto":
+                dtype = None  # Auto-detect
+            self.mixed_precision = MixedPrecisionManager(
+                enabled=True,
+                dtype=dtype,
+                device=self.device,
+            )
+            print(f"[Performance] Mixed Precision enabled ({self.mixed_precision.dtype})")
+        else:
+            self.mixed_precision = None
+        
+        # Batch Processor
+        if self.cfg.batch_size > 1:
+            batch_config = BatchConfig(
+                batch_size=self.cfg.batch_size,
+                resize_mode="pad",  # Preserve aspect ratio
+            )
+            self.batch_processor = BatchProcessor(batch_config)
+            print(f"[Performance] Batch Processing enabled (batch_size={self.cfg.batch_size})")
+        else:
+            self.batch_processor = None
         self._detection_cache = ImageDetectionCache(
             max_items=self.cfg.max_cache_size,
             max_size_mb=500.0  # 500 MB max cache size
@@ -256,6 +395,21 @@ class ImageGraphPreprocessor:
         """Initialize enabled detectors according to config."""
         dets: List[Detector] = []
         names = set(d.strip().lower() for d in self.cfg.detectors_to_use)
+        
+        # 🚀 SOTA: Grounding DINO (open-vocabulary, better than OWL-ViT)
+        if "grounding_dino" in names or "groundingdino" in names:
+            if not GROUNDING_DINO_AVAILABLE:
+                print("[WARNING] Grounding DINO requested but not installed. Skipping.")
+                print("Install with: pip install groundingdino-py")
+            else:
+                dets.append(GroundingDINODetector(
+                    model_name=self.cfg.grounding_dino_model,
+                    text_prompt=self.cfg.grounding_dino_text_prompt,
+                    box_threshold=self.cfg.threshold_grounding_dino,
+                    text_threshold=self.cfg.grounding_dino_text_threshold,
+                    device=self.device,
+                    score_threshold=self.cfg.threshold_grounding_dino,
+                ))
         
         if "owlvit" in names:
             # Use score_threshold consistent with base Detector interface.
@@ -279,13 +433,42 @@ class ImageGraphPreprocessor:
         return dets
 
     def _init_segmenter(self) -> Segmenter:
-        """Create the SAM segmenter variant with common post-processing flags."""
+        """
+        Create the SAM segmenter variant with common post-processing flags.
+        🚀 SOTA: Supports FastSAM (10x speed) and MobileSAM (60x speed)
+        """
         s_cfg = SegmenterConfig(
             device=self.device,
             close_holes=self.cfg.close_holes,
             hole_kernel=self.cfg.hole_kernel,
             min_hole_area=self.cfg.min_hole_area,
         )
+        
+        # 🚀 SOTA FastSAM: 10x faster than SAM2
+        if self.cfg.sam_version == "fast":
+            if not FASTSAM_AVAILABLE or FastSAMSegmenter is None:
+                print("[WARNING] FastSAM requested but not installed. Falling back to SAM2.")
+                print("         Install with: pip install git+https://github.com/CASIA-IVA-Lab/FastSAM.git")
+                return Sam2Segmenter(config=s_cfg)
+            
+            return FastSAMSegmenter(
+                config=s_cfg,
+                imgsz=self.cfg.fastsam_imgsz,
+                conf=self.cfg.fastsam_conf,
+                iou=self.cfg.fastsam_iou,
+                retina_masks=self.cfg.fastsam_retina_masks,
+            )
+        
+        # 🚀 SOTA MobileSAM: 60x faster than SAM (ViT-B), best for mobile/edge
+        if self.cfg.sam_version == "mobile":
+            if not FASTSAM_AVAILABLE or MobileSAMSegmenter is None:
+                print("[WARNING] MobileSAM requested but not installed. Falling back to SAM1.")
+                print("         Install with: pip install git+https://github.com/ChaoningZhang/MobileSAM.git")
+                return Sam1Segmenter(config=s_cfg)
+            
+            return MobileSAMSegmenter(config=s_cfg)
+        
+        # Original SAM variants
         if self.cfg.sam_version == "2":
             return Sam2Segmenter(config=s_cfg)
         if self.cfg.sam_version == "hq":
@@ -587,6 +770,7 @@ class ImageGraphPreprocessor:
 
     # ----------------------------- single image -----------------------------
 
+    @torch.inference_mode()  # 🚀 Performance: Disable gradient tracking for inference
     def process_single_image(self, image_pil: Image.Image, image_name: str, custom_question: Optional[str] = None) -> None:
         """Run the full pipeline on one image; save graph/triples/visual output if enabled."""
         t0 = time.time()

@@ -424,4 +424,278 @@ def nms(
         return nms_numpy(boxes_np, scores_np, iou_thr=iou_thr, topk=topk)
 
 
-__all__ = ["nms", "soft_nms", "iou", "labelwise_nms"]
+# ------------------------------------------------------------------------------
+# 🚀 SOTA NMS Methods (2024)
+# ------------------------------------------------------------------------------
+
+def soft_nms_gaussian(
+    boxes: ArrayLike,
+    scores: ArrayLike,
+    iou_threshold: float = 0.5,
+    sigma: float = 0.5,
+    score_threshold: float = 0.001,
+) -> np.ndarray:
+    """
+    Soft-NMS with Gaussian decay (ICCV 2017).
+    
+    Instead of removing overlapping boxes, decays their scores based on IoU.
+    Better preserves high-confidence overlapping detections.
+    
+    Paper: Improving Object Detection With One Line of Code
+    https://arxiv.org/abs/1704.04503
+    
+    Args:
+        boxes: (N, 4) boxes in xyxy format
+        scores: (N,) confidence scores
+        iou_threshold: IoU threshold for suppression
+        sigma: Gaussian decay parameter (default: 0.5)
+        score_threshold: Minimum score to keep (default: 0.001)
+    
+    Returns:
+        Indices of boxes to keep (sorted by score descending)
+    
+    Examples:
+        >>> indices = soft_nms_gaussian(boxes, scores, iou_threshold=0.5)
+        >>> kept_boxes = boxes[indices]
+    """
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32).copy()  # Will modify in-place
+    N = len(boxes)
+    
+    if N == 0:
+        return np.array([], dtype=np.int64)
+    
+    # Get sorted indices (descending score)
+    order = np.argsort(-scores)
+    keep = []
+    
+    while len(order) > 0:
+        i = order[0]
+        keep.append(i)
+        
+        if len(order) == 1:
+            break
+        
+        # Compute IoU with remaining boxes
+        ious = iou(boxes[i:i+1], boxes[order[1:]])[0]
+        
+        # Gaussian decay: score *= exp(-(iou^2) / sigma)
+        decay = np.exp(-(ious ** 2) / sigma)
+        scores[order[1:]] *= decay
+        
+        # Remove boxes below threshold and re-sort
+        valid_mask = scores[order[1:]] > score_threshold
+        order = order[1:][valid_mask]
+        order = order[np.argsort(-scores[order])]
+    
+    return np.array(keep, dtype=np.int64)
+
+
+def diou_nms(
+    boxes: ArrayLike,
+    scores: ArrayLike,
+    iou_threshold: float = 0.5,
+) -> np.ndarray:
+    """
+    DIoU-NMS: Distance-IoU aware NMS (AAAI 2020).
+    
+    Considers both IoU and center point distance.
+    Better for crowded scenes with overlapping objects.
+    
+    Paper: Distance-IoU Loss: Faster and Better Learning for Bounding Box Regression
+    https://arxiv.org/abs/1911.08287
+    
+    DIoU = IoU - (distance^2) / (diagonal^2)
+    
+    Args:
+        boxes: (N, 4) boxes in xyxy format
+        scores: (N,) confidence scores
+        iou_threshold: DIoU threshold for suppression
+    
+    Returns:
+        Indices of boxes to keep (sorted by score descending)
+    """
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32)
+    N = len(boxes)
+    
+    if N == 0:
+        return np.array([], dtype=np.int64)
+    
+    # Compute box centers and enclosing box diagonals
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    centers_x = (x1 + x2) / 2
+    centers_y = (y1 + y2) / 2
+    
+    # Get sorted indices
+    order = np.argsort(-scores)
+    keep = []
+    
+    while len(order) > 0:
+        i = order[0]
+        keep.append(i)
+        
+        if len(order) == 1:
+            break
+        
+        # Compute IoU
+        ious = iou(boxes[i:i+1], boxes[order[1:]])[0]
+        
+        # Compute center distances
+        dx = centers_x[i] - centers_x[order[1:]]
+        dy = centers_y[i] - centers_y[order[1:]]
+        center_dist_sq = dx ** 2 + dy ** 2
+        
+        # Compute enclosing box diagonal
+        enclose_x1 = np.minimum(x1[i], x1[order[1:]])
+        enclose_y1 = np.minimum(y1[i], y1[order[1:]])
+        enclose_x2 = np.maximum(x2[i], x2[order[1:]])
+        enclose_y2 = np.maximum(y2[i], y2[order[1:]])
+        enclose_diag_sq = (enclose_x2 - enclose_x1) ** 2 + (enclose_y2 - enclose_y1) ** 2
+        
+        # DIoU = IoU - (center_dist^2) / (diagonal^2)
+        dious = ious - (center_dist_sq / (enclose_diag_sq + 1e-7))
+        
+        # Keep boxes with DIoU < threshold
+        mask = dious < iou_threshold
+        order = order[1:][mask]
+    
+    return np.array(keep, dtype=np.int64)
+
+
+def matrix_nms(
+    boxes: ArrayLike,
+    scores: ArrayLike,
+    iou_threshold: float = 0.5,
+    sigma: float = 2.0,
+) -> np.ndarray:
+    """
+    Matrix-NMS: Parallel, efficient NMS (ECCV 2020).
+    
+    Computes all pairwise IoUs in parallel, then decays scores
+    based on IoU with higher-scoring boxes.
+    
+    Paper: SOLOv2: Dynamic and Fast Instance Segmentation
+    https://arxiv.org/abs/2003.10152
+    
+    Args:
+        boxes: (N, 4) boxes in xyxy format
+        scores: (N,) confidence scores
+        iou_threshold: IoU threshold
+        sigma: Decay parameter (default: 2.0)
+    
+    Returns:
+        Indices of boxes to keep
+    """
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32).copy()
+    N = len(boxes)
+    
+    if N == 0:
+        return np.array([], dtype=np.int64)
+    
+    # Compute full IoU matrix (N x N)
+    iou_matrix = iou(boxes, boxes)
+    
+    # Sort by score descending
+    order = np.argsort(-scores)
+    
+    # Decay scores based on IoU with higher-scoring boxes
+    for i in range(N):
+        idx = order[i]
+        # Get IoUs with all higher-scoring boxes
+        higher_ious = iou_matrix[idx, order[:i]]
+        
+        if len(higher_ious) > 0:
+            # Decay based on max IoU with higher-scoring box
+            max_iou = higher_ious.max()
+            decay = np.exp(-(max_iou ** 2) / sigma)
+            scores[idx] *= decay
+    
+    # Keep boxes above threshold
+    keep_mask = scores > iou_threshold * scores.max()
+    keep_indices = np.where(keep_mask)[0]
+    
+    # Sort by updated scores
+    keep_indices = keep_indices[np.argsort(-scores[keep_indices])]
+    
+    return keep_indices
+
+
+def adaptive_nms(
+    boxes: ArrayLike,
+    scores: ArrayLike,
+    iou_threshold: float = 0.5,
+    density_aware: bool = True,
+) -> np.ndarray:
+    """
+    Adaptive NMS: Adjusts threshold based on local density (CVPR 2019).
+    
+    In crowded regions, uses lower IoU threshold.
+    In sparse regions, uses higher IoU threshold.
+    
+    Paper: Adaptive NMS: Refining Pedestrian Detection in a Crowd
+    https://arxiv.org/abs/1904.03629
+    
+    Args:
+        boxes: (N, 4) boxes in xyxy format
+        scores: (N,) confidence scores
+        iou_threshold: Base IoU threshold
+        density_aware: Enable density-based threshold adaptation
+    
+    Returns:
+        Indices of boxes to keep
+    """
+    boxes = _ensure_np2d(boxes, np.float32)
+    scores = _ensure_np1d(scores, np.float32)
+    N = len(boxes)
+    
+    if N == 0:
+        return np.array([], dtype=np.int64)
+    
+    # Compute IoU matrix
+    iou_matrix = iou(boxes, boxes)
+    
+    # Estimate local density for each box
+    if density_aware:
+        # Count neighbors within IoU threshold
+        neighbors = (iou_matrix > 0.3).sum(axis=1) - 1  # Exclude self
+        # Normalize density to [0, 1]
+        max_neighbors = neighbors.max()
+        density = neighbors / (max_neighbors + 1e-7) if max_neighbors > 0 else np.zeros_like(neighbors)
+        # Adaptive threshold: lower in dense regions
+        adaptive_thresholds = iou_threshold * (1.0 - 0.3 * density)
+    else:
+        adaptive_thresholds = np.full(N, iou_threshold)
+    
+    # Standard NMS with adaptive thresholds
+    order = np.argsort(-scores)
+    keep = []
+    
+    while len(order) > 0:
+        i = order[0]
+        keep.append(i)
+        
+        if len(order) == 1:
+            break
+        
+        # Use adaptive threshold for current box
+        threshold = adaptive_thresholds[i]
+        ious = iou_matrix[i, order[1:]]
+        mask = ious < threshold
+        order = order[1:][mask]
+    
+    return np.array(keep, dtype=np.int64)
+
+
+__all__ = [
+    "nms", 
+    "soft_nms", 
+    "iou", 
+    "labelwise_nms",
+    # SOTA methods
+    "soft_nms_gaussian",
+    "diou_nms",
+    "matrix_nms",
+    "adaptive_nms",
+]
