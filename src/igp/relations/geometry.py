@@ -460,9 +460,18 @@ def build_precise_nearest_relation(
     else:
         prox = "near"
 
-    relation = prox if orient == "right_of" and prox != "near" else (f"{prox}_{orient}" if prox != "near" and orient else (orient or "near"))
-    if prox == "near":
-        relation = orient if orient != "right_of" else "right_of"
+    # CRITICAL: proximity relations (touching/very_close/close) MUST have a direction
+    # Only "near" can exist without proximity prefix if it's a simple directional relation
+    if prox in ("touching", "very_close", "close"):
+        # Always combine proximity with orientation for these relations
+        if orient:
+            relation = f"{prox}_{orient}"
+        else:
+            # Fallback: if no clear orientation, default to right_of
+            relation = f"{prox}_right_of"
+    else:
+        # For "near", use simple orientation if available, otherwise "near"
+        relation = orient if orient else "near"
 
     return {
         "src_idx": int(i),

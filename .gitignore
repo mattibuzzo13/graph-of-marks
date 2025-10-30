@@ -32,3 +32,4 @@ __pycache__/
 **/configs/
 **/checkpoints/
 **/older_code/
+**/room_image/
