@@ -236,8 +236,9 @@ def _mask_contact_along_y(mask_a: np.ndarray, mask_b: np.ndarray, y: int, band: 
 def depth_stats_from_map(mask: Optional[np.ndarray], depth_map: Optional[np.ndarray], box: Optional[Sequence[float]] = None) -> Optional[float]:
     """
     Return median depth within mask if available, else within box region.
-    Lower values are considered closer (common convention), but this function
-    does not normalize or invert scales.
+    
+    Note: The depth convention depends on the depth estimator. With MiDaS and our
+    normalization (inverted), higher values = closer to camera.
     """
     if depth_map is None:
         return None
@@ -267,16 +268,21 @@ def orientation_label(a: Sequence[float], b: Sequence[float], *, margin_px: floa
     Primary directional relation between A and B:
     'left_of' | 'right_of' | 'above' | 'below'
     Uses center difference with a tie margin.
+    
+    Natural semantics: returns the relation describing where A is relative to B.
+    E.g., if A is to the left of B, returns 'left_of'.
     """
     cx1, cy1 = center(a)
     cx2, cy2 = center(b)
     dx, dy = cx2 - cx1, cy2 - cy1
+    # dx = b.x - a.x: if dx > 0, b is right of a, so a is left_of b
+    # dy = b.y - a.y: if dy > 0, b is below a, so a is above b
     if abs(dy) > abs(dx) + margin_px:
-        return "above" if dy < 0 else "below"
+        return "below" if dy < 0 else "above"
     if abs(dx) > abs(dy) + margin_px:
-        return "left_of" if dx < 0 else "right_of"
+        return "left_of" if dx > 0 else "right_of"
     # Tie-breaker by larger magnitude
-    return "left_of" if dx < 0 else "right_of"
+    return "left_of" if dx > 0 else "right_of"
 
 
 def is_on_top_of(
@@ -343,8 +349,10 @@ def is_on_top_of(
             da = depth_stats_from_map(mask_a, depth_map, box_a) if da is None else da
             db = depth_stats_from_map(mask_b, depth_map, box_b) if db is None else db
     if (da is not None) and (db is not None):
-        # Smaller depth ⇒ closer. A should not be much farther than B.
-        if da > db + 0.10:  # tolerance depends on sensor/noise scale
+        # With normalized depth (inverted), higher = closer.
+        # A on top of B should have A closer or similar depth to B.
+        # Reject if A is significantly farther than B.
+        if da < db - 0.10:  # tolerance depends on sensor/noise scale
             return False
 
     return True
@@ -373,6 +381,9 @@ def is_in_front_of(
     """
     Depth-based: A in front of B if its median depth is smaller by > delta.
     If depth_a/b not provided, estimate medians from depth_map using masks or boxes.
+    
+    Note: In the normalized depth convention, higher values = closer, so we check
+    if depth_a > depth_b + delta.
     """
     da = depth_a
     db = depth_b
@@ -383,16 +394,32 @@ def is_in_front_of(
         db = depth_stats_from_map(mask_b, depth_map, box_b) if db is None else db
     if da is None or db is None:
         return False
-    return (da + delta) < db
+    
+    # With normalized depth (inverted), higher = closer, so A in front means da > db
+    return da > (db + delta)
 
 
 def is_behind_of(
     box_a: Sequence[float],
     box_b: Sequence[float],
-    **kwargs,
+    *,
+    mask_a: Optional[np.ndarray] = None,
+    mask_b: Optional[np.ndarray] = None,
+    depth_a: Optional[float] = None,
+    depth_b: Optional[float] = None,
+    depth_map: Optional[np.ndarray] = None,
+    delta: float = 0.05,
 ) -> bool:
-    """A behind B ⇔ B in front of A."""
-    return is_in_front_of(box_b, box_a, **kwargs)
+    """A behind B ⇔ B in front of A. Swaps both boxes AND depth values."""
+    return is_in_front_of(
+        box_b, box_a,
+        mask_a=mask_b,
+        mask_b=mask_a,
+        depth_a=depth_b,
+        depth_b=depth_a,
+        depth_map=depth_map,
+        delta=delta,
+    )
 
 
 # ---------------------- precise nearest relation ----------------------

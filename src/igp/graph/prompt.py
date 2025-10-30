@@ -93,15 +93,9 @@ def graph_to_triples_text(G: nx.DiGraph) -> str:
     """
     Return a 'Triples:' block with one triple per line.
 
-    If the relation is spatial ('left_of', 'right_of', 'above', 'below',
-    'on_top_of', 'under', 'in_front_of', 'behind'), swap source/target
-    to mirror the original arrow direction semantics.
+    Uses the natural direction: if edge is (u -> v) with relation 'left_of',
+    the triple will be 'u ---> (left_of) --> v', meaning "u is left_of v".
     """
-    SPATIAL_KEYS = (
-        "left_of", "right_of", "above", "below",
-        "on_top_of", "under", "in_front_of", "behind"
-    )
-
     # Ignore edges connected to 'scene'
     scene_ids = {n for n, d in G.nodes(data=True) if d.get("label") == "scene"}
 
@@ -118,11 +112,8 @@ def graph_to_triples_text(G: nx.DiGraph) -> str:
         if not rel:
             rel = _infer_relation_from_attrs(e)
 
-        rel_l = str(rel).lower()
-        if any(k in rel_l for k in SPATIAL_KEYS):
-            src_label, tgt_label = lab(v), lab(u)  # invert for spatial semantics
-        else:
-            src_label, tgt_label = lab(u), lab(v)
+        # Use natural direction: u ---> (relation) --> v
+        src_label, tgt_label = lab(u), lab(v)
 
         lines.append(_fmt_triple(src_label, rel, tgt_label))
 

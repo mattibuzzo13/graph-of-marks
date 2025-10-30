@@ -267,8 +267,8 @@ class Visualizer:
             for rel in rels:
                 s0, t0 = int(rel["src_idx"]), int(rel["tgt_idx"])
                 name = str(rel.get("relation", "")).lower()
-                # Spatial labels are rendered with visually consistent arrow direction.
-                s, t = (t0, s0) if any(k in name for k in self.SPATIAL_KEYS) else (s0, t0)
+                # Use original direction from the relation inferencer
+                s, t = s0, t0
                 if not (0 <= s < len(centers) and 0 <= t < len(centers)):
                     continue
 

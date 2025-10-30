@@ -8,6 +8,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 from dataclasses import dataclass
 
 import math
+import numpy as np
 from PIL import Image
 
 from .clip_rel import ClipRelScorer
@@ -18,7 +19,11 @@ from .geometry import (
     iou,
     is_below_of,
     is_on_top_of,
+    is_in_front_of,
+    is_behind_of,
     orientation_label,
+    horizontal_overlap,
+    vertical_overlap,
 )
 
 __all__ = [
@@ -58,6 +63,7 @@ _SPATIAL_KEYS = (
 )
 
 _INVERSE = {
+    # Basic spatial relations
     "left_of": "right_of",
     "right_of": "left_of",
     "above": "below",
@@ -66,6 +72,23 @@ _INVERSE = {
     "behind": "in_front_of",
     "on_top_of": "below",
     "under": "on_top_of",
+    
+    # Composite touching relations
+    "touching_left_of": "touching_right_of",
+    "touching_right_of": "touching_left_of",
+    "touching_above": "touching_below",
+    "touching_below": "touching_above",
+    
+    # Other proximity-based composite relations
+    "close_left_of": "close_right_of",
+    "close_right_of": "close_left_of",
+    "close_above": "close_below",
+    "close_below": "close_above",
+    
+    "very_close_left_of": "very_close_right_of",
+    "very_close_right_of": "very_close_left_of",
+    "very_close_above": "very_close_below",
+    "very_close_below": "very_close_above",
 }
 
 
@@ -97,6 +120,7 @@ class RelationInferencer:
         *,
         masks: Optional[Sequence[dict]] = None,
         depths: Optional[Sequence[float]] = None,
+        depth_map: Optional[np.ndarray] = None,
         use_geometry: bool = True,
         use_clip: bool = True,
         clip_threshold: float = 0.23,
@@ -127,6 +151,7 @@ class RelationInferencer:
                         mask_b=(masks[j]["segmentation"] if masks else None),
                         depth_a=(depths[i] if depths else None),
                         depth_b=(depths[j] if depths else None),
+                        depth_map=depth_map,
                     )
                     if ok:
                         dist_ij = center_distance(boxes[i], boxes[j])
@@ -137,30 +162,105 @@ class RelationInferencer:
                             {"src_idx": j, "tgt_idx": i, "relation": "below", "distance": dist_ij}
                         )
 
-        # ---------- 2) Geometry: above/below/left/right with margins & distance ----------
-        if use_geometry:
-            centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+        # ---------- 2) Geometry: in_front_of / behind (depth-based) ----------
+        if use_geometry and (depths is not None or depth_map is not None):
             for i in range(n):
                 for j in range(n):
                     if i == j:
                         continue
+                    ok = is_in_front_of(
+                        boxes[i],
+                        boxes[j],
+                        mask_a=(masks[i]["segmentation"] if masks else None),
+                        mask_b=(masks[j]["segmentation"] if masks else None),
+                        depth_a=(depths[i] if depths else None),
+                        depth_b=(depths[j] if depths else None),
+                        depth_map=depth_map,
+                    )
+                    if ok:
+                        dist_ij = center_distance(boxes[i], boxes[j])
+                        rels.append(
+                            {"src_idx": i, "tgt_idx": j, "relation": "in_front_of", "distance": dist_ij}
+                        )
+                        rels.append(
+                            {"src_idx": j, "tgt_idx": i, "relation": "behind", "distance": dist_ij}
+                        )
+
+        # ---------- 3) Geometry: above/below/left/right with improved criteria ----------
+        if use_geometry:
+            centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+            for i in range(n):
+                for j in range(i + 1, n):  # Only check each pair once (i < j)
                     cx1, cy1 = centers[i]
                     cx2, cy2 = centers[j]
                     dx, dy = cx2 - cx1, cy2 - cy1
                     dist = math.hypot(dx, dy)
+                    
                     if dist < self.min_distance or dist > self.max_distance:
                         continue
-                    if abs(dy) >= abs(dx) and abs(dy) > self.margin_px:
-                        relation = "above" if dy < 0 else "below"
-                    elif abs(dx) > self.margin_px:
-                        relation = "right_of" if dx > 0 else "left_of"
+                    
+                    # Calculate box dimensions for scale-aware thresholds
+                    box_i = boxes[i]
+                    box_j = boxes[j]
+                    w_i = box_i[2] - box_i[0]
+                    h_i = box_i[3] - box_i[1]
+                    w_j = box_j[2] - box_j[0]
+                    h_j = box_j[3] - box_j[1]
+                    avg_size = (w_i + h_i + w_j + h_j) / 4.0
+                    
+                    # Scale-aware margin (more robust than fixed margin)
+                    margin = max(self.margin_px, avg_size * 0.15)
+                    
+                    # Check for significant overlap (if high, directional relations might be incorrect)
+                    iou_val = iou(box_i, box_j)
+                    if iou_val > 0.3:
+                        continue  # Skip highly overlapping boxes for directional relations
+                    
+                    # Determine primary direction with improved logic
+                    # Natural semantics: relation describes i's position relative to j
+                    # e.g., if i is left of j, we want: i --left_of--> j
+                    if abs(dy) >= abs(dx) and abs(dy) > margin:
+                        # Vertical relation
+                        # dy = cy2 - cy1 (j.y - i.y)
+                        # if dy < 0: j is above i, so i is below j
+                        # if dy > 0: j is below i, so i is above j
+                        relation = "below" if dy < 0 else "above"
+                        # Verify with vertical overlap (should be minimal for clear above/below)
+                        v_overlap = vertical_overlap(box_i, box_j)
+                        if v_overlap > max(h_i, h_j) * 0.5:
+                            continue  # Too much vertical overlap
+                    elif abs(dx) > margin:
+                        # Horizontal relation
+                        # dx = cx2 - cx1 (j.x - i.x)
+                        # if dx > 0: j is right of i, so i is left_of j
+                        # if dx < 0: j is left of i, so i is right_of j
+                        relation = "left_of" if dx > 0 else "right_of"
+                        # Verify with horizontal overlap (should be minimal for clear left/right)
+                        h_overlap = horizontal_overlap(box_i, box_j)
+                        if h_overlap > max(w_i, w_j) * 0.5:
+                            continue  # Too much horizontal overlap
                     else:
                         continue
+                    
+                    # Add the primary relation (i -> j)
                     rels.append(
                         {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
                     )
+                    
+                    # Add the inverse relation (j -> i)
+                    inverse_relation = {
+                        "left_of": "right_of",
+                        "right_of": "left_of",
+                        "above": "below",
+                        "below": "above",
+                    }.get(relation)
+                    
+                    if inverse_relation:
+                        rels.append(
+                            {"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist}
+                        )
 
-        # ---------- 3) CLIP scoring ----------
+        # ---------- 4) CLIP scoring ----------
         if use_clip and self.clip is not None:
             for i in range(n):
                 for j in range(n):
@@ -353,51 +453,91 @@ class RelationInferencer:
         min_relations_per_object: int = 1,
     ) -> List[dict]:
         """
-        Remove redundant inverse pairs (e.g., left_of vs right_of). In conflicts,
-        prefer relations involving the subject(s) of the question (if provided),
-        then respect per-object max limits.
+        ✅ FIXED: Remove inverse duplicate relations correctly.
+        Keep only one direction per pair (i,j), preferring:
+        1. Relations involving question subjects (if provided)
+        2. Higher CLIP confidence
+        3. Relations on objects with fewer existing relations
+        
+        Example: If we have both "A left_of B" and "B right_of A",
+        keep only one based on the priority above.
         """
-        kept: List[dict] = []
-        from collections import defaultdict
-
-        count_per_src = defaultdict(int)
+        seen_pairs = {}  # (min_idx, max_idx) -> best relation dict
+        count_per_src = {}  # src_idx -> count
+        
         subj = question_subject_idxs or set()
-
-        for r in relationships:
-            i, j, rel = r["src_idx"], r["tgt_idx"], str(r["relation"]).lower()
-            inv_rel = _INVERSE.get(rel)
-            existing = None
-            if inv_rel:
-                for rr in kept:
-                    if rr["src_idx"] == j and rr["tgt_idx"] == i and str(rr["relation"]).lower() == inv_rel:
-                        existing = rr
-                        break
-
-            if existing:
-                r_hits = (i in subj) or (j in subj)
-                e_hits = (existing["src_idx"] in subj) or (existing["tgt_idx"] in subj)
-                if r_hits and not e_hits:
-                    kept.remove(existing)
-                    count_per_src[existing["src_idx"]] -= 1
-                    kept.append(r)
-                    count_per_src[i] += 1
-                elif e_hits and not r_hits:
-                    pass
+        
+        for rel in relationships:
+            i, j = rel["src_idx"], rel["tgt_idx"]
+            rel_type = rel["relation"]
+            
+            # Normalize to canonical pair (smaller index first)
+            canonical_i, canonical_j = (i, j) if i < j else (j, i)
+            pair_key = (canonical_i, canonical_j)
+            
+            # Check if we already have a relation for this pair
+            if pair_key in seen_pairs:
+                # We have a duplicate (potentially inverse)
+                existing = seen_pairs[pair_key]
+                
+                # Priority 1: Question subjects as SOURCE (stronger signal)
+                r_src_is_subj = i in subj
+                e_src_is_subj = existing["src_idx"] in subj
+                
+                if r_src_is_subj and not e_src_is_subj:
+                    # New relation has subject as source, existing doesn't: replace
+                    count_per_src[existing["src_idx"]] = count_per_src.get(existing["src_idx"], 1) - 1
+                    seen_pairs[pair_key] = rel
+                    count_per_src[i] = count_per_src.get(i, 0) + 1
+                elif e_src_is_subj and not r_src_is_subj:
+                    # Existing has subject as source, new doesn't: keep existing
+                    continue
                 else:
-                    cnt_i, cnt_j = count_per_src[i], count_per_src[j]
-                    if cnt_i >= max_relations_per_object and cnt_j < max_relations_per_object:
-                        pass
-                    elif cnt_j >= max_relations_per_object and cnt_i < max_relations_per_object:
-                        kept.remove(existing)
-                        count_per_src[existing["src_idx"]] -= 1
-                        kept.append(r)
-                        count_per_src[i] += 1
-                continue
-
-            kept.append(r)
-            count_per_src[i] += 1
-
-        return kept
+                    # Both or neither have subject as source
+                    # Priority 1b: Any involvement of question subjects
+                    r_hits = (i in subj) or (j in subj)
+                    e_hits = (existing["src_idx"] in subj) or (existing["tgt_idx"] in subj)
+                    
+                    if r_hits and not e_hits:
+                        # New relation involves subjects, existing doesn't: replace
+                        count_per_src[existing["src_idx"]] = count_per_src.get(existing["src_idx"], 1) - 1
+                        seen_pairs[pair_key] = rel
+                        count_per_src[i] = count_per_src.get(i, 0) + 1
+                    elif e_hits and not r_hits:
+                        # Existing involves subjects, new doesn't: keep existing
+                        continue
+                    else:
+                        # Priority 2: CLIP confidence
+                        existing_conf = existing.get("clip_sim", 0.0)
+                        new_conf = rel.get("clip_sim", 0.0)
+                        
+                        if new_conf > existing_conf:
+                            # Higher confidence: replace
+                            count_per_src[existing["src_idx"]] = count_per_src.get(existing["src_idx"], 1) - 1
+                            seen_pairs[pair_key] = rel
+                            count_per_src[i] = count_per_src.get(i, 0) + 1
+                        elif new_conf < existing_conf:
+                            # Lower confidence: keep existing
+                            continue
+                        else:
+                            # Priority 3: Balance per-object counts
+                            cnt_i = count_per_src.get(i, 0)
+                            cnt_e = count_per_src.get(existing["src_idx"], 0)
+                            
+                            if cnt_i < max_relations_per_object and cnt_e >= max_relations_per_object:
+                                # New has room, existing is full: replace
+                                count_per_src[existing["src_idx"]] = count_per_src.get(existing["src_idx"], 1) - 1
+                                seen_pairs[pair_key] = rel
+                                count_per_src[i] = count_per_src.get(i, 0) + 1
+                            else:
+                                # Keep existing
+                                continue
+            else:
+                # First relation for this pair
+                seen_pairs[pair_key] = rel
+                count_per_src[i] = count_per_src.get(i, 0) + 1
+        
+        return list(seen_pairs.values())
 
     def filter_by_question(
         self,

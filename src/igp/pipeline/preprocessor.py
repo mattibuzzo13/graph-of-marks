@@ -708,6 +708,21 @@ class ImageGraphPreprocessor:
                 scores=scores,
                 depths=depths,
             )
+            
+            # Add inferred relation labels to graph edges
+            # This ensures that the triple output matches what's drawn in the visualization
+            # ✅ CREATE edges explicitly for ALL inferred relations (don't rely on geometric edge creation)
+            for rel in rels_all:
+                src_idx = int(rel["src_idx"])
+                tgt_idx = int(rel["tgt_idx"])
+                relation_name = str(rel.get("relation", ""))
+                
+                # Add/update edge with relation name
+                if scene_graph.has_edge(src_idx, tgt_idx):
+                    scene_graph.edges[src_idx, tgt_idx]["relation"] = relation_name
+                else:
+                    # Create edge if it doesn't exist yet
+                    scene_graph.add_edge(src_idx, tgt_idx, relation=relation_name)
         else:
             scene_graph = None
 
