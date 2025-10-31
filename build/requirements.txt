@@ -27,3 +27,5 @@ transformers>=4.50
 networkx==3.1
 psutil==5.9.5
 numpy<=2.2.0
+omegaconf
+pycocotools

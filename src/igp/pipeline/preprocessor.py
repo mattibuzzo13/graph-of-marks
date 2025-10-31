@@ -1192,32 +1192,72 @@ class ImageGraphPreprocessor:
         # Clean and tokenize
         q_clean = q.replace("?", " ").replace(",", " ").replace(".", " ")
         words = [w for w in q_clean.split() if w.isalpha() and len(w) > 1]
-        
+
         # Extract unigrams (filter stopwords)
         unigrams = {w for w in words if w not in stopwords}
-        
-        # 🚀 Extract bigrams and trigrams for compound objects
-        # (e.g., "coffee table", "remote control", "cell phone")
+
+
+        # Espansione automatica con WordNet se disponibile
+        try:
+            from nltk.corpus import wordnet as wn
+            def get_synonyms(word):
+                syns = set()
+                for syn in wn.synsets(word):
+                    for lemma in syn.lemmas():
+                        syns.add(lemma.name().replace("_", " "))
+                return syns
+        except Exception:
+            def get_synonyms(word):
+                return set()
+
         obj_terms = set(unigrams)
-        
+        for w in list(obj_terms):
+            obj_terms.update(get_synonyms(w))
+
         # Bigrams
         for i in range(len(words) - 1):
             w1, w2 = words[i], words[i + 1]
             if w1 not in stopwords or w2 not in stopwords:
                 bigram = f"{w1} {w2}"
                 obj_terms.add(bigram)
-                # Also add underscore version (matches detector labels)
                 obj_terms.add(bigram.replace(" ", "_"))
-        
-        # Trigrams (for longer compounds like "dining room table")
+                obj_terms.update(get_synonyms(w1))
+                obj_terms.update(get_synonyms(w2))
+
+        # Trigrams
         for i in range(len(words) - 2):
             w1, w2, w3 = words[i], words[i + 1], words[i + 2]
             if not all(w in stopwords for w in [w1, w2, w3]):
                 trigram = f"{w1} {w2} {w3}"
                 obj_terms.add(trigram)
                 obj_terms.add(trigram.replace(" ", "_"))
+                obj_terms.update(get_synonyms(w1))
+                obj_terms.update(get_synonyms(w2))
+                obj_terms.update(get_synonyms(w3))
 
-        # 🚀 Expanded relation synonyms map
+        # Bigrams
+        for i in range(len(words) - 1):
+            w1, w2 = words[i], words[i + 1]
+            if w1 not in stopwords or w2 not in stopwords:
+                bigram = f"{w1} {w2}"
+                obj_terms.add(bigram)
+                obj_terms.add(bigram.replace(" ", "_"))
+                # Espansione con sinonimi dei componenti
+                obj_terms.update(get_synonyms(w1))
+                obj_terms.update(get_synonyms(w2))
+
+        # Trigrams
+        for i in range(len(words) - 2):
+            w1, w2, w3 = words[i], words[i + 1], words[i + 2]
+            if not all(w in stopwords for w in [w1, w2, w3]):
+                trigram = f"{w1} {w2} {w3}"
+                obj_terms.add(trigram)
+                obj_terms.add(trigram.replace(" ", "_"))
+                obj_terms.update(get_synonyms(w1))
+                obj_terms.update(get_synonyms(w2))
+                obj_terms.update(get_synonyms(w3))
+
+        # Sinonimi relazioni espansi
         rel_map = {
             "above": {"above", "over", "higher than", "top of"},
             "below": {"below", "under", "beneath", "lower than", "underneath"},
@@ -1235,7 +1275,7 @@ class ImageGraphPreprocessor:
             "holding": {"holding", "grasping", "gripping", "carrying"},
             "wearing": {"wearing", "dressed in", "has on"},
         }
-        
+
         rel_terms = set()
         for canonical, variants in rel_map.items():
             if any(v in q for v in variants):
@@ -1685,6 +1725,32 @@ class ImageGraphPreprocessor:
                 else:
                     # Create edge if it doesn't exist yet
                     scene_graph.add_edge(src_idx, tgt_idx, relation=relation_name)
+
+                # Normalize spatial relations to match geometric attributes when possible.
+                # Some relation sources may have used a different sign convention; prefer
+                # a geometry-based inference for pure spatial predicates so visualization
+                # matches the triples text.
+                try:
+                    from igp.graph.prompt import _infer_relation_from_attrs
+                    # Only apply normalization to basic spatial predicates
+                    spatial_set = {
+                        "left_of",
+                        "right_of",
+                        "above",
+                        "below",
+                        "on_top_of",
+                        "under",
+                        "in_front_of",
+                        "behind",
+                    }
+                    if relation_name in spatial_set:
+                        edge_data = scene_graph.edges[src_idx, tgt_idx]
+                        inferred = _infer_relation_from_attrs(edge_data)
+                        if inferred in spatial_set and inferred != relation_name:
+                            scene_graph.edges[src_idx, tgt_idx]["relation"] = inferred
+                except Exception:
+                    # If anything goes wrong here, don't break the pipeline; keep original relation
+                    pass
             
             # ✅ FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
             # This prevents inconsistency between triples.txt (which infers relations) and JSON output

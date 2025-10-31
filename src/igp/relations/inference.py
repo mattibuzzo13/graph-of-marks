@@ -205,40 +205,40 @@ class RelationInferencer:
         if iou_val > 0.3:
             return rels  # Skip highly overlapping boxes
         
-        # Determine primary direction
+        # Determina la direzione primaria
         if abs(dy) >= abs(dx) and abs(dy) > margin:
-            # Vertical relation
-            relation = "below" if dy < 0 else "above"
+            # Relazione verticale
+            relation = "above" if cy1 < cy2 else "below"  # i sopra j se y1 < y2
             v_overlap = vertical_overlap(box_i, box_j)
             if v_overlap > max(h_i, h_j) * 0.5:
-                return rels  # Too much vertical overlap
+                return rels  # Troppa sovrapposizione verticale
         elif abs(dx) > margin:
-            # Horizontal relation
-            relation = "left_of" if dx > 0 else "right_of"
+            # Relazione orizzontale
+            relation = "left_of" if cx1 < cx2 else "right_of"  # i a sinistra di j se x1 < x2
             h_overlap = horizontal_overlap(box_i, box_j)
             if h_overlap > max(w_i, w_j) * 0.5:
-                return rels  # Too much horizontal overlap
+                return rels  # Troppa sovrapposizione orizzontale
         else:
             return rels
-        
-        # Add the primary relation (i -> j)
+
+        # Aggiungi la relazione primaria (i -> j)
         rels.append(
             {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
         )
-        
-        # Add the inverse relation (j -> i)
+
+        # Aggiungi la relazione inversa (j -> i)
         inverse_relation = {
             "left_of": "right_of",
             "right_of": "left_of",
             "above": "below",
             "below": "above",
         }.get(relation)
-        
+
         if inverse_relation:
             rels.append(
                 {"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist}
             )
-        
+
         return rels
 
     def infer(
@@ -671,27 +671,7 @@ class RelationInferencer:
                 out.append(r)
         return out
 
-    def unify_spatial_direction(self, relationships: List[dict]) -> List[dict]:
-        """
-        For spatial relations, invert direction so the arrow points toward the
-        reference object (consistent with the rendering convention).
-        """
-        out: List[dict] = []
-        for r in relationships:
-            rel_name = str(r["relation"]).lower()
-            if any(k in rel_name for k in _SPATIAL_KEYS):
-                out.append(
-                    {
-                        "src_idx": r["tgt_idx"],
-                        "tgt_idx": r["src_idx"],
-                        "relation": r["relation"],
-                        "distance": r.get("distance", 0.0),
-                        **({k: r[k] for k in ("relation_raw", "clip_sim") if k in r}),
-                    }
-                )
-            else:
-                out.append(r)
-        return out
+    # unify_spatial_direction rimossa: le relazioni spaziali mantengono la direzione originale src_idx → tgt_idx
 
     # -------------------- internals --------------------
 

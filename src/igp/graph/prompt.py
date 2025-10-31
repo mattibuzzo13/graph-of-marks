@@ -35,12 +35,18 @@ def _infer_relation_from_attrs(attrs: dict) -> str:
     dx = attrs.get("dx_norm", None)
     dy = attrs.get("dy_norm", None)
     if dx is not None and dy is not None:
+        # Note: dx/dy are stored as (target_center - source_center).
+        # Therefore dx > 0 means target is to the right of source ->
+        # the *source* is left_of the target. Similarly, dy > 0 means
+        # target has larger y (is lower) -> the *source* is above the target.
         dx = float(dx)
         dy = float(dy)
         if abs(dx) >= abs(dy):
-            return "right_of" if dx > 0 else "left_of"
+            # Horizontal dominant: dx>0 -> source is left_of target
+            return "left_of" if dx > 0 else "right_of"
         else:
-            return "below" if dy > 0 else "above"
+            # Vertical dominant: dy>0 -> source is above target
+            return "above" if dy > 0 else "below"
 
     dist = float(attrs.get("dist_norm", 0.0) or 0.0)
     return "near" if dist <= 0.4 else "far"
