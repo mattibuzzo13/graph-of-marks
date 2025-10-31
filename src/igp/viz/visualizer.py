@@ -110,16 +110,16 @@ class VisualizerConfig:
     # Overlap resolution strategy
     resolve_overlaps: bool = True
     adjust_text_profile: str = "dense"  # "balanced" | "dense"
-    micro_push_iters: int = 60
+    micro_push_iters: int = 100
 
     # Depth handling
     use_depth_ordering: bool = True
     depth_key: str = "depth"
 
     # Relation label placement policy
-    relation_label_placement: str = "near_arrow"  # "near_arrow" | "midpoint"
+    relation_label_placement: str = "midpoint"  # "near_arrow" | "midpoint"
     relation_label_offset_px: float = 10.0
-    relation_label_max_dist_px: float = 30.0
+    relation_label_max_dist_px: float = 50.0
 
     # Global color tweaks
     color_sat_boost: float = 1.30
@@ -639,7 +639,10 @@ class Visualizer:
         arrows: List[Any],
         max_dist_px: float,
     ) -> None:
-        """Pass 4a: push relation labels away from object labels while clamping near their arrows."""
+        """
+        Enhanced: Pass 4a — separates relation labels from object labels
+        while allowing free detachment (no forced clamp to arrow).
+        """
         if not obj_texts or not rel_texts:
             return
 
@@ -647,42 +650,40 @@ class Visualizer:
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        max_iterations = 15
+        max_iterations = 30  # stronger iterative separation
+        push_strength = 18.0
 
         for _ in range(max_iterations):
             moved = False
-
             obj_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in obj_texts]
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
 
             for rel_idx, rel_bb in enumerate(rel_bbs):
                 for obj_bb in obj_bbs:
                     if rel_bb.overlaps(obj_bb):
-                        # Push the relation label away from the object label center
+                        # Push relation label away from object label
                         rel_center = ((rel_bb.x0 + rel_bb.x1) / 2, (rel_bb.y0 + rel_bb.y1) / 2)
                         obj_center = ((obj_bb.x0 + obj_bb.x1) / 2, (obj_bb.y0 + obj_bb.y1) / 2)
                         push_x = rel_center[0] - obj_center[0]
                         push_y = rel_center[1] - obj_center[1]
                         push_dist = max(np.sqrt(push_x**2 + push_y**2), 1e-6)
-                        push_strength = 10.0
                         push_x = (push_x / push_dist) * push_strength
                         push_y = (push_y / push_dist) * push_strength
 
                         dx, dy = self._pixels_to_data(ax, push_x, push_y)
-                        current_pos = rel_texts[rel_idx].get_position()
-                        new_pos = (current_pos[0] + dx, current_pos[1] + dy)
-                        rel_texts[rel_idx].set_position(new_pos)
+                        cur_pos = rel_texts[rel_idx].get_position()
+                        rel_texts[rel_idx].set_position((cur_pos[0] + dx, cur_pos[1] + dy))
                         moved = True
-
-                        # Keep relation label close to its arrow
-                        self._clamp_relation_to_arrow(ax, rel_texts[rel_idx], arrows[rel_idx] if rel_idx < len(arrows) else None, max_dist_px)
 
             if not moved:
                 break
             fig.canvas.draw_idle()
 
     def _resolve_relation_vs_relation_overlaps(self, ax, rel_texts: List[Any], arrows: List[Any], max_dist_px: float) -> None:
-        """Pass 4b: separate relation labels from each other symmetrically."""
+        """
+        Enhanced: Pass 4b — separates relation labels among themselves symmetrically.
+        No clamp back to arrows (to maintain non-overlapping freedom).
+        """
         if len(rel_texts) < 2:
             return
 
@@ -690,22 +691,22 @@ class Visualizer:
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        max_iterations = 15
+        max_iterations = 30
+        push_strength = 12.0
 
         for _ in range(max_iterations):
             moved = False
-
             rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
+
             for i in range(len(rel_bbs)):
                 for j in range(i + 1, len(rel_bbs)):
                     if rel_bbs[i].overlaps(rel_bbs[j]):
-                        # Move both labels in opposite directions
+                        # Push both labels apart equally
                         center_i = ((rel_bbs[i].x0 + rel_bbs[i].x1) / 2, (rel_bbs[i].y0 + rel_bbs[i].y1) / 2)
                         center_j = ((rel_bbs[j].x0 + rel_bbs[j].x1) / 2, (rel_bbs[j].y0 + rel_bbs[j].y1) / 2)
                         sep_x = center_j[0] - center_i[0]
                         sep_y = center_j[1] - center_i[1]
                         sep_dist = max(np.sqrt(sep_x**2 + sep_y**2), 1e-6)
-                        push_strength = 8.0
                         sep_x = (sep_x / sep_dist) * push_strength
                         sep_y = (sep_y / sep_dist) * push_strength
 
@@ -718,38 +719,38 @@ class Visualizer:
                         rel_texts[j].set_position((pos_j[0] + dx_j, pos_j[1] + dy_j))
                         moved = True
 
-                        # Keep both labels within a max distance from their arrows
-                        if i < len(arrows):
-                            self._clamp_relation_to_arrow(ax, rel_texts[i], arrows[i], max_dist_px)
-                        if j < len(arrows):
-                            self._clamp_relation_to_arrow(ax, rel_texts[j], arrows[j], max_dist_px)
-
             if not moved:
                 break
             fig.canvas.draw_idle()
 
     def _clamp_relation_to_arrow(self, ax, rel_text, arrow, max_dist_px: float) -> None:
-        """Ensure a relation label stays within max_dist_px of its arrow polyline."""
+        """
+        Relaxed version: keeps labels roughly associated to their arrow but
+        allows larger detachment for overlap-free layout.
+        """
         if arrow is None:
             return
 
         to_disp = ax.transData.transform
         to_data = ax.transData.inverted().transform
-
         current_pos = rel_text.get_position()
         rel_pos_disp = to_disp(current_pos)
         verts_disp = self._arrow_vertices_disp(arrow)
 
-        if len(verts_disp) > 0:
-            _, dist_sq = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
-            current_dist_px = np.sqrt(dist_sq)
-            if current_dist_px > max_dist_px:
-                proj, _ = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
-                direction = np.array(rel_pos_disp) - proj
-                dir_norm = max(np.linalg.norm(direction), 1e-6)
-                clamped_pos_disp = proj + (direction / dir_norm) * max_dist_px
-                clamped_pos_data = to_data(clamped_pos_disp)
-                rel_text.set_position(clamped_pos_data)
+        if len(verts_disp) == 0:
+            return
+
+        _, dist_sq = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
+        current_dist_px = np.sqrt(dist_sq)
+
+        # Only clamp if the label is *way* too far from its arrow
+        if current_dist_px > max_dist_px * 2.5:
+            proj, _ = self._nearest_point_on_polyline_disp(verts_disp, np.array(rel_pos_disp))
+            direction = np.array(rel_pos_disp) - proj
+            dir_norm = max(np.linalg.norm(direction), 1e-6)
+            clamped_pos_disp = proj + (direction / dir_norm) * (max_dist_px * 2.0)
+            clamped_pos_data = to_data(clamped_pos_disp)
+            rel_text.set_position(clamped_pos_data)
 
     # ------------------------------------------------------------------ internals (refactor)
 

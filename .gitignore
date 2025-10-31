@@ -33,3 +33,4 @@ __pycache__/
 **/checkpoints/
 **/older_code/
 **/room_image/
+**/depth_anything_v2/

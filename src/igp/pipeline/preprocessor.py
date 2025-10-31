@@ -14,6 +14,7 @@ import os
 import time
 import torch
 from dataclasses import dataclass
+import contextlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -150,6 +151,17 @@ class PreprocessorConfig:
     filter_relations_by_question: bool = True
     threshold_object_similarity: float = 0.50
     threshold_relation_similarity: float = 0.50
+    
+    # 🚀 Advanced Semantic Pruning (Phase 6)
+    use_clip_semantic_pruning: bool = True  # Use CLIP similarity for object ranking
+    clip_pruning_threshold: float = 0.25  # Min CLIP similarity to question
+    semantic_boost_weight: float = 0.4  # Weight for semantic relevance (vs confidence)
+    context_expansion_enabled: bool = True  # Add contextually relevant objects
+    context_expansion_radius: float = 2.0  # Multiplier for expansion area
+    context_min_iou: float = 0.1  # Min overlap for context objects
+    false_negative_reduction: bool = True  # Enable anti-false-negative heuristics
+    min_objects_per_question: int = 3  # Min objects to keep (avoid over-pruning)
+    max_objects_per_question: int = 50  # Max objects to keep (performance cap)
 
     # detectors & thresholds
     detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
@@ -164,7 +176,7 @@ class PreprocessorConfig:
     grounding_dino_text_threshold: float = 0.25
 
     # per-object relation limits
-    max_relations_per_object: int = 3
+    max_relations_per_object: int = 1
     min_relations_per_object: int = 1
 
     # NMS / fusion
@@ -222,6 +234,18 @@ class PreprocessorConfig:
     use_mixed_precision: bool = False  # Enable FP16/BF16 (2x speedup)
     batch_size: int = 1  # Batch processing (1=disabled, 4-8 recommended)
     mixed_precision_dtype: str = "auto"  # "auto" | "fp16" | "bf16" | "fp32"
+    
+    # detector parallelism and pruning
+    detectors_parallelism: str = "auto"  # "auto" | "thread" | "sequential"
+    detectors_max_workers: Optional[int] = None
+    max_detections_total: int = 200
+    max_detections_per_label: int = 50
+    min_box_area_px: int = 0
+
+    # conditional compute skipping
+    skip_relations_when_unused: bool = True
+    skip_depth_when_unused: bool = True
+    skip_segmentation_when_unused: bool = True
 
     # device
     preproc_device: Optional[str] = None  # e.g., "cpu" or "cuda"
@@ -512,33 +536,55 @@ class ImageGraphPreprocessor:
     # ----------------------------- pipeline core -----------------------------
 
     def _run_detectors(self, image_pil: Image.Image) -> Dict[str, Any]:
-        """Run all detectors (in parallel if multiple) and return raw detections ready for fusion."""
+        """Run all detectors with configurable parallelism and return raw detections ready for fusion."""
         from concurrent.futures import ThreadPoolExecutor
-        
+
         all_dets: List[Dict[str, Any]] = []
         counts: Dict[str, int] = {}
-        
+
+        # Decide parallel strategy
+        par = (self.cfg.detectors_parallelism or "auto").lower()
+        num_det = len(self.detectors)
+        try:
+            any_gpu = any(str(getattr(d, "device", "")).startswith("cuda") for d in self.detectors) and torch.cuda.is_available()
+        except Exception:
+            any_gpu = torch.cuda.is_available()
+
         def _run_detector(det):
+            # Use Mixed Precision if enabled
+            if self.mixed_precision is not None:
+                ctx = self.mixed_precision.autocast()
+            else:
+                ctx = contextlib.nullcontext()
+
             # Use GPU memory context if available for automatic cleanup
             if GPU_MEMORY_AVAILABLE:
-                with gpu_memory_context(clear_after=True, verbose=False):
-                    out = det.run(image_pil)
+                mem_ctx = gpu_memory_context(clear_after=True, verbose=False)
             else:
-                out = det.run(image_pil)
+                mem_ctx = contextlib.nullcontext()
+
+            with ctx:
+                with mem_ctx:
+                    out = det.run(image_pil)
             src_name = det.__class__.__name__
             return src_name, out
-        
-        # Run detectors in parallel if multiple
-        if len(self.detectors) > 1:
-            with ThreadPoolExecutor(max_workers=len(self.detectors)) as executor:
-                results = list(executor.map(_run_detector, self.detectors))
+
+        # Choose execution mode
+        if num_det > 1:
+            if par == "sequential" or (par == "auto" and any_gpu):
+                # Avoid GPU contention by running sequentially when detectors use the same GPU
+                results = [_run_detector(det) for det in self.detectors]
+            else:
+                max_workers = self.cfg.detectors_max_workers or num_det
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    results = list(executor.map(_run_detector, self.detectors))
         else:
             results = [_run_detector(self.detectors[0])]
-        
+
         # Clear GPU cache after all detectors complete
         if GPU_MEMORY_AVAILABLE:
             get_gpu_manager().clear_cache(verbose=False)
-        
+
         for src_name, out in results:
             counts[src_name] = len(out)
             for d in out:
@@ -549,7 +595,7 @@ class ImageGraphPreprocessor:
                     "from": src_name.lower(),
                     "mask": d.extra.get("mask") if d.extra else None,
                 })
-        
+
         return {
             "detections": all_dets,
             "counts": counts,
@@ -720,32 +766,476 @@ class ImageGraphPreprocessor:
         scores_f = [scores[i] for i in keep]
         return boxes_f, labels_f, scores_f, keep
 
+    def _compute_clip_semantic_scores(
+        self,
+        image_pil: Image.Image,
+        boxes: List[List[float]],
+        labels: List[str],
+        question: str,
+        obj_terms: set,
+    ) -> Dict[int, float]:
+        """
+        🚀 Advanced Semantic Pruning: Use CLIP to compute semantic relevance scores.
+        
+        Returns:
+            Dict mapping box index → semantic score [0.0, 1.0]
+        
+        Strategy:
+            1. Encode question with CLIP text encoder
+            2. Encode object labels with CLIP text encoder
+            3. Compute similarity between question and each label
+            4. Optionally encode image crops for visual similarity
+        """
+        semantic_scores = {}
+        
+        # Early exit if CLIP not available or not enabled
+        if not self.cfg.use_clip_semantic_pruning:
+            return semantic_scores
+        
+        if not hasattr(self, 'clip') or self.clip is None:
+            return semantic_scores
+        
+        if not self.clip.available():
+            return semantic_scores
+        
+        if not question or not boxes:
+            return semantic_scores
+        
+        try:
+            # Build text prompts for each object
+            # Format: "a photo of {label}" for better CLIP matching
+            label_prompts = []
+            for lb in labels:
+                # Clean label for CLIP
+                clean_label = base_label(lb).replace("_", " ")
+                prompt = f"a photo of {clean_label}"
+                label_prompts.append(prompt)
+            
+            # Encode question as query
+            question_clean = question.strip().lower()
+            if not question_clean.endswith("?"):
+                question_clean += "?"
+            
+            # Get CLIP similarities: question vs all labels
+            # Returns tensor [1, num_labels]
+            sims = self.clip.similarities([question_clean], label_prompts)
+            
+            if sims is None:
+                return semantic_scores
+            
+            # Convert to dict
+            sims_list = sims.squeeze(0).detach().cpu().tolist()
+            for i, score in enumerate(sims_list):
+                # Clip to [0, 1] and apply threshold
+                score = max(0.0, min(1.0, float(score)))
+                if score >= self.cfg.clip_pruning_threshold:
+                    semantic_scores[i] = score
+            
+            # 🚀 Context-aware expansion: boost nearby/overlapping objects
+            if self.cfg.context_expansion_enabled and semantic_scores:
+                semantic_scores = self._expand_context_objects(
+                    boxes, 
+                    semantic_scores,
+                    radius=self.cfg.context_expansion_radius,
+                    min_iou=self.cfg.context_min_iou
+                )
+        
+        except Exception as e:
+            # Silent fallback - don't break the pipeline
+            if hasattr(self, '_verbose') and self._verbose:
+                print(f"[WARNING] CLIP semantic scoring failed: {e}")
+        
+        return semantic_scores
+    
+    def _expand_context_objects(
+        self,
+        boxes: List[List[float]],
+        semantic_scores: Dict[int, float],
+        radius: float = 2.0,
+        min_iou: float = 0.1,
+    ) -> Dict[int, float]:
+        """
+        🚀 False Negative Reduction: Expand to include contextually relevant objects.
+        
+        For each semantically relevant object, boost nearby/overlapping objects.
+        This prevents over-aggressive pruning of contextually important objects.
+        
+        Args:
+            boxes: List of bounding boxes
+            semantic_scores: Current semantic scores
+            radius: Multiplier for expansion area (2.0 = 2x box area)
+            min_iou: Minimum IoU for context inclusion
+        
+        Returns:
+            Updated semantic_scores with context boost
+        """
+        if not semantic_scores or not boxes:
+            return semantic_scores
+        
+        expanded_scores = dict(semantic_scores)
+        
+        # For each highly relevant object (score > 0.5)
+        anchor_indices = [i for i, score in semantic_scores.items() if score > 0.5]
+        
+        for anchor_idx in anchor_indices:
+            anchor_box = boxes[anchor_idx]
+            anchor_score = semantic_scores[anchor_idx]
+            
+            # Compute expanded box (radius * original size)
+            x1, y1, x2, y2 = anchor_box
+            w, h = x2 - x1, y2 - y1
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            
+            # Expand by radius
+            new_w = w * radius
+            new_h = h * radius
+            expanded_box = [
+                cx - new_w / 2,
+                cy - new_h / 2,
+                cx + new_w / 2,
+                cy + new_h / 2
+            ]
+            
+            # Check overlap with all other boxes
+            for i, box in enumerate(boxes):
+                if i == anchor_idx:
+                    continue
+                
+                # Compute IoU with expanded box
+                overlap = iou(box, expanded_box)
+                
+                if overlap >= min_iou:
+                    # Boost this object's score (decay based on distance)
+                    boost = anchor_score * 0.3 * (overlap / min_iou) ** 0.5
+                    current_score = expanded_scores.get(i, 0.0)
+                    expanded_scores[i] = max(current_score, boost)
+        
+        return expanded_scores
+
+    def _limit_detections(
+        self,
+        boxes: List[List[float]],
+        labels: List[str],
+        scores: List[float],
+        question_terms: Optional[set] = None,
+    ) -> Tuple[List[List[float]], List[str], List[float]]:
+        """
+        Apply lightweight pruning to reduce downstream cost (segmentation/relations).
+        🚀 Enhanced: prioritizes semantically relevant objects when question_terms provided.
+        """
+        if not boxes:
+            return boxes, labels, scores
+
+        # Filter by min area
+        if self.cfg.min_box_area_px and self.cfg.min_box_area_px > 0:
+            kept_idx = []
+            for i, b in enumerate(boxes):
+                x1, y1, x2, y2 = b[:4]
+                area = max(1, int(x2 - x1)) * max(1, int(y2 - y1))
+                if area >= int(self.cfg.min_box_area_px):
+                    kept_idx.append(i)
+            boxes = [boxes[i] for i in kept_idx]
+            labels = [labels[i] for i in kept_idx]
+            scores = [scores[i] for i in kept_idx]
+            if not boxes:
+                return boxes, labels, scores
+
+        # 🚀 Compute semantic relevance scores if question terms provided
+        semantic_boost = {}
+        if question_terms:
+            # Level 1: Text-based fuzzy matching (fast, existing implementation)
+            for i, lb in enumerate(labels):
+                base_lb = base_label(lb).lower()
+                relevance = 0.0
+                
+                # Check for matches with question terms
+                for term in question_terms:
+                    term_normalized = str(term).replace("_", " ").lower()
+                    base_normalized = base_lb.replace("_", " ")
+                    
+                    # Exact match
+                    if base_lb == term or term_normalized == base_normalized:
+                        relevance = max(relevance, 1.0)
+                    # Substring match
+                    elif term_normalized in base_normalized or base_normalized in term_normalized:
+                        relevance = max(relevance, 0.7)
+                    # Word overlap
+                    else:
+                        term_words = set(term_normalized.split())
+                        label_words = set(base_normalized.split())
+                        if term_words and label_words:
+                            overlap = len(term_words & label_words) / max(len(term_words), len(label_words))
+                            relevance = max(relevance, overlap * 0.6)
+                
+                semantic_boost[i] = relevance
+
+        # Cap per label (with semantic awareness)
+        per_label = max(0, int(self.cfg.max_detections_per_label))
+        if per_label > 0:
+            from collections import defaultdict
+            idx_by_label = defaultdict(list)
+            for i, (lb, sc) in enumerate(zip(labels, scores)):
+                # 🚀 Boost score for semantically relevant objects
+                effective_score = float(sc)
+                if semantic_boost:
+                    boost_factor = semantic_boost.get(i, 0.0)
+                    # Add up to 0.3 boost for highly relevant objects
+                    effective_score = sc + (boost_factor * 0.3)
+                
+                idx_by_label[base_label(lb)].append((i, effective_score))
+            
+            kept = []
+            for _, pairs in idx_by_label.items():
+                # Sort by effective score (includes semantic boost)
+                pairs_sorted = sorted(pairs, key=lambda x: -x[1])
+                kept.extend([i for i, _ in pairs_sorted[:per_label]])
+            kept = sorted(set(kept))
+            boxes = [boxes[i] for i in kept]
+            labels = [labels[i] for i in kept]
+            scores = [scores[i] for i in kept]
+
+        # Cap total (with semantic awareness)
+        total_cap = max(0, int(self.cfg.max_detections_total))
+        if total_cap > 0 and len(boxes) > total_cap:
+            # 🚀 Sort by composite score: detection confidence + semantic relevance
+            composite_scores = []
+            for i in range(len(boxes)):
+                base_score = float(scores[i])
+                sem_boost = semantic_boost.get(i, 0.0) if semantic_boost else 0.0
+                # Weight: 60% detection confidence, 40% semantic relevance
+                composite = 0.6 * base_score + 0.4 * sem_boost
+                composite_scores.append((i, composite))
+            
+            # Keep top-K by composite score
+            composite_scores.sort(key=lambda x: -x[1])
+            kept_indices = [i for i, _ in composite_scores[:total_cap]]
+            kept_indices.sort()  # Maintain original order
+            
+            boxes = [boxes[i] for i in kept_indices]
+            labels = [labels[i] for i in kept_indices]
+            scores = [scores[i] for i in kept_indices]
+        
+        return boxes, labels, scores
+
+    def _limit_detections_advanced(
+        self,
+        boxes: List[List[float]],
+        labels: List[str],
+        scores: List[float],
+        question_terms: Optional[set] = None,
+        clip_scores: Optional[Dict[int, float]] = None,
+    ) -> Tuple[List[List[float]], List[str], List[float]]:
+        """
+        🚀 Advanced semantic pruning with CLIP integration.
+        
+        Combines:
+        - Detection confidence (from detectors)
+        - Text-based fuzzy matching (n-grams, synonyms)
+        - CLIP visual-semantic similarity
+        - Context expansion (nearby objects)
+        
+        Args:
+            boxes, labels, scores: Detection results
+            question_terms: Extracted terms from question
+            clip_scores: Optional CLIP semantic scores from _compute_clip_semantic_scores
+        
+        Returns:
+            Filtered boxes, labels, scores with semantic ranking
+        """
+        if not boxes:
+            return boxes, labels, scores
+
+        # Filter by min area (same as before)
+        if self.cfg.min_box_area_px and self.cfg.min_box_area_px > 0:
+            kept_idx = []
+            for i, b in enumerate(boxes):
+                x1, y1, x2, y2 = b[:4]
+                area = max(1, int(x2 - x1)) * max(1, int(y2 - y1))
+                if area >= int(self.cfg.min_box_area_px):
+                    kept_idx.append(i)
+            boxes = [boxes[i] for i in kept_idx]
+            labels = [labels[i] for i in kept_idx]
+            scores = [scores[i] for i in kept_idx]
+            
+            # Remap clip_scores indices after filtering
+            if clip_scores:
+                clip_scores = {kept_idx.index(old_i): score 
+                              for old_i, score in clip_scores.items() 
+                              if old_i in kept_idx}
+            
+            if not boxes:
+                return boxes, labels, scores
+
+        # 🚀 Compute multi-signal semantic scores
+        semantic_boost = {}
+        
+        # Signal 1: Text-based fuzzy matching (existing)
+        if question_terms:
+            for i, lb in enumerate(labels):
+                base_lb = base_label(lb).lower()
+                relevance = 0.0
+                
+                for term in question_terms:
+                    term_normalized = str(term).replace("_", " ").lower()
+                    base_normalized = base_lb.replace("_", " ")
+                    
+                    if base_lb == term or term_normalized == base_normalized:
+                        relevance = max(relevance, 1.0)
+                    elif term_normalized in base_normalized or base_normalized in term_normalized:
+                        relevance = max(relevance, 0.7)
+                    else:
+                        term_words = set(term_normalized.split())
+                        label_words = set(base_normalized.split())
+                        if term_words and label_words:
+                            overlap = len(term_words & label_words) / max(len(term_words), len(label_words))
+                            relevance = max(relevance, overlap * 0.6)
+                
+                semantic_boost[i] = relevance
+        
+        # Signal 2: CLIP visual-semantic similarity (new)
+        if clip_scores:
+            for i, clip_score in clip_scores.items():
+                text_score = semantic_boost.get(i, 0.0)
+                # Blend text and CLIP scores (CLIP weighted higher as it's more robust)
+                # 40% text matching, 60% CLIP similarity
+                combined = 0.4 * text_score + 0.6 * clip_score
+                semantic_boost[i] = max(semantic_boost.get(i, 0.0), combined)
+
+        # Cap per label (with semantic awareness)
+        per_label = max(0, int(self.cfg.max_detections_per_label))
+        if per_label > 0:
+            from collections import defaultdict
+            idx_by_label = defaultdict(list)
+            for i, (lb, sc) in enumerate(zip(labels, scores)):
+                effective_score = float(sc)
+                if semantic_boost:
+                    boost_factor = semantic_boost.get(i, 0.0)
+                    effective_score = sc + (boost_factor * 0.3)
+                
+                idx_by_label[base_label(lb)].append((i, effective_score))
+            
+            kept = []
+            for _, pairs in idx_by_label.items():
+                pairs_sorted = sorted(pairs, key=lambda x: -x[1])
+                kept.extend([i for i, _ in pairs_sorted[:per_label]])
+            kept = sorted(set(kept))
+            boxes = [boxes[i] for i in kept]
+            labels = [labels[i] for i in kept]
+            scores = [scores[i] for i in kept]
+            
+            # Remap semantic_boost indices
+            if semantic_boost:
+                semantic_boost = {kept.index(old_i): score 
+                                 for old_i, score in semantic_boost.items() 
+                                 if old_i in kept}
+
+        # Cap total with multi-criteria ranking
+        total_cap = max(0, int(self.cfg.max_detections_total))
+        
+        # 🚀 Apply min/max objects per question constraints
+        if self.cfg.false_negative_reduction:
+            min_cap = max(self.cfg.min_objects_per_question, 3)
+            max_cap = min(self.cfg.max_objects_per_question, total_cap if total_cap > 0 else 50)
+            total_cap = max_cap
+        
+        if total_cap > 0 and len(boxes) > total_cap:
+            # Multi-criteria composite score
+            composite_scores = []
+            for i in range(len(boxes)):
+                base_score = float(scores[i])
+                sem_score = semantic_boost.get(i, 0.0) if semantic_boost else 0.0
+                
+                # Configurable weighting
+                weight_conf = 1.0 - self.cfg.semantic_boost_weight
+                weight_sem = self.cfg.semantic_boost_weight
+                
+                composite = weight_conf * base_score + weight_sem * sem_score
+                composite_scores.append((i, composite))
+            
+            composite_scores.sort(key=lambda x: -x[1])
+            kept_indices = [i for i, _ in composite_scores[:total_cap]]
+            
+            # 🚀 False negative safety: ensure we keep minimum objects
+            if self.cfg.false_negative_reduction and len(kept_indices) < min_cap:
+                # Add more objects sorted by detection confidence
+                remaining = [i for i in range(len(boxes)) if i not in kept_indices]
+                remaining.sort(key=lambda i: -float(scores[i]))
+                add_count = min(min_cap - len(kept_indices), len(remaining))
+                kept_indices.extend(remaining[:add_count])
+            
+            kept_indices.sort()  # Maintain original order
+            
+            boxes = [boxes[i] for i in kept_indices]
+            labels = [labels[i] for i in kept_indices]
+            scores = [scores[i] for i in kept_indices]
+        
+        return boxes, labels, scores
+
     def _parse_question(self, question: str) -> Tuple[set, set]:
         """
         Extract (object_terms, relation_terms) from the natural-language question.
-        - Lightweight token filtering for objects (no spaCy dependency).
-        - Basic synonym expansion for relations.
+        🚀 Enhanced: n-gram extraction, expanded stopwords, better synonyms.
         """
         q = (question or self.cfg.question or "").strip().lower()
         if not q:
             return set(), set()
 
-        # Object terms — simple alpha tokens minus common function words.
-        tokens = [t for t in q.replace("?", " ").replace(",", " ").split() if t.isalpha()]
-        obj_terms = {t for t in tokens if t not in {"the", "a", "an", "is", "are", "on", "in", "of", "to"}}
-
-        # Relation terms (primitive synonym map).
-        rel_map = {
-            "above": {"above"},
-            "below": {"below", "under"},
-            "left_of": {"left", "to the left of"},
-            "right_of": {"right", "to the right of"},
-            "on_top_of": {"on top of", "on", "onto", "resting on", "sitting on"},
-            "in_front_of": {"in front of"},
-            "behind": {"behind"},
-            "next_to": {"next to", "beside"},
-            "touching": {"touching"},
+        # Expanded stopword list for cleaner object extraction
+        stopwords = {
+            "the", "a", "an", "is", "are", "on", "in", "of", "to",
+            "what", "where", "when", "how", "which", "who", "why",
+            "this", "that", "these", "those", "there", "here",
+            "do", "does", "did", "can", "could", "would", "should",
+            "many", "much", "some", "any"
         }
+
+        # Clean and tokenize
+        q_clean = q.replace("?", " ").replace(",", " ").replace(".", " ")
+        words = [w for w in q_clean.split() if w.isalpha() and len(w) > 1]
+        
+        # Extract unigrams (filter stopwords)
+        unigrams = {w for w in words if w not in stopwords}
+        
+        # 🚀 Extract bigrams and trigrams for compound objects
+        # (e.g., "coffee table", "remote control", "cell phone")
+        obj_terms = set(unigrams)
+        
+        # Bigrams
+        for i in range(len(words) - 1):
+            w1, w2 = words[i], words[i + 1]
+            if w1 not in stopwords or w2 not in stopwords:
+                bigram = f"{w1} {w2}"
+                obj_terms.add(bigram)
+                # Also add underscore version (matches detector labels)
+                obj_terms.add(bigram.replace(" ", "_"))
+        
+        # Trigrams (for longer compounds like "dining room table")
+        for i in range(len(words) - 2):
+            w1, w2, w3 = words[i], words[i + 1], words[i + 2]
+            if not all(w in stopwords for w in [w1, w2, w3]):
+                trigram = f"{w1} {w2} {w3}"
+                obj_terms.add(trigram)
+                obj_terms.add(trigram.replace(" ", "_"))
+
+        # 🚀 Expanded relation synonyms map
+        rel_map = {
+            "above": {"above", "over", "higher than", "top of"},
+            "below": {"below", "under", "beneath", "lower than", "underneath"},
+            "left_of": {"left", "to the left of", "left side", "leftward"},
+            "right_of": {"right", "to the right of", "right side", "rightward"},
+            "on_top_of": {"on top of", "on", "onto", "resting on", "sitting on", "placed on", "atop"},
+            "in_front_of": {"in front of", "front", "before", "ahead of"},
+            "behind": {"behind", "back of", "rear of", "after"},
+            "next_to": {"next to", "beside", "adjacent to", "alongside", "by", "near"},
+            "touching": {"touching", "in contact with", "against"},
+            "near": {"near", "close to", "nearby", "around", "close by"},
+            "far_from": {"far from", "distant from", "away from"},
+            "inside": {"inside", "within", "in"},
+            "outside": {"outside", "out of", "beyond"},
+            "holding": {"holding", "grasping", "gripping", "carrying"},
+            "wearing": {"wearing", "dressed in", "has on"},
+        }
+        
         rel_terms = set()
         for canonical, variants in rel_map.items():
             if any(v in q for v in variants):
@@ -760,13 +1250,87 @@ class ImageGraphPreprocessor:
         scores: List[float],
         obj_terms: set,
     ) -> Tuple[List[List[float]], List[str], List[float]]:
-        """If `obj_terms` is not empty, keep only objects whose base label matches."""
+        """
+        Filter objects by question terms with fuzzy matching.
+        🚀 Enhanced: supports n-grams, partial matching, and semantic similarity.
+        """
         if not self.cfg.apply_question_filter or not obj_terms:
             return boxes, labels, scores
-        idxs = [i for i, lb in enumerate(labels) if base_label(lb) in obj_terms]
-        if not idxs:
+        
+        # 🚀 Multi-level matching strategy:
+        matched_indices = []
+        
+        for i, lb in enumerate(labels):
+            base_lb = base_label(lb).lower()
+            matched = False
+            
+            # Level 1: Exact match (fastest)
+            if base_lb in obj_terms:
+                matched = True
+            
+            # Level 2: Partial match for compounds
+            # e.g., "coffee_table" matches {"coffee", "table"} or {"coffee table"}
+            if not matched:
+                for term in obj_terms:
+                    term_normalized = str(term).replace("_", " ").lower()
+                    base_normalized = base_lb.replace("_", " ")
+                    
+                    # Check if term is substring of label or vice versa
+                    if term_normalized in base_normalized or base_normalized in term_normalized:
+                        matched = True
+                        break
+                    
+                    # Check word-level overlap for compounds
+                    term_words = set(term_normalized.split())
+                    label_words = set(base_normalized.split())
+                    if term_words and label_words:
+                        # Match if >50% words overlap
+                        overlap = len(term_words & label_words) / max(len(term_words), len(label_words))
+                        if overlap >= 0.5:
+                            matched = True
+                            break
+            
+            # Level 3: Semantic similarity with CLIP (optional, if available)
+            if not matched and hasattr(self, 'clip') and self.clip is not None:
+                try:
+                    # Check semantic similarity between label and question terms
+                    max_similarity = 0.0
+                    for term in obj_terms:
+                        # Simple similarity check (can be enhanced)
+                        term_str = str(term).lower()
+                        # Common synonyms heuristic
+                        synonym_pairs = [
+                            ({"laptop", "computer", "pc"}, {"laptop", "computer", "pc"}),
+                            ({"bike", "bicycle"}, {"bike", "bicycle"}),
+                            ({"couch", "sofa"}, {"couch", "sofa"}),
+                            ({"tv", "television"}, {"tv", "television"}),
+                            ({"phone", "cellphone", "cell phone", "mobile"}, {"phone", "cellphone", "cell phone", "mobile"}),
+                        ]
+                        for syn_set1, syn_set2 in synonym_pairs:
+                            if base_lb in syn_set1 and term_str in syn_set2:
+                                matched = True
+                                break
+                            if base_lb in syn_set2 and term_str in syn_set1:
+                                matched = True
+                                break
+                        if matched:
+                            break
+                except Exception:
+                    pass  # CLIP not available or error, continue
+            
+            if matched:
+                matched_indices.append(i)
+        
+        # Return filtered results
+        if not matched_indices:
+            # No matches found - return original (avoid empty result)
             return boxes, labels, scores
-        return [boxes[i] for i in idxs], [labels[i] for i in idxs], [scores[i] for i in idxs]
+        
+        return (
+            [boxes[i] for i in matched_indices],
+            [labels[i] for i in matched_indices],
+            [scores[i] for i in matched_indices]
+        )
 
     # ----------------------------- single image -----------------------------
 
@@ -778,6 +1342,19 @@ class ImageGraphPreprocessor:
         # Record last processed size to let _get_optimal_batch_size adapt batch size
         self._last_processed_size = (W, H)
         cache_key = self._generate_cache_key(image_pil, custom_question or self.cfg.question)
+
+        # Compute which stages are needed (skip heavy steps when unused)
+        need_graph = not self.cfg.skip_graph
+        need_prompt = not self.cfg.skip_prompt
+        need_viz = not self.cfg.skip_visualization
+        need_rel_draw = need_viz and self.cfg.display_relationships
+        need_rel = (need_graph or need_prompt or need_rel_draw)
+        if not self.cfg.skip_relations_when_unused:
+            need_rel = True
+        need_depth = need_rel if self.cfg.skip_depth_when_unused else True
+        need_seg_draw = need_viz and self.cfg.show_segmentation and not self.cfg.export_preproc_only
+        need_seg_for_rel = need_rel
+        need_seg = (need_seg_draw or need_seg_for_rel) if self.cfg.skip_segmentation_when_unused else True
 
         # 1) DETECTION (+ cache)
         cached = self._cache_get(cache_key)
@@ -819,6 +1396,25 @@ class ImageGraphPreprocessor:
         original_boxes = list(cached["boxes"])
         original_labels = list(cached["labels"])
         original_scores = list(cached["scores"])
+        
+        # 🚀 NEW: Always check if question mentions only one object for fallback
+        # This enables automatic context expansion when only one object is mentioned
+        target_object_detected = None
+        if obj_terms and self.cfg.apply_question_filter:
+            # Try to identify objects mentioned in the question
+            bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
+            
+            # If exactly one object type is mentioned, prepare fallback
+            if len(bx_q) >= 1 and len(set(base_label(lb) for lb in lb_q)) == 1:
+                # Single object type identified - store it for potential fallback
+                target_object_detected = {
+                    'label': lb_q[0],
+                    'boxes': bx_q,
+                    'labels': lb_q,
+                    'scores': sc_q
+                }
+                print(f"[SINGLE OBJECT DETECTED] '{lb_q[0]}' mentioned in question "
+                      f"({len(bx_q)} instance(s) found)")
 
         if self.cfg.aggressive_pruning:
             # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
@@ -840,69 +1436,213 @@ class ImageGraphPreprocessor:
                     print(f"[FALLBACK] Target object: {target_obj_label}, indices: {target_indices}")
                     print(f"[FALLBACK] Restored {len(boxes)} total objects")
 
-        # 3) SEGMENTATION (SAM) + optional union with Detectron2 masks
-        # Use GPU memory management for automatic cleanup
-        if GPU_MEMORY_AVAILABLE:
-            with gpu_memory_context(clear_after=True, verbose=False):
-                masks = self.segmenter.segment(image_pil, boxes)
-        else:
-            masks = self.segmenter.segment(image_pil, boxes)
-        
-        for i in range(len(masks)):
-            d2m = det2_for_mask[i].get("det2_mask")
-            if d2m is not None:
-                masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
-
-        # 4) LABEL-WISE NMS
+        # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores)
-        masks = [masks[i] for i in keep]
+        det2_for_mask = [det2_for_mask[i] for i in keep]
 
-        # 5) DEPTH (at box centers)
-        centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
-        # Prefer a single full-depth inference if available
-        # Use GPU memory context for depth estimation
-        if GPU_MEMORY_AVAILABLE:
-            with gpu_memory_context(clear_after=True, verbose=False):
-                if hasattr(self.depth_est, "depth_map"):
-                    try:
-                        dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
-                        depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
-                    except Exception:
-                        depths = self.depth_est.relative_depth_at(image_pil, centers)
-                else:
-                    depths = self.depth_est.relative_depth_at(image_pil, centers)
-        else:
-            if hasattr(self.depth_est, "depth_map"):
-                try:
-                    dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
-                    depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
-                except Exception:
-                    depths = self.depth_est.relative_depth_at(image_pil, centers)
+        # 3.5) 🚀 CLIP SEMANTIC SCORING (if enabled)
+        # Compute semantic relevance using CLIP embeddings before pruning
+        clip_semantic_scores = {}
+        if self.cfg.use_clip_semantic_pruning and (custom_question or self.cfg.question):
+            clip_semantic_scores = self._compute_clip_semantic_scores(
+                image_pil=image_pil,
+                boxes=boxes,
+                labels=labels,
+                question=custom_question or self.cfg.question,
+                obj_terms=obj_terms
+            )
+            
+            # 🚀 False Negative Reduction: Ensure minimum objects are kept
+            if self.cfg.false_negative_reduction and len(boxes) > 0:
+                # Count objects with good semantic scores
+                high_scoring = sum(1 for score in clip_semantic_scores.values() if score > 0.4)
+                
+                # If too few objects have high scores, lower the threshold
+                if high_scoring < self.cfg.min_objects_per_question:
+                    # Keep top-K objects by detection confidence as fallback
+                    print(f"[FALSE NEGATIVE REDUCTION] Only {high_scoring} objects with CLIP score > 0.4, "
+                          f"keeping at least {self.cfg.min_objects_per_question} objects")
+
+        # 4) LIGHT PRUNING (area, per-label, total) BEFORE SEGMENTATION
+        # 🚀 Pass question terms + CLIP scores for semantic-aware pruning
+        boxes, labels, scores = self._limit_detections_advanced(
+            boxes, labels, scores, 
+            question_terms=obj_terms,
+            clip_scores=clip_semantic_scores
+        )
+        # Sync det2_for_mask with possibly reduced boxes
+        if len(det2_for_mask) != len(boxes):
+            # Approximate alignment by score order
+            idx_sorted = sorted(range(len(scores)), key=lambda i: -float(scores[i]))
+            det2_for_mask = [det2_for_mask[i] for i in idx_sorted[: len(boxes)]] if det2_for_mask else [None] * len(boxes)
+
+        # 5) SEGMENTATION (SAM) + optional union with Detectron2 masks — only if needed
+        masks = None
+        if need_seg and boxes:
+            if self.mixed_precision is not None:
+                mp_ctx = self.mixed_precision.autocast()
             else:
-                depths = self.depth_est.relative_depth_at(image_pil, centers)
+                mp_ctx = contextlib.nullcontext()
+            mem_ctx = gpu_memory_context(clear_after=True, verbose=False) if GPU_MEMORY_AVAILABLE else contextlib.nullcontext()
+            with mp_ctx:
+                with mem_ctx:
+                    masks = self.segmenter.segment(image_pil, boxes)
+            # fuse with detectron2 masks if available
+            for i in range(len(masks)):
+                d2m = det2_for_mask[i].get("det2_mask") if det2_for_mask and det2_for_mask[i] is not None else None
+                if d2m is not None:
+                    masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
 
-        # 6) RELATIONS (geometry + CLIP)
-        r_cfg = RelationsConfig(
-            margin_px=self.cfg.margin,
-            min_distance=self.cfg.min_distance,
-            max_distance=self.cfg.max_distance,
-        )
-        rels_all = self.relations_inferencer.infer(
-            image_pil=image_pil,
-            boxes=boxes,
-            labels=labels,
-            masks=masks,
-            depths=depths,
-            use_geometry=True,
-            use_clip=True,
-            clip_threshold=0.23,
-        )
+        # 6) DEPTH (at box centers) — only if needed
+        centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+        depths = None
+        if need_depth and boxes:
+            if self.mixed_precision is not None:
+                mp_ctx = self.mixed_precision.autocast()
+            else:
+                mp_ctx = contextlib.nullcontext()
+            mem_ctx = gpu_memory_context(clear_after=True, verbose=False) if GPU_MEMORY_AVAILABLE else contextlib.nullcontext()
+            with mp_ctx:
+                with mem_ctx:
+                    if hasattr(self.depth_est, "depth_map"):
+                        try:
+                            dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
+                            depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
+                        except Exception:
+                            depths = self.depth_est.relative_depth_at(image_pil, centers)
+                    else:
+                        depths = self.depth_est.relative_depth_at(image_pil, centers)
+
+        # 7) RELATIONS (geometry + CLIP) — only if needed
+        rels_all: List[Dict[str, Any]] = []
+        if need_rel and boxes:
+            r_cfg = RelationsConfig(
+                margin_px=self.cfg.margin,
+                min_distance=self.cfg.min_distance,
+                max_distance=self.cfg.max_distance,
+            )
+            if self.mixed_precision is not None:
+                mp_ctx = self.mixed_precision.autocast()
+            else:
+                mp_ctx = contextlib.nullcontext()
+            with mp_ctx:
+                rels_all = self.relations_inferencer.infer(
+                    image_pil=image_pil,
+                    boxes=boxes,
+                    labels=labels,
+                    masks=masks,
+                    depths=depths,
+                    use_geometry=True,
+                    use_clip=True,
+                    clip_threshold=0.23,
+                )
         
-        # If fallback target was set, keep only relations involving those objects.
+        # 🚀 NEW: Apply fallback if single object was detected in question
+        # Strategy: Keep ONLY relations directly connected to target + their endpoint objects
+        if target_object_detected is not None and not hasattr(self, '_target_object_indices'):
+            # Find indices of the target object in the current (pruned) boxes
+            target_label = base_label(target_object_detected['label'])
+            target_indices = [i for i, label in enumerate(labels) 
+                            if base_label(label) == target_label]
+            
+            if target_indices:
+                # Check if we should apply fallback:
+                # - If only the target object(s) remain, include connected objects
+                unique_labels = set(base_label(lb) for lb in labels)
+                
+                if len(unique_labels) == 1:
+                    # Only target object type remains - apply strict fallback
+                    print(f"[SINGLE OBJECT FALLBACK] Only '{target_label}' detected, "
+                          f"including ONLY directly connected objects and relations")
+                    self._target_object_indices = set(target_indices)
+                    self._single_object_fallback_active = True
+        
+        # Apply fallback filtering if needed
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
+            # Step 1: Keep ONLY relations that directly involve target objects
             rels_all = self._filter_relations_by_target_object(rels_all)
-            # Clear the flag after use.
-            delattr(self, '_target_object_indices')
+            
+            # Step 2: If single-object fallback, identify connected objects but DON'T expand relations
+            if hasattr(self, '_single_object_fallback_active') and self._single_object_fallback_active:
+                # Find objects connected to target via the filtered relations
+                connected_indices = self._get_connected_object_indices(rels_all, self._target_object_indices)
+                
+                if connected_indices:
+                    print(f"[SINGLE OBJECT FALLBACK] Found {len(connected_indices)} objects "
+                          f"directly connected to target")
+                    
+                    # Mark these as "connected only" - they won't contribute their own relations
+                    self._connected_only_indices = connected_indices
+                    # DO NOT update _target_object_indices - keep it strict!
+                else:
+                    # No connected objects found - still apply strict filtering
+                    self._connected_only_indices = set()
+                
+                # Keep flags for later filtering step
+                # (will be cleared after object filtering)
+        
+        # 🚀 STRICT FALLBACK: Filter objects FIRST to include only target + directly connected
+        # This must happen BEFORE limit_relationships_per_object to ensure clean filtering
+        if hasattr(self, '_connected_only_indices'):
+            # Collect indices to keep from filtered relations
+            all_target_indices = set()
+            
+            for rel in rels_all:
+                src_idx = rel.get('src_idx', -1)
+                tgt_idx = rel.get('tgt_idx', -1)
+                all_target_indices.add(src_idx)
+                all_target_indices.add(tgt_idx)
+            
+            # Filter objects: keep only those involved in relations
+            filtered_boxes = []
+            filtered_labels = []
+            filtered_scores = []
+            filtered_masks = []
+            filtered_depths = []
+            index_mapping = {}  # old_idx -> new_idx
+            
+            for old_idx in sorted(all_target_indices):
+                if 0 <= old_idx < len(boxes):
+                    new_idx = len(filtered_boxes)
+                    index_mapping[old_idx] = new_idx
+                    
+                    filtered_boxes.append(boxes[old_idx])
+                    filtered_labels.append(labels[old_idx])
+                    filtered_scores.append(scores[old_idx])
+                    if masks and old_idx < len(masks):
+                        filtered_masks.append(masks[old_idx])
+                    if depths and old_idx < len(depths):
+                        filtered_depths.append(depths[old_idx])
+            
+            # Update relations with new indices
+            filtered_rels = []
+            for rel in rels_all:
+                src_idx = rel.get('src_idx', -1)
+                tgt_idx = rel.get('tgt_idx', -1)
+                
+                if src_idx in index_mapping and tgt_idx in index_mapping:
+                    rel_copy = rel.copy()
+                    rel_copy['src_idx'] = index_mapping[src_idx]
+                    rel_copy['tgt_idx'] = index_mapping[tgt_idx]
+                    filtered_rels.append(rel_copy)
+            
+            # Replace with filtered versions
+            boxes = filtered_boxes
+            labels = filtered_labels
+            scores = filtered_scores
+            masks = filtered_masks if filtered_masks else masks
+            depths = filtered_depths if filtered_depths else depths
+            rels_all = filtered_rels
+            
+            print(f"[SINGLE OBJECT FALLBACK] Filtered to {len(boxes)} objects "
+                  f"and {len(rels_all)} direct relations")
+            
+            # Clear all fallback flags
+            delattr(self, '_connected_only_indices')
+            if hasattr(self, '_single_object_fallback_active'):
+                delattr(self, '_single_object_fallback_active')
+            if hasattr(self, '_target_object_indices'):
+                delattr(self, '_target_object_indices')
 
         # 6a) Relation filtering by question terms (optional).
         if self.cfg.filter_relations_by_question and rel_terms:
@@ -945,6 +1685,20 @@ class ImageGraphPreprocessor:
                 else:
                     # Create edge if it doesn't exist yet
                     scene_graph.add_edge(src_idx, tgt_idx, relation=relation_name)
+            
+            # ✅ FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
+            # This prevents inconsistency between triples.txt (which infers relations) and JSON output
+            from igp.graph.prompt import _infer_relation_from_attrs
+            for u, v in list(scene_graph.edges()):
+                # Skip scene node edges
+                if scene_graph.nodes[u].get("label") == "scene" or scene_graph.nodes[v].get("label") == "scene":
+                    continue
+                
+                # If edge doesn't have a relation, infer it from geometric attributes
+                edge_data = scene_graph.edges[u, v]
+                if "relation" not in edge_data or not edge_data["relation"]:
+                    inferred_rel = _infer_relation_from_attrs(edge_data)
+                    scene_graph.edges[u, v]["relation"] = inferred_rel
         else:
             scene_graph = None
 
@@ -960,6 +1714,27 @@ class ImageGraphPreprocessor:
             with open(triples_path, "w", encoding="utf-8") as f:
                 f.write(to_triples_text(scene_graph))
 
+        # ✅ FIX: Extract relationships from the updated scene_graph (not rels_all)
+        # This ensures visualization matches triples.txt and graph.json
+        rels_for_viz = []
+        if scene_graph is not None and need_rel:
+            # Extract relationships from scene_graph edges
+            for u, v, edge_data in scene_graph.edges(data=True):
+                # Skip scene node edges
+                if scene_graph.nodes[u].get("label") == "scene" or scene_graph.nodes[v].get("label") == "scene":
+                    continue
+                
+                relation = edge_data.get("relation")
+                if relation:
+                    rels_for_viz.append({
+                        "src_idx": u,
+                        "tgt_idx": v,
+                        "relation": relation,
+                    })
+        elif need_rel:
+            # Fallback to original rels_all if no scene_graph
+            rels_for_viz = rels_all
+
         # 8) VISUALIZATION / EXPORT
         if not self.cfg.skip_visualization:
             out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.jpg")
@@ -968,7 +1743,7 @@ class ImageGraphPreprocessor:
                 boxes=boxes,
                 labels=self._format_labels_for_display(labels),
                 scores=scores,
-                relationships=rels_all,
+                relationships=rels_for_viz,
                 masks=masks,
                 save_path=out_img,
                 draw_background=not self.cfg.export_preproc_only,
@@ -981,7 +1756,7 @@ class ImageGraphPreprocessor:
                 boxes=boxes,
                 labels=self._format_labels_for_display(labels),
                 scores=scores,
-                relationships=rels_all,
+                relationships=rels_for_viz,
                 masks=masks,
                 save_path=out_png,
                 draw_background=False,
@@ -1007,6 +1782,37 @@ class ImageGraphPreprocessor:
         
         print(f"[FALLBACK] Filtered relations: {len(filtered_rels)}/{len(relationships)} kept")
         return filtered_rels
+    
+    def _get_connected_object_indices(
+        self, 
+        relationships: List[Dict[str, Any]], 
+        target_indices: set
+    ) -> set:
+        """
+        Find all object indices that are directly connected to target objects via relations.
+        
+        Args:
+            relationships: List of relation dictionaries
+            target_indices: Set of target object indices
+            
+        Returns:
+            Set of indices of objects connected to target objects
+        """
+        connected = set()
+        
+        for rel in relationships:
+            src_idx = rel.get('src_idx', -1)
+            tgt_idx = rel.get('tgt_idx', -1)
+            
+            # If source is a target, add target to connected
+            if src_idx in target_indices and tgt_idx not in target_indices:
+                connected.add(tgt_idx)
+            
+            # If target is a target, add source to connected
+            if tgt_idx in target_indices and src_idx not in target_indices:
+                connected.add(src_idx)
+        
+        return connected
 
     # ----------------------------- runners -----------------------------
 

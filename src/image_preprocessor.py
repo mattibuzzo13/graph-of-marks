@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from igp.config import default_config, PreprocessorConfig
-from igp.pipeline.preprocessor import Preprocessor
+from igp.pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
 
 
 def _parse_args() -> argparse.Namespace:

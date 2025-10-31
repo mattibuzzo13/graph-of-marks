@@ -429,11 +429,22 @@ class RelationInferencer:
 
         final: List[dict] = []
         for i, rlist in rels_by_src.items():
-            rlist_sorted = sorted(
-                rlist,
-                key=lambda r: (0 if _is_question_rel(r["relation"]) else 1, r.get("distance", 1e9)),
-            )
-            final.extend(rlist_sorted[: max_relations_per_object])
+            # Ordina per confidenza/score se presente, altrimenti per distanza
+            def rel_sort_key(r):
+                # Priorità: question term, poi score/confidenza, poi distanza
+                q_priority = 0 if _is_question_rel(r.get("relation", "")) else 1
+                # Usa clip_sim, score, o distance
+                score = r.get("clip_sim", None)
+                if score is None:
+                    score = r.get("score", None)
+                if score is not None:
+                    # Score negativo per ordinare decrescente
+                    return (q_priority, -score, r.get("distance", 1e9))
+                else:
+                    return (q_priority, r.get("distance", 1e9))
+            rlist_sorted = sorted(rlist, key=rel_sort_key)
+            # Mantieni solo le top-N relazioni per oggetto
+            final.extend(rlist_sorted[:max_relations_per_object])
         return final
 
     def _filter_redundant_relations(self, relationships: List[dict]) -> List[dict]:

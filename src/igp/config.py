@@ -45,7 +45,7 @@ except Exception as _exc:
         threshold_detectron: float = 0.80
 
         # per-object relation limits
-        max_relations_per_object: int = 3
+        max_relations_per_object: int = 1
         min_relations_per_object: int = 1
 
         # NMS / fusion
