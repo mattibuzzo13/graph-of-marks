@@ -68,6 +68,10 @@ class VisualizerConfig:
     show_segmentation: bool = True
     fill_segmentation: bool = True
     show_bboxes: bool = True
+    # Use optimized vectorized mask blending when available
+    use_vectorized_masks: bool = False
+    # Use batch text renderer to reduce text draw overhead
+    use_batch_text_renderer: bool = False
 
     # Typography / styling
     obj_fontsize_inside: int = 12
@@ -289,16 +293,58 @@ class Visualizer:
             ordered.append((i, box, depth_idx))
         ordered.sort(key=lambda x: x[2], reverse=True)
 
-        for idx, box, depth in ordered:
-            color = colors[idx]
-            x1, y1, x2, y2 = map(int, box[:4])
-            mask_info = self._get_mask_for_index(idx, masks)
-            z_order = 1 + (len(boxes) - min(depth, len(boxes))) * 0.1
+        # If vectorized mask rendering is enabled and available, produce a
+        # blended image once and then draw contours/boxes as outlines.
+        if cfg.use_vectorized_masks and RENDERING_OPT_AVAILABLE and masks:
+            # Collect masks and colors matching original order
+            masks_list = []
+            colors_list = []
+            for (original_idx, box, depth) in ordered:
+                m = self._get_mask_for_index(original_idx, masks)
+                if m is not None and m.get("segmentation") is not None:
+                    masks_list.append(m["segmentation"])
+                    colors_list.append(colors[original_idx])
+                else:
+                    # keep alignment with None for objects without mask
+                    masks_list.append(None)
+                    colors_list.append(colors[original_idx])
 
-            if cfg.show_segmentation and mask_info is not None and mask_info.get("segmentation") is not None:
-                self._draw_segmentation(ax, mask_info["segmentation"], color, cfg.bbox_linewidth, z_order)
-            elif cfg.show_bboxes:
-                self._draw_bbox(ax, x1, y1, x2, y2, color, cfg.bbox_linewidth, z_order)
+            # Convert PIL image to numpy background
+            try:
+                bg_np = np.asarray(image)
+            except Exception:
+                bg_np = None
+
+            blended = VectorizedMaskRenderer.blend_multiple_masks(
+                masks=masks_list,
+                colors=colors_list,
+                background=bg_np,
+                alpha=cfg.seg_fill_alpha,
+            )
+            ax.imshow(blended, extent=(0, blended.shape[1], blended.shape[0], 0), zorder=1)
+
+            # Draw contours or bbox outlines for each object
+            for (original_idx, box, depth) in ordered:
+                color = colors[original_idx]
+                x1, y1, x2, y2 = map(int, box[:4])
+                mask_info = self._get_mask_for_index(original_idx, masks)
+                z_order = 2 + (len(boxes) - min(depth, len(boxes))) * 0.1
+                if mask_info is not None and mask_info.get("segmentation") is not None:
+                    # draw contour stroke on top of blended image
+                    self._draw_segmentation(ax, mask_info["segmentation"], color, cfg.bbox_linewidth, z_order)
+                elif cfg.show_bboxes:
+                    self._draw_bbox(ax, x1, y1, x2, y2, color, cfg.bbox_linewidth, z_order)
+        else:
+            for idx, box, depth in ordered:
+                color = colors[idx]
+                x1, y1, x2, y2 = map(int, box[:4])
+                mask_info = self._get_mask_for_index(idx, masks)
+                z_order = 1 + (len(boxes) - min(depth, len(boxes))) * 0.1
+
+                if cfg.show_segmentation and mask_info is not None and mask_info.get("segmentation") is not None:
+                    self._draw_segmentation(ax, mask_info["segmentation"], color, cfg.bbox_linewidth, z_order)
+                elif cfg.show_bboxes:
+                    self._draw_bbox(ax, x1, y1, x2, y2, color, cfg.bbox_linewidth, z_order)
 
     def _draw_bbox(
         self, ax: plt.Axes, x1: int, y1: int, x2: int, y2: int, color: str, linewidth: float, zorder: float = 2
@@ -449,6 +495,12 @@ class Visualizer:
         placed_texts: List[Any] = []
         placed_anchors: List[Tuple[float, float]] = []
 
+        # Optionally collect outside labels to render them in batch
+        batch_renderer = None
+        batch_out_specs = []  # list of (border_pos, label_text, color)
+        if cfg.use_batch_text_renderer and RENDERING_OPT_AVAILABLE:
+            batch_renderer = BatchTextRenderer()
+
         for i, box in enumerate(boxes):
             color = colors[i]
             x1, y1, x2, y2 = map(int, box[:4])
@@ -490,42 +542,68 @@ class Visualizer:
             border_pos = (border_x + dx_data, border_y + dy_data)
 
             font_col = text_color_for_bg(color)
-            t = ax.text(
-                border_pos[0],
-                border_pos[1],
-                label_text,
-                fontsize=cfg.obj_fontsize_outside,
-                color=font_col,
-                ha="center",
-                va="bottom",
-                bbox=dict(
-                    facecolor=color,
-                    alpha=1.0,
-                    edgecolor=color,
-                    linewidth=2.0,
-                    boxstyle="round,pad=0.25",
-                ),
-                zorder=7,
-            )
-            placed_texts.append(t)
-            placed_anchors.append((border_x, border_y))
+            if batch_renderer is not None:
+                # Defer rendering; store spec for connector annotation later
+                batch_renderer.add_text(
+                    border_pos[0],
+                    border_pos[1],
+                    label_text,
+                    fontsize=cfg.obj_fontsize_outside,
+                    color=font_col,
+                    bbox_params=dict(facecolor=color, alpha=1.0, edgecolor=color, linewidth=2.0, boxstyle="round,pad=0.25"),
+                    ha="center",
+                    va="bottom",
+                    zorder=7,
+                )
+                batch_out_specs.append((border_x, border_y))
+            else:
+                t = ax.text(
+                    border_pos[0],
+                    border_pos[1],
+                    label_text,
+                    fontsize=cfg.obj_fontsize_outside,
+                    color=font_col,
+                    ha="center",
+                    va="bottom",
+                    bbox=dict(
+                        facecolor=color,
+                        alpha=1.0,
+                        edgecolor=color,
+                        linewidth=2.0,
+                        boxstyle="round,pad=0.25",
+                    ),
+                    zorder=7,
+                )
+                placed_texts.append(t)
+                placed_anchors.append((border_x, border_y))
 
-            # connector dall’anchor (bordo) alla label
-            ax.annotate(
-                "",
-                xy=(border_x, border_y),
-                xytext=t.get_position(),
-                arrowprops=dict(
-                    arrowstyle="-",
-                    color="gray",
-                    alpha=0.45,
-                    shrinkA=4,
-                    shrinkB=4,
-                    linewidth=1,
-                    linestyle="-",
-                ),
-                zorder=6,
-            )
+                # connector dall’anchor (bordo) alla label
+                ax.annotate(
+                    "",
+                    xy=(border_x, border_y),
+                    xytext=t.get_position(),
+                    arrowprops=dict(
+                        arrowstyle="-",
+                        color="gray",
+                        alpha=0.45,
+                        shrinkA=4,
+                        shrinkB=4,
+                        linewidth=1,
+                        linestyle="-",
+                    ),
+                    zorder=6,
+                )
+
+        # If we deferred outside labels to batch rendering, render them now and
+        # create connectors/anchors for overlap resolution.
+        if batch_renderer is not None:
+            created = batch_renderer.render_all(ax)
+            # created aligns with batch_out_specs order
+            for t, (bx, by) in zip(created, batch_out_specs):
+                placed_texts.append(t)
+                placed_anchors.append((bx, by))
+                # connector
+                ax.annotate("", xy=(bx, by), xytext=t.get_position(), arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="-"), zorder=6)
 
         # 3) risolvi overlap tra label di oggetti
         if placed_texts and cfg.resolve_overlaps:

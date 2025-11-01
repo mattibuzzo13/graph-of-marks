@@ -15,10 +15,10 @@ class VectorizedMaskRenderer:
     
     @staticmethod
     def blend_multiple_masks(
-        image: np.ndarray,
         masks: List[np.ndarray],
         colors: List[Tuple[float, float, float]],
-        alpha: float = 0.6
+        background: Optional[np.ndarray] = None,
+        alpha: float = 0.6,
     ) -> np.ndarray:
         """
         Blend multiple masks onto image using vectorized numpy operations.
@@ -32,35 +32,52 @@ class VectorizedMaskRenderer:
         Returns:
             Blended image
         """
-        H, W = image.shape[:2]
-        result = image.copy().astype(np.float32) / 255.0
-        
-        # Pre-allocate color layer
+        # Determine H,W and base image
+        if background is not None:
+            base = background.copy().astype(np.float32) / 255.0
+        else:
+            # infer shape from first non-None mask
+            H = W = None
+            for m in masks:
+                if m is not None:
+                    H, W = m.shape[:2]
+                    break
+            if H is None or W is None:
+                raise ValueError("Cannot infer background size from empty masks and no background provided")
+            base = np.ones((H, W, 3), dtype=np.float32)
+
+        H, W = base.shape[:2]
+
         color_layer = np.zeros((H, W, 3), dtype=np.float32)
         mask_total = np.zeros((H, W), dtype=np.float32)
-        
-        # Vectorized blending: accumulate all masks at once
+
         for mask, color in zip(masks, colors):
             if mask is None:
                 continue
-            
-            mask_bool = mask.astype(bool)
-            color_arr = np.array(color, dtype=np.float32)
-            
-            # Add weighted contribution
-            color_layer[mask_bool] += color_arr * alpha
-            mask_total[mask_bool] += alpha
-        
-        # Normalize where masks overlap
-        overlap = mask_total > 0
-        if overlap.any():
-            color_layer[overlap] /= mask_total[overlap, None]
-        
-        # Blend with original image
-        result = (1 - alpha) * result + color_layer
-        result = np.clip(result * 255, 0, 255).astype(np.uint8)
-        
-        return result
+            m_bool = mask.astype(bool)
+            # Accept matplotlib color strings (eg. '#rrggbb') or numeric tuples
+            try:
+                import matplotlib.colors as mcolors
+                color_rgb = mcolors.to_rgb(color)
+                color_arr = np.array(color_rgb, dtype=np.float32)
+            except Exception:
+                color_arr = np.array(color, dtype=np.float32)
+            # accumulate weighted color and alpha
+            color_layer[m_bool] += color_arr * float(alpha)
+            mask_total[m_bool] += float(alpha)
+
+        # avoid division by zero
+        mask_total_safe = np.where(mask_total > 0, mask_total, 1.0)
+        # per-pixel normalized color where any mask exists
+        norm_color = color_layer.copy()
+        norm_color[mask_total > 0] = (color_layer[mask_total > 0] / mask_total_safe[mask_total > 0, None])
+
+        # clip total alpha to [0,1]
+        alpha_total = np.clip(mask_total, 0.0, 1.0)
+
+        out = (1.0 - alpha_total[..., None]) * base + (alpha_total[..., None] * norm_color)
+        out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
+        return out
 
 
 class BatchTextRenderer:
@@ -101,9 +118,9 @@ class BatchTextRenderer:
         """Render all queued text items at once."""
         # Sort by zorder for consistent rendering
         self.text_items.sort(key=lambda item: item.get("zorder", 5))
-        
+        artists = []
         for item in self.text_items:
-            ax.text(
+            t = ax.text(
                 item["x"],
                 item["y"],
                 item["text"],
@@ -114,8 +131,10 @@ class BatchTextRenderer:
                 bbox=item["bbox"],
                 zorder=item["zorder"],
             )
-        
+            artists.append(t)
+
         self.text_items.clear()
+        return artists
 
 
 class GeometricOptimizer:
