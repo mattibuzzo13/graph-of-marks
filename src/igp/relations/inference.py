@@ -158,6 +158,7 @@ class RelationInferencer:
     def __init__(
         self,
         clip_scorer: Optional[ClipRelScorer] = None,
+        relations_config: Optional[RelationsConfig] = None,
         *,
         margin_px: int = 20,
         min_distance: float = 5.0,
@@ -166,12 +167,47 @@ class RelationInferencer:
         max_workers: Optional[int] = None,
     ) -> None:
         self.clip = clip_scorer
+        # Relations configuration (controls optional reasoners)
+        self.config = relations_config or RelationsConfig()
         self.margin_px = int(margin_px)
         self.min_distance = float(min_distance)
         self.max_distance = float(max_distance)
         self.enable_parallel = enable_parallel
         # Use all available CPUs by default unless an explicit max_workers provided.
         self.max_workers = int(max_workers) if max_workers is not None else (os.cpu_count() or 1)
+
+        # Optional advanced reasoners (instantiated if available and enabled)
+        self.llm = None
+        self.spatial3d = None
+        self.physics = None
+
+        try:
+            if getattr(self.config, "use_llm_relations", False) and LLM_AVAILABLE and LLMRelationInferencer is not None:
+                llm_conf = LLMRelationsConfig()
+                # propagate minimal settings from RelationsConfig
+                llm_conf.backend = getattr(self.config, "llm_backend", llm_conf.backend)
+                llm_conf.api_key = getattr(self.config, "llm_api_key", llm_conf.api_key)
+                llm_conf.confidence_threshold = getattr(self.config, "llm_confidence_threshold", llm_conf.confidence_threshold)
+                self.llm = LLMRelationInferencer(llm_conf)
+                print("[RelationInferencer] LLMRelationInferencer activated")
+        except Exception as e:
+            print(f"[RelationInferencer] Warning: failed to initialize LLM reasoner: {e}")
+
+        try:
+            if getattr(self.config, "use_3d_reasoning", False) and SPATIAL_3D_AVAILABLE and Spatial3DReasoner is not None:
+                sp_conf = Spatial3DConfig()
+                self.spatial3d = Spatial3DReasoner(sp_conf)
+                print("[RelationInferencer] Spatial3DReasoner activated")
+        except Exception as e:
+            print(f"[RelationInferencer] Warning: failed to initialize Spatial3D reasoner: {e}")
+
+        try:
+            if getattr(self.config, "use_physics_filtering", False) and PHYSICS_AVAILABLE and PhysicsReasoner is not None:
+                phys_conf = PhysicsConfig()
+                self.physics = PhysicsReasoner(phys_conf)
+                print("[RelationInferencer] PhysicsReasoner activated")
+        except Exception as e:
+            print(f"[RelationInferencer] Warning: failed to initialize Physics reasoner: {e}")
     
     def _compute_directional_relation_pair(
         self,
@@ -391,6 +427,22 @@ class RelationInferencer:
                             inverse_relation = _INVERSE.get(relation)
                             if inverse_relation:
                                 rels.append({"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist_ij})
+                # Spatial3D reasoner: try to infer depth-based / occlusion / support relations
+                if self.spatial3d is not None:
+                    try:
+                        # only run when depth information is available
+                        if depths is not None or depth_map is not None:
+                            rels_3d = self.spatial3d.infer_3d_relations(
+                                boxes=boxes,
+                                depth_map=depth_map,
+                                depths=depths,
+                                masks=masks,
+                                image_size=(image_pil.width, image_pil.height) if image_pil is not None else None,
+                            )
+                            if rels_3d:
+                                rels.extend(rels_3d)
+                    except Exception as e:
+                        print(f"[RelationInferencer] Warning: spatial3d inference failed: {e}")
             except Exception:
                 # If any error in vectorized path, fallback to previous pairwise logic
                 centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
@@ -461,6 +513,33 @@ class RelationInferencer:
                                 }
                             )
 
+        # Optional LLM-guided relations (use CLIP/geometry as context)
+        if self.llm is not None:
+            try:
+                llm_rels = self.llm.infer_relations(
+                    image=image_pil,
+                    boxes=boxes,
+                    labels=labels,
+                    existing_relations=rels,
+                )
+                # normalize returned relations and merge
+                for r in llm_rels:
+                    # Accept either 'src_idx'/'tgt_idx' or 'src'/'tgt'
+                    if "src" in r and "tgt" in r and "src_idx" not in r:
+                        r["src_idx"] = r.pop("src")
+                        r["tgt_idx"] = r.pop("tgt")
+                    # promote LLM confidence into clip_sim for unified ranking
+                    conf = r.get("confidence") or r.get("score") or r.get("llm_confidence")
+                    if conf is not None:
+                        try:
+                            r["clip_sim"] = float(conf)
+                        except Exception:
+                            pass
+                if llm_rels:
+                    rels.extend(llm_rels)
+            except Exception as e:
+                print(f"[RelationInferencer] Warning: LLM inference failed: {e}")
+
         rels = self._unify_pair_relations(rels)
         # Filter out semantically impossible relations (e.g., inanimate wearing objects)
         try:
@@ -468,6 +547,23 @@ class RelationInferencer:
         except Exception:
             # best-effort: if filter fails, keep original relations
             pass
+
+        # Optional physics-based filtering/scoring (post semantic-filter)
+        if self.physics is not None:
+            try:
+                # allow physics reasoner to add support relations (if configured)
+                if getattr(self.config, "check_support", True):
+                    try:
+                        support_rels = self.physics.detect_support_relations(boxes, depths=depths, masks=masks)
+                        if support_rels:
+                            rels.extend(support_rels)
+                    except Exception:
+                        pass
+
+                # Filter and score relations by physics plausibility
+                rels = self.physics.filter_relations(rels, boxes, depths=depths, masks=masks)
+            except Exception as e:
+                print(f"[RelationInferencer] Warning: physics filter failed: {e}")
 
         if filter_redundant:
             rels = self._filter_redundant_relations(rels)

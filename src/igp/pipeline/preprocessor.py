@@ -250,6 +250,11 @@ class PreprocessorConfig:
     skip_depth_when_unused: bool = True
     skip_segmentation_when_unused: bool = True
 
+    # Enable optional Spatial3D reasoning (off by default). When True, the
+    # RelationInferencer will attempt to instantiate the Spatial3DReasoner (if
+    # available) and run depth/occlusion/support inference.
+    enable_spatial_3d: bool = False
+
     # device
     preproc_device: Optional[str] = None  # e.g., "cpu" or "cuda"
 
@@ -342,21 +347,30 @@ class ImageGraphPreprocessor:
             ClipRelScorer = None
 
         clip_scorer = None
+        # Create a ClipRelScorer but DO NOT persist the disk DB. The persistent
+        # cache (.igp_clip_cache.db) is disabled to avoid writing files during
+        # runs; in-memory caching is still used within the process.
         if ClipRelScorer is not None and getattr(self, "clip", None) is not None:
             try:
-                cache_path = os.path.join(self.cfg.output_folder, ".igp_clip_cache.db")
                 clip_scorer = ClipRelScorer(
                     device=self.device,
                     clip=self.clip,
-                    disk_cache_path=cache_path,
-                    disk_cache_max_age_days=getattr(self.cfg, "clip_cache_max_age_days", None),
+                    # do not pass disk_cache_path -> persistent DB disabled
                     batch_size=getattr(self.cfg, "batch_size", 16),
                 )
             except Exception:
                 clip_scorer = ClipRelScorer(device=self.device, clip=self.clip)
 
+        # Enable Spatial3D reasoning by default if depth estimator is available
+        rels_cfg = RelationsConfig()
+        # Honor explicit preprocessor flags if present; defer to the
+        # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
+        # CLI or overrides. Defaults to False.
+        rels_cfg.use_3d_reasoning = bool(getattr(self.cfg, "enable_spatial_3d", False))
+
         self.relations_inferencer = RelationInferencer(
             clip_scorer,
+            relations_config=rels_cfg,
             margin_px=config.margin,
             min_distance=config.min_distance,
             max_distance=config.max_distance,

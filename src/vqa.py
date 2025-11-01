@@ -66,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--stability_score_thresh", type=float, default=0.92)
     ap.add_argument("--min_mask_region_area", type=int, default=100)
     ap.add_argument("--preproc_device", type=str, default=None)
+    ap.add_argument("--enable_spatial_3d", action="store_true",
+                   help="Enable Spatial3D reasoning in the preprocessor (depth/occlusion/support).")
     
     ap.add_argument("--aggressive_pruning", action="store_true",
                    help="Tieni solo oggetti citati e relazioni richieste (pruning più duro)")
@@ -205,6 +207,7 @@ def main() -> int:
         'export_preproc_only': True if args.export_preproc_only else None,
         'enable_detection_cache': True if args.enable_detection_cache else None,
         'max_cache_size': args.max_cache_size if args.max_cache_size != 100 else None,
+        'enable_spatial_3d': True if args.enable_spatial_3d else None,
     }
     
     # Optional: pin preprocessor device
