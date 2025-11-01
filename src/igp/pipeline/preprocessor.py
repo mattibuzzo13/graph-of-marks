@@ -179,6 +179,9 @@ class PreprocessorConfig:
     max_relations_per_object: int = 1
     min_relations_per_object: int = 1
 
+    # CLIP cache tuning
+    clip_cache_max_age_days: Optional[float] = 30.0  # default TTL for disk cache (days)
+
     # NMS / fusion
     label_nms_threshold: float = 0.50
     seg_iou_threshold: float = 0.70
@@ -331,10 +334,32 @@ class ImageGraphPreprocessor:
             self.clip = CLIPWrapper(config=clip_config) 
 
         # Relation inference with geometric constraints and optional CLIP.
+        # If we have a CLIP wrapper available, create a ClipRelScorer and pass
+        # it to the inferencer so batched scoring + persistent cache are used.
+        try:
+            from igp.relations.clip_rel import ClipRelScorer
+        except Exception:
+            ClipRelScorer = None
+
+        clip_scorer = None
+        if ClipRelScorer is not None and getattr(self, "clip", None) is not None:
+            try:
+                cache_path = os.path.join(self.cfg.output_folder, ".igp_clip_cache.db")
+                clip_scorer = ClipRelScorer(
+                    device=self.device,
+                    clip=self.clip,
+                    disk_cache_path=cache_path,
+                    disk_cache_max_age_days=getattr(self.cfg, "clip_cache_max_age_days", None),
+                    batch_size=getattr(self.cfg, "batch_size", 16),
+                )
+            except Exception:
+                clip_scorer = ClipRelScorer(device=self.device, clip=self.clip)
+
         self.relations_inferencer = RelationInferencer(
+            clip_scorer,
             margin_px=config.margin,
             min_distance=config.min_distance,
-            max_distance=config.max_distance
+            max_distance=config.max_distance,
         )
 
         # Visualization configuration (keeps visual output consistent for the paper).

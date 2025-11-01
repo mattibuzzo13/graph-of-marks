@@ -31,6 +31,13 @@ from .geometry import (
     vertical_overlap,
 )
 
+try:
+    from .semantic_filter import filter_impossible_relations as _semantic_filter
+    _SEMANTIC_FILTER_AVAILABLE = True
+except Exception:
+    _semantic_filter = None  # type: ignore
+    _SEMANTIC_FILTER_AVAILABLE = False
+
 # 🚀 SOTA modules (optional)
 try:
     from .llm_guided import LLMRelationInferencer, LLMRelationsConfig
@@ -163,9 +170,8 @@ class RelationInferencer:
         self.min_distance = float(min_distance)
         self.max_distance = float(max_distance)
         self.enable_parallel = enable_parallel
-        self.max_workers = max_workers or min(4, (os.cpu_count() or 1))
-        self.min_distance = float(min_distance)
-        self.max_distance = float(max_distance)
+        # Use all available CPUs by default unless an explicit max_workers provided.
+        self.max_workers = int(max_workers) if max_workers is not None else (os.cpu_count() or 1)
     
     def _compute_directional_relation_pair(
         self,
@@ -317,46 +323,107 @@ class RelationInferencer:
 
         # ---------- 3) Geometry: above/below/left/right with improved criteria ----------
         if use_geometry:
-            centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
-            
-            # Generate all unique pairs (i, j) where i < j
-            pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
-            
-            # Parallel or sequential processing based on configuration and pair count
-            if self.enable_parallel and len(pairs) > 10:
-                # Parallel processing for better performance with many objects
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            self._compute_directional_relation_pair,
-                            i, j, boxes, centers
-                        ): (i, j)
-                        for i, j in pairs
-                    }
-                    
-                    for future in as_completed(futures):
-                        try:
-                            pair_rels = future.result()
-                            rels.extend(pair_rels)
-                        except Exception as e:
-                            # Log error but continue processing other pairs
-                            i, j = futures[future]
-                            print(f"Warning: Error computing relation for pair ({i}, {j}): {e}")
-            else:
-                # Sequential processing for small object counts or if parallel disabled
-                for i, j in pairs:
-                    pair_rels = self._compute_directional_relation_pair(i, j, boxes, centers)
-                    rels.extend(pair_rels)
+            # Try a vectorized path to compute directional relations for many boxes.
+            try:
+                boxes_np = np.asarray(boxes, dtype=float)
+                x1 = boxes_np[:, 0]
+                y1 = boxes_np[:, 1]
+                x2 = boxes_np[:, 2]
+                y2 = boxes_np[:, 3]
 
-        # ---------- 4) CLIP scoring ----------
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+
+                # pairwise deltas: [i,j] = coord_j - coord_i
+                dx = cx[None, :] - cx[:, None]
+                dy = cy[None, :] - cy[:, None]
+                dist = np.hypot(dx, dy)
+
+                # distance masks
+                mask = (dist >= self.min_distance) & (dist <= self.max_distance)
+                np.fill_diagonal(mask, False)
+
+                # sizes
+                w = (x2 - x1)
+                h = (y2 - y1)
+                avg_size = (w[:, None] + h[:, None] + w[None, :] + h[None, :]) / 4.0
+                margin = np.maximum(self.margin_px, avg_size * 0.15)
+
+                # pairwise intersection dims
+                inter_w = np.minimum(x2[:, None], x2[None, :]) - np.maximum(x1[:, None], x1[None, :])
+                inter_h = np.minimum(y2[:, None], y2[None, :]) - np.maximum(y1[:, None], y1[None, :])
+                inter_w = np.maximum(inter_w, 0.0)
+                inter_h = np.maximum(inter_h, 0.0)
+
+                area = w * h
+                union = area[:, None] + area[None, :] - (inter_w * inter_h)
+                iou_mat = np.zeros_like(union)
+                nz = union > 0
+                if np.any(nz):
+                    iou_mat[nz] = (inter_w * inter_h)[nz] / union[nz]
+
+                # ignore pairs with strong IoU
+                mask &= (iou_mat <= 0.3)
+
+                abs_dx = np.abs(dx)
+                abs_dy = np.abs(dy)
+
+                # vertical candidate: |dy| >= |dx| and |dy| > margin
+                vertical_mask = (abs_dy >= abs_dx) & (abs_dy > margin) & mask
+                # exclude if vertical overlap too large
+                vertical_mask &= (inter_h <= (np.maximum(h[:, None], h[None, :]) * 0.5))
+
+                # horizontal candidate: |dx| > margin
+                horizontal_mask = (abs_dx > margin) & mask
+                horizontal_mask &= (inter_w <= (np.maximum(w[:, None], w[None, :]) * 0.5))
+
+                # iterate only over i < j to add primary+inverse relations (same semantics as before)
+                n_idx = boxes_np.shape[0]
+                for i in range(n_idx):
+                    for j in range(i + 1, n_idx):
+                        if vertical_mask[i, j] or horizontal_mask[i, j]:
+                            if vertical_mask[i, j]:
+                                relation = "above" if cy[i] < cy[j] else "below"
+                            else:
+                                relation = "left_of" if cx[i] < cx[j] else "right_of"
+                            dist_ij = float(dist[i, j])
+                            rels.append({"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist_ij})
+                            inverse_relation = _INVERSE.get(relation)
+                            if inverse_relation:
+                                rels.append({"src_idx": j, "tgt_idx": i, "relation": inverse_relation, "distance": dist_ij})
+            except Exception:
+                # If any error in vectorized path, fallback to previous pairwise logic
+                centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+                pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+                if self.enable_parallel and len(pairs) > 1:
+                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                        futures = {
+                            executor.submit(
+                                self._compute_directional_relation_pair,
+                                i, j, boxes, centers
+                            ): (i, j)
+                            for i, j in pairs
+                        }
+                        for future in as_completed(futures):
+                            try:
+                                pair_rels = future.result()
+                                rels.extend(pair_rels)
+                            except Exception as e:
+                                i, j = futures[future]
+                                print(f"Warning: Error computing relation for pair ({i}, {j}): {e}")
+                else:
+                    for i, j in pairs:
+                        pair_rels = self._compute_directional_relation_pair(i, j, boxes, centers)
+                        rels.extend(pair_rels)
+
+        # ---------- 4) CLIP scoring (batched) ----------
         if use_clip and self.clip is not None:
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        continue
-                    rel_canon, rel_raw, score = self.clip.best_relation(
-                        image_pil, boxes[i], boxes[j], labels[i], labels[j]
-                    )
+            # Build list of directed pairs
+            clip_pairs = [(i, j) for i in range(n) for j in range(n) if i != j]
+            try:
+                for i, j, rel_canon, rel_raw, score in self.clip.batch_best_relations(
+                    image_pil=image_pil, boxes=boxes, labels=labels, pairs=clip_pairs
+                ):
                     if score > clip_threshold:
                         dist = center_distance(boxes[i], boxes[j])
                         rels.append(
@@ -369,9 +436,39 @@ class RelationInferencer:
                                 "distance": dist,
                             }
                         )
+            except Exception:
+                # Fallback to original per-pair scoring if batch fails
+                for i in range(n):
+                    for j in range(n):
+                        if i == j:
+                            continue
+                        try:
+                            rel_canon, rel_raw, score = self.clip.best_relation(
+                                image_pil, boxes[i], boxes[j], labels[i], labels[j]
+                            )
+                        except Exception:
+                            continue
+                        if score > clip_threshold:
+                            dist = center_distance(boxes[i], boxes[j])
+                            rels.append(
+                                {
+                                    "src_idx": i,
+                                    "tgt_idx": j,
+                                    "relation": rel_canon,
+                                    "relation_raw": rel_raw,
+                                    "clip_sim": float(score),
+                                    "distance": dist,
+                                }
+                            )
 
         rels = self._unify_pair_relations(rels)
-        
+        # Filter out semantically impossible relations (e.g., inanimate wearing objects)
+        try:
+            rels = self._filter_impossible_relations(rels, labels)
+        except Exception:
+            # best-effort: if filter fails, keep original relations
+            pass
+
         if filter_redundant:
             rels = self._filter_redundant_relations(rels)
             
@@ -542,6 +639,63 @@ class RelationInferencer:
             return 1.0 / (1.0 + dist / 100.0)
         else:
             return 0.5  # default for purely geometric relations
+
+    def _filter_impossible_relations(self, relationships: List[dict], labels: Sequence[str]) -> List[dict]:
+        """Delegate semantic filtering to the optional semantic filter helper.
+
+        The heavy lifting is done in `src.igp.relations.semantic_filter`. If
+        that module or WordNet is unavailable, we still behave conservatively
+        by falling back to a lightweight heuristic.
+        """
+        if not relationships:
+            return relationships
+
+        # Prefer the richer semantic filter when available
+        if _SEMANTIC_FILTER_AVAILABLE and _semantic_filter is not None:
+            try:
+                return _semantic_filter(relationships, labels)
+            except Exception:
+                # best-effort: fall through to conservative heuristic
+                pass
+
+        # Conservative fallback (previous heuristics)
+        animates = {
+            "person",
+            "man",
+            "woman",
+            "child",
+            "boy",
+            "girl",
+            "human",
+            "people",
+        }
+        require_animate_subj = {"wearing", "holding", "riding", "sitting_on", "carrying"}
+
+        out: List[dict] = []
+        for r in relationships:
+            rel = str(r.get("relation", "")).lower()
+            s_idx = int(r["src_idx"]) if "src_idx" in r else None
+            t_idx = int(r["tgt_idx"]) if "tgt_idx" in r else None
+
+            subj_label = labels[s_idx] if s_idx is not None and s_idx < len(labels) else ""
+            obj_label = labels[t_idx] if t_idx is not None and t_idx < len(labels) else ""
+
+            subj_norm = str(subj_label).lower()
+            obj_norm = str(obj_label).lower()
+
+            subj_is_animate = any(tok in subj_norm for tok in animates) or subj_norm in animates
+
+            if rel in require_animate_subj and not subj_is_animate:
+                continue
+
+            if rel == "wearing":
+                wearable_tokens = ("hat", "cap", "glasses", "shirt", "jacket", "coat", "shoe", "shoes", "pants", "skirt", "dress", "tie", "scarf", "watch")
+                if not any(tok in obj_norm for tok in wearable_tokens):
+                    continue
+
+            out.append(r)
+
+        return out
 
     def drop_inverse_duplicates(
         self,
