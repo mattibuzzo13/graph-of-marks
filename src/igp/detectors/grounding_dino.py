@@ -234,7 +234,48 @@ class GroundingDINODetector(Detector):
         
         TODO: Implement true batched inference for speedup.
         """
-        return [self.detect(img) for img in images]
+        # Best-effort parallelization for I/O-bound or CPU-bound workloads.
+        if not images:
+            return []
+        try:
+            import concurrent.futures
+            max_workers = min(len(images), 4)
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(self.detect, img) for img in images]
+                for f in futures:
+                    results.append(f.result())
+            return results
+        except Exception:
+            # Fallback to sequential detect
+            return [self.detect(img) for img in images]
+
+    def warmup(self, example_image=None, use_half: Optional[bool] = None) -> None:
+        """Best-effort warmup: run a small predict to allocate model memory."""
+        if example_image is None:
+            return
+        try:
+            img = example_image
+            if hasattr(img, "mode") and img.mode != "RGB":
+                img = img.convert("RGB")
+            image_np = np.array(img)
+            # call the predict util to run a tiny forward; ignore results
+            try:
+                from groundingdino.util.inference import predict
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    _ = predict(
+                        model=self.model,
+                        image=image_np,
+                        caption=self.text_prompt,
+                        box_threshold=self.box_threshold,
+                        text_threshold=self.text_threshold,
+                        device=self.device,
+                    )
+            except Exception:
+                # best-effort only
+                pass
+        except Exception:
+            pass
     
     def close(self) -> None:
         """Release GPU memory."""

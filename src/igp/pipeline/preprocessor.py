@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import logging
+import warnings
 
 # ---------- detectors ----------
 from igp.detectors.base import Detector
@@ -258,6 +260,11 @@ class PreprocessorConfig:
     # device
     preproc_device: Optional[str] = None  # e.g., "cpu" or "cuda"
 
+    # logging / verbosity
+    verbose: bool = False
+    # If True, suppress noisy library warnings (Deprecation/User/Resource) during preprocessing
+    suppress_warnings: bool = True
+
     # rendering toggles
     label_mode: str = "original"
     display_labels: bool = True
@@ -308,6 +315,13 @@ class ImageGraphPreprocessor:
 
     def __init__(self, config: PreprocessorConfig) -> None:
         self.cfg = config
+        # per-instance logger
+        self.logger = logging.getLogger(__name__)
+        try:
+            if getattr(self.cfg, "verbose", False):
+                self.logger.setLevel(logging.INFO)
+        except Exception:
+            pass
         os.makedirs(self.cfg.output_folder, exist_ok=True)
 
         # Device selection with CUDA fallback if available.
@@ -419,7 +433,8 @@ class ImageGraphPreprocessor:
         if self.cfg.use_model_cache:
             # Just verify it's available, no need to store instance
             self.model_registry = ModelRegistry  # Store class reference
-            print("[Performance] Model Registry enabled (caching models)")
+            if getattr(self.cfg, "verbose", False):
+                self.logger.info("[Performance] Model Registry enabled (caching models)")
         else:
             self.model_registry = None
         
@@ -433,7 +448,8 @@ class ImageGraphPreprocessor:
                 dtype=dtype,
                 device=self.device,
             )
-            print(f"[Performance] Mixed Precision enabled ({self.mixed_precision.dtype})")
+            if getattr(self.cfg, "verbose", False):
+                self.logger.info(f"[Performance] Mixed Precision enabled ({self.mixed_precision.dtype})")
         else:
             self.mixed_precision = None
         
@@ -444,13 +460,26 @@ class ImageGraphPreprocessor:
                 resize_mode="pad",  # Preserve aspect ratio
             )
             self.batch_processor = BatchProcessor(batch_config)
-            print(f"[Performance] Batch Processing enabled (batch_size={self.cfg.batch_size})")
+            if getattr(self.cfg, "verbose", False):
+                self.logger.info(f"[Performance] Batch Processing enabled (batch_size={self.cfg.batch_size})")
         else:
             self.batch_processor = None
         self._detection_cache = ImageDetectionCache(
             max_items=self.cfg.max_cache_size,
             max_size_mb=500.0  # 500 MB max cache size
         )
+
+    @contextlib.contextmanager
+    def _maybe_suppress_warnings(self):
+        """Context manager: suppress common noisy warnings when configured."""
+        if getattr(self.cfg, "suppress_warnings", True):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                warnings.simplefilter("ignore", category=DeprecationWarning)
+                warnings.simplefilter("ignore", category=ResourceWarning)
+                yield
+        else:
+            yield
 
     # ----------------------------- setup helpers -----------------------------
 
@@ -462,8 +491,12 @@ class ImageGraphPreprocessor:
         # 🚀 SOTA: Grounding DINO (open-vocabulary, better than OWL-ViT)
         if "grounding_dino" in names or "groundingdino" in names:
             if not GROUNDING_DINO_AVAILABLE:
-                print("[WARNING] Grounding DINO requested but not installed. Skipping.")
-                print("Install with: pip install groundingdino-py")
+                # important: missing optional dependency — warn the user
+                if getattr(self.cfg, "verbose", False):
+                    self.logger.warning("[WARNING] Grounding DINO requested but not installed. Skipping.")
+                    self.logger.info("Install with: pip install groundingdino-py")
+                else:
+                    self.logger.warning("Grounding DINO requested but not installed; skipping (set verbose=True for details)")
             else:
                 dets.append(GroundingDINODetector(
                     model_name=self.cfg.grounding_dino_model,
@@ -510,8 +543,11 @@ class ImageGraphPreprocessor:
         # 🚀 SOTA FastSAM: 10x faster than SAM2
         if self.cfg.sam_version == "fast":
             if not FASTSAM_AVAILABLE or FastSAMSegmenter is None:
-                print("[WARNING] FastSAM requested but not installed. Falling back to SAM2.")
-                print("         Install with: pip install git+https://github.com/CASIA-IVA-Lab/FastSAM.git")
+                if getattr(self.cfg, "verbose", False):
+                    self.logger.warning("[WARNING] FastSAM requested but not installed. Falling back to SAM2.")
+                    self.logger.info("Install with: pip install git+https://github.com/CASIA-IVA-Lab/FastSAM.git")
+                else:
+                    self.logger.warning("FastSAM requested but not installed; falling back to SAM2 (set verbose=True for details)")
                 return Sam2Segmenter(config=s_cfg)
             
             return FastSAMSegmenter(
@@ -525,8 +561,11 @@ class ImageGraphPreprocessor:
         # 🚀 SOTA MobileSAM: 60x faster than SAM (ViT-B), best for mobile/edge
         if self.cfg.sam_version == "mobile":
             if not FASTSAM_AVAILABLE or MobileSAMSegmenter is None:
-                print("[WARNING] MobileSAM requested but not installed. Falling back to SAM1.")
-                print("         Install with: pip install git+https://github.com/ChaoningZhang/MobileSAM.git")
+                if getattr(self.cfg, "verbose", False):
+                    self.logger.warning("[WARNING] MobileSAM requested but not installed. Falling back to SAM1.")
+                    self.logger.info("Install with: pip install git+https://github.com/ChaoningZhang/MobileSAM.git")
+                else:
+                    self.logger.warning("MobileSAM requested but not installed; falling back to SAM1 (set verbose=True for details)")
                 return Sam1Segmenter(config=s_cfg)
             
             return MobileSAMSegmenter(config=s_cfg)
@@ -667,7 +706,7 @@ class ImageGraphPreprocessor:
                 try:
                     det_batch_results = det.detect_batch(images)
                 except Exception as e:
-                    print(f"[WARN] Batch detection failed for {src_name}, falling back to sequential: {e}")
+                    self.logger.warning(f"[WARN] Batch detection failed for {src_name}, falling back to sequential: {e}")
                     det_batch_results = [det.run(img) for img in images]
             else:
                 # Fallback: parallelize per-image calls for this detector
@@ -882,7 +921,7 @@ class ImageGraphPreprocessor:
         except Exception as e:
             # Silent fallback - don't break the pipeline
             if hasattr(self, '_verbose') and self._verbose:
-                print(f"[WARNING] CLIP semantic scoring failed: {e}")
+                self.logger.warning(f"[WARNING] CLIP semantic scoring failed: {e}")
         
         return semantic_scores
     
@@ -1492,8 +1531,8 @@ class ImageGraphPreprocessor:
                     'labels': lb_q,
                     'scores': sc_q
                 }
-                print(f"[SINGLE OBJECT DETECTED] '{lb_q[0]}' mentioned in question "
-                      f"({len(bx_q)} instance(s) found)")
+                if getattr(self.cfg, "verbose", False):
+                    self.logger.info(f"[SINGLE OBJECT DETECTED] '{lb_q[0]}' mentioned in question ({len(bx_q)} instance(s) found)")
 
         if self.cfg.aggressive_pruning:
             # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
@@ -1503,7 +1542,8 @@ class ImageGraphPreprocessor:
                 
                 # Fallback: if only one object survives, restore all objects and filter relations later.
                 if len(boxes) == 1:
-                    print(f"[FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
                     
                     boxes, labels, scores = original_boxes, original_labels, original_scores
                     # Record the target object's indices to later keep only relations involving it.
@@ -1512,8 +1552,9 @@ class ImageGraphPreprocessor:
                                     if base_label(label) == base_label(target_obj_label)]
                     
                     self._target_object_indices = set(target_indices)
-                    print(f"[FALLBACK] Target object: {target_obj_label}, indices: {target_indices}")
-                    print(f"[FALLBACK] Restored {len(boxes)} total objects")
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[FALLBACK] Target object: {target_obj_label}, indices: {target_indices}")
+                        self.logger.info(f"[FALLBACK] Restored {len(boxes)} total objects")
 
         # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores)
@@ -1539,8 +1580,8 @@ class ImageGraphPreprocessor:
                 # If too few objects have high scores, lower the threshold
                 if high_scoring < self.cfg.min_objects_per_question:
                     # Keep top-K objects by detection confidence as fallback
-                    print(f"[FALSE NEGATIVE REDUCTION] Only {high_scoring} objects with CLIP score > 0.4, "
-                          f"keeping at least {self.cfg.min_objects_per_question} objects")
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[FALSE NEGATIVE REDUCTION] Only {high_scoring} objects with CLIP score > 0.4, keeping at least {self.cfg.min_objects_per_question} objects")
 
         # 4) LIGHT PRUNING (area, per-label, total) BEFORE SEGMENTATION
         # 🚀 Pass question terms + CLIP scores for semantic-aware pruning
@@ -1631,8 +1672,8 @@ class ImageGraphPreprocessor:
                 
                 if len(unique_labels) == 1:
                     # Only target object type remains - apply strict fallback
-                    print(f"[SINGLE OBJECT FALLBACK] Only '{target_label}' detected, "
-                          f"including ONLY directly connected objects and relations")
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[SINGLE OBJECT FALLBACK] Only '{target_label}' detected, including ONLY directly connected objects and relations")
                     self._target_object_indices = set(target_indices)
                     self._single_object_fallback_active = True
         
@@ -1647,8 +1688,8 @@ class ImageGraphPreprocessor:
                 connected_indices = self._get_connected_object_indices(rels_all, self._target_object_indices)
                 
                 if connected_indices:
-                    print(f"[SINGLE OBJECT FALLBACK] Found {len(connected_indices)} objects "
-                          f"directly connected to target")
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[SINGLE OBJECT FALLBACK] Found {len(connected_indices)} objects directly connected to target")
                     
                     # Mark these as "connected only" - they won't contribute their own relations
                     self._connected_only_indices = connected_indices
@@ -1713,8 +1754,8 @@ class ImageGraphPreprocessor:
             depths = filtered_depths if filtered_depths else depths
             rels_all = filtered_rels
             
-            print(f"[SINGLE OBJECT FALLBACK] Filtered to {len(boxes)} objects "
-                  f"and {len(rels_all)} direct relations")
+            if getattr(self.cfg, "verbose", False):
+                self.logger.info(f"[SINGLE OBJECT FALLBACK] Filtered to {len(boxes)} objects and {len(rels_all)} direct relations")
             
             # Clear all fallback flags
             delattr(self, '_connected_only_indices')
@@ -1871,7 +1912,8 @@ class ImageGraphPreprocessor:
         # Cleanup GPU/CPU memory between runs (useful for batches).
         self._free_memory()
         dt = time.time() - t0
-        print(f"[DONE] {image_name} processed in {dt:.2f}s")
+        if getattr(self.cfg, "verbose", False):
+            self.logger.info(f"[DONE] {image_name} processed in {dt:.2f}s")
 
     def _filter_relations_by_target_object(self, relationships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Keep only relations that involve at least one of the fallback target objects."""
@@ -1885,7 +1927,8 @@ class ImageGraphPreprocessor:
             if src_idx in self._target_object_indices or tgt_idx in self._target_object_indices:
                 filtered_rels.append(rel)
         
-        print(f"[FALLBACK] Filtered relations: {len(filtered_rels)}/{len(relationships)} kept")
+        if getattr(self.cfg, "verbose", False):
+            self.logger.info(f"[FALLBACK] Filtered relations: {len(filtered_rels)}/{len(relationships)} kept")
         return filtered_rels
     
     def _get_connected_object_indices(
@@ -1937,7 +1980,7 @@ class ImageGraphPreprocessor:
             return
 
         if not self.cfg.input_path:
-            print("[ERROR] No input_path provided and no dataset/json specified.")
+            self.logger.error("[ERROR] No input_path provided and no dataset/json specified.")
             return
 
         ip = Path(self.cfg.input_path)
@@ -1945,7 +1988,7 @@ class ImageGraphPreprocessor:
             paths = [p for p in ip.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
         else:
             if not ip.exists():
-                print(f"[ERROR] Input path '{ip}' does not exist.")
+                self.logger.error(f"[ERROR] Input path '{ip}' does not exist.")
                 return
             paths = [ip]
 
@@ -1953,7 +1996,7 @@ class ImageGraphPreprocessor:
             try:
                 img = Image.open(str(p)).convert("RGB")
             except Exception as e:
-                print(f"[ERROR] Could not open '{p}': {e}")
+                self.logger.error(f"[ERROR] Could not open '{p}': {e}")
                 continue
             name = p.stem
             self.process_single_image(img, name)
@@ -1968,7 +2011,8 @@ class ImageGraphPreprocessor:
         
         # BATCH PROCESSING: Calculate optimal batch size
         batch_size = self._get_optimal_batch_size()
-        print(f"[INFO] Processing {len(rows)} images with batch_size={batch_size}")
+        if getattr(self.cfg, "verbose", False):
+            self.logger.info(f"[INFO] Processing {len(rows)} images with batch_size={batch_size}")
         
         for batch_start in range(0, len(rows), batch_size):
             batch_rows = rows[batch_start:batch_start + batch_size]
@@ -1989,7 +2033,7 @@ class ImageGraphPreprocessor:
                         "path": img_p
                     })
                 except Exception as e:
-                    print(f"[ERROR] Loading {img_p}: {e}")
+                    self.logger.error(f"[ERROR] Loading {img_p}: {e}")
                     continue
             
             if not batch_data:
@@ -2045,12 +2089,14 @@ class ImageGraphPreprocessor:
         try:
             from datasets import load_dataset  # type: ignore
         except Exception:
-            print("[ERROR] 'datasets' library not installed.")
+            self.logger.error("[ERROR] 'datasets' library not installed.")
             return
 
-        print(f"[INFO] Loading dataset '{self.cfg.dataset}' (split='{self.cfg.split}')...")
+        if getattr(self.cfg, "verbose", False):
+            self.logger.info(f"[INFO] Loading dataset '{self.cfg.dataset}' (split='{self.cfg.split}')...")
         ds = load_dataset(self.cfg.dataset, split=self.cfg.split)
-        print(f"[INFO] Dataset loaded with {len(ds)} items")
+        if getattr(self.cfg, "verbose", False):
+            self.logger.info(f"[INFO] Dataset loaded with {len(ds)} items")
 
         start = 0
         end = len(ds)
@@ -2060,7 +2106,7 @@ class ImageGraphPreprocessor:
         for i in range(start, end):
             ex = ds[i]
             if self.cfg.image_column not in ex:
-                print(f"[ERROR] image_column='{self.cfg.image_column}' not found at idx {i}. Skipping.")
+                self.logger.error(f"[ERROR] image_column='{self.cfg.image_column}' not found at idx {i}. Skipping.")
                 continue
 
             img_data = ex[self.cfg.image_column]
@@ -2072,7 +2118,7 @@ class ImageGraphPreprocessor:
             elif isinstance(img_data, np.ndarray):
                 img_pil = Image.fromarray(img_data).convert("RGB")
             else:
-                print(f"[WARNING] Index {i}: image not recognized. Skipping.")
+                self.logger.warning(f"[WARNING] Index {i}: image not recognized. Skipping.")
                 continue
 
             image_name = str(ex.get("id", f"img_{i}"))
@@ -2118,7 +2164,7 @@ class ImageGraphPreprocessor:
             with gzip.open(path_gpickle, "wb") if path_gpickle.endswith(".gz") else open(path_gpickle, "wb") as f:
                 pickle.dump(G, f, protocol=pickle.HIGHEST_PROTOCOL)
         except Exception as e:
-            print(f"[WARN] Could not save gpickle: {e}")
+            logging.getLogger(__name__).warning(f"[WARN] Could not save gpickle: {e}")
 
         # json
         try:
@@ -2131,7 +2177,7 @@ class ImageGraphPreprocessor:
                     raise TypeError
                 json.dump(nx.node_link_data(G), jf, default=_np_conv, indent=2)
         except Exception as e:
-            print(f"[WARN] Could not save scene graph json: {e}")
+            logging.getLogger(__name__).warning(f"[WARN] Could not save scene graph json: {e}")
 
     @staticmethod
     def _free_memory() -> None:

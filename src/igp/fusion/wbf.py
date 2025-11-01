@@ -13,6 +13,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from igp.types import Detection
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     # Optional dependency: pip install ensemble-boxes
@@ -64,9 +67,12 @@ def fuse_detections_wbf(
     *,
     iou_thr: float = 0.55,
     skip_box_thr: float = 0.0,
-    weights_by_source: Optional[Dict[str, float]] = None,
+    weights_by_source: Optional[Dict[str, object]] = None,
     default_weight: float = 1.0,
     sort_desc: bool = True,
+    fallback_to_original: bool = False,
+    mask_fusion: str = "weighted",
+    mask_threshold: float = 0.5,
 ) -> List[Detection]:
     """
     Perform Weighted Boxes Fusion over detections from multiple detectors.
@@ -90,10 +96,26 @@ def fuse_detections_wbf(
     if W <= 0 or H <= 0:
         raise ValueError("image_size must be (width>0, height>0)")
 
-    # Group by source
+    # Group by source and build a flat list of original items for later mask fusion
     by_src: Dict[str, List[Detection]] = defaultdict(list)
+    orig_boxes: List[Tuple[float, float, float, float]] = []
+    orig_scores: List[float] = []
+    orig_labels: List[str] = []
+    orig_masks: List[Optional[np.ndarray]] = []
+    orig_sources: List[str] = []
     for d in detections:
-        by_src[_get_source(d)].append(d)
+        src = _get_source(d)
+        by_src[src].append(d)
+        b = _as_xyxy(d.box)
+        orig_boxes.append(b)
+        orig_scores.append(float(getattr(d, "score", 1.0)))
+        orig_labels.append(_get_label(d))
+        # masks may be in extra['segmentation'] or d.extra
+        m = None
+        if getattr(d, "extra", None) and isinstance(d.extra, dict):
+            m = d.extra.get("segmentation")
+        orig_masks.append(m)
+        orig_sources.append(src)
 
     # Build label vocabulary
     labels_sorted = sorted({_get_label(d) for d in detections})
@@ -127,35 +149,182 @@ def fuse_detections_wbf(
             scores_.append(score)
             labels_id.append(label2id[_get_label(d)])
 
+        # Skip sources that produced no boxes after thresholding. Ensemble-boxes
+        # expects per-model lists to be non-empty; including empty lists may
+        # raise or produce undefined behavior. Also avoid adding a weight for
+        # an empty source.
+        if not boxes_norm:
+            logger.debug("WBF: skipping source %s because it produced no boxes after threshold", src)
+            continue
+
         list_boxes.append(boxes_norm)
         list_scores.append(scores_)
         list_labels.append(labels_id)
         weights.append(float(wmap.get(src, default_weight)))
 
     # If ensemble-boxes not installed, fallback to per-class NMS
+    fused_boxes: List[Tuple[float, float, float, float]] = []
+    fused_scores: List[float] = []
+    fused_labels: List[str] = []
+    out: List[Detection] = []
+
     if not _HAVE_WBF:
         if _fallback_nms is None:
             raise RuntimeError("ensemble-boxes not available and fallback NMS not importable.")
-        return _fallback_nms(detections, iou_thr=iou_thr, class_aware=True, sort_desc=sort_desc)
+        logger.debug("WBF: ensemble-boxes not available, using fallback NMS")
+        kept = _fallback_nms(detections, iou_thr=iou_thr, class_aware=True, sort_desc=sort_desc)
+        for d in kept:
+            b = _as_xyxy(d.box)
+            fused_boxes.append(b)
+            fused_scores.append(float(getattr(d, "score", 1.0)))
+            fused_labels.append(_get_label(d))
+            out.append(_make_detection(b, _get_label(d), float(getattr(d, "score", 1.0)), source="fusion:nms"))
+    else:
+        # If after filtering there are no per-source boxes to fuse, either return
+        # the original detections (fallback) or an empty list depending on
+        # `fallback_to_original`.
+        if not list_boxes:
+            if fallback_to_original:
+                logger.debug("WBF: no boxes after filtering; returning original detections as fallback")
+                return detections
+            logger.debug("WBF: no boxes after filtering; returning empty list")
+            return []
 
-    # Apply WBF
-    b_fused, s_fused, l_fused = _wbf_impl(
-        list_boxes, list_scores, list_labels,
-        weights=weights,
-        iou_thr=float(iou_thr),
-        skip_box_thr=float(skip_box_thr),
-    )
+        # Apply WBF
+        b_fused, s_fused, l_fused = _wbf_impl(
+            list_boxes, list_scores, list_labels,
+            weights=weights,
+            iou_thr=float(iou_thr),
+            skip_box_thr=float(skip_box_thr),
+        )
 
-    # Denormalize and build Detection objects
-    out: List[Detection] = []
-    for b, s, l in zip(b_fused, s_fused, l_fused):
-        x1 = float(b[0] * W)
-        y1 = float(b[1] * H)
-        x2 = float(b[2] * W)
-        y2 = float(b[3] * H)
-        label = id2label[int(l)]
-        out.append(_make_detection((x1, y1, x2, y2), label, float(s), source="fusion:wbf"))
+        # Denormalize and build Detection objects
+        for b, s, l in zip(b_fused, s_fused, l_fused):
+            x1 = float(b[0] * W)
+            y1 = float(b[1] * H)
+            x2 = float(b[2] * W)
+            y2 = float(b[3] * H)
+            label = id2label[int(l)]
+            fused_boxes.append((x1, y1, x2, y2))
+            fused_scores.append(float(s))
+            fused_labels.append(label)
+            out.append(_make_detection((x1, y1, x2, y2), label, float(s), source="fusion:wbf"))
 
+    # Now perform mask fusion: for each fused box, find contributing original
+    # detections (same label, IoU > iou_thr) and combine their masks using
+    # weights (score * source_weight * per-class weight if provided).
+    def _get_source_weight(src: str, lab: str) -> float:
+        if not weights_by_source:
+            return float(default_weight)
+        w = weights_by_source.get(src, None)
+        if w is None:
+            return float(default_weight)
+        # w may be a dict (per-class) or a float
+        if isinstance(w, dict):
+            return float(w.get(lab, default_weight))
+        try:
+            return float(w)
+        except Exception:
+            return float(default_weight)
+
+    if orig_masks and any(m is not None for m in orig_masks) and mask_fusion != "none":
+        # Precompute orig boxes/numpy arrays
+        import numpy as _np
+
+        orig_boxes_np = _np.asarray(orig_boxes, dtype=_np.float32) if orig_boxes else _np.zeros((0, 4), dtype=_np.float32)
+
+        def _iou_np(a, b):
+            # a: (4,), b: (N,4)
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b.T
+            inter_x1 = _np.maximum(ax1, bx1)
+            inter_y1 = _np.maximum(ay1, by1)
+            inter_x2 = _np.minimum(ax2, bx2)
+            inter_y2 = _np.minimum(ay2, by2)
+            inter_w = _np.clip(inter_x2 - inter_x1, 0, None)
+            inter_h = _np.clip(inter_y2 - inter_y1, 0, None)
+            inter = inter_w * inter_h
+            area_a = max((ax2 - ax1) * (ay2 - ay1), 1e-7)
+            area_b = _np.clip(bx2 - bx1, 0, None) * _np.clip(by2 - by1, 0, None)
+            union = area_a + area_b - inter
+            return inter / (union + 1e-7)
+
+        fused_out: List[Detection] = []
+        for fb, fscore, flab, det in zip(fused_boxes, fused_scores, fused_labels, out):
+            # find originals with same label
+            candidates_idx = [i for i, lab in enumerate(orig_labels) if lab == flab]
+            if not candidates_idx:
+                fused_out.append(det)
+                continue
+            cand_boxes = orig_boxes_np[candidates_idx]
+            ious = _iou_np(_np.asarray(fb, dtype=_np.float32), cand_boxes)
+            # select contributors with IoU > iou_thr
+            contrib_idx = [candidates_idx[i] for i, val in enumerate(ious) if val > iou_thr]
+            masks_to_fuse = []
+            weights_list = []
+            for idx in contrib_idx:
+                m = orig_masks[idx]
+                if m is None:
+                    continue
+                # ensure boolean numpy mask and resize to image shape if needed
+                try:
+                    mm = _np.asarray(m).astype(bool)
+                except Exception:
+                    continue
+                # resize mask to image HxW if shape differs
+                try:
+                    H_img, W_img = H, W
+                    if mm.shape != (H_img, W_img):
+                        from PIL import Image as _PILImage
+                        mm_img = _PILImage.fromarray(mm.astype(_np.uint8) * 255)
+                        mm_img = mm_img.resize((W_img, H_img), resample=_PILImage.NEAREST)
+                        mm = _np.asarray(mm_img).astype(bool)
+                except Exception:
+                    # if resize fails, skip this mask
+                    continue
+
+                masks_to_fuse.append(mm.astype(_np.float32))
+                src = orig_sources[idx]
+                w_src = _get_source_weight(src, flab)
+                sc = float(orig_scores[idx])
+                weights_list.append(w_src * sc)
+
+            if masks_to_fuse and weights_list:
+                # ensure all masks same shape
+                shapes = {m.shape for m in masks_to_fuse}
+                if len(shapes) == 1:
+                    stacked = _np.stack(masks_to_fuse, axis=0)
+                    w_arr = _np.asarray(weights_list, dtype=_np.float32)
+                    if mask_fusion == "union":
+                        fused_bool = _np.any(stacked >= mask_threshold, axis=0)
+                    elif mask_fusion == "majority":
+                        # majority by weighted votes
+                        w_arr = w_arr.reshape((-1, 1, 1))
+                        votes = _np.sum(stacked * w_arr, axis=0)
+                        fused_bool = votes >= (mask_threshold * _np.sum(w_arr))
+                    else:
+                        # default: weighted average (compat)
+                        w_arr = w_arr.reshape((-1, 1, 1))
+                        fused_mask = (_np.sum(stacked * w_arr, axis=0) / (_np.sum(w_arr) + 1e-7))
+                        fused_bool = fused_mask >= mask_threshold
+
+                    # attach to detection.extra
+                    try:
+                        if det.extra is None:
+                            det.extra = {"segmentation": fused_bool}
+                        elif isinstance(det.extra, dict):
+                            det.extra["segmentation"] = fused_bool
+                        else:
+                            det.extra = {"segmentation": fused_bool}
+                    except Exception:
+                        logger.exception("Failed to attach fused mask to detection")
+            fused_out.append(det)
+        # sort if requested
+        if sort_desc:
+            fused_out.sort(key=lambda d: float(getattr(d, "score", 0.0)), reverse=True)
+        return fused_out
+
+    # If no masks to fuse, return out as-is (sorted if requested)
     if sort_desc:
         out.sort(key=lambda d: float(getattr(d, "score", 0.0)), reverse=True)
     return out

@@ -17,6 +17,7 @@ from PIL import Image
 
 from igp.detectors.base import Detector
 from igp.types import Detection
+from igp.utils.detector_utils import make_detection
 
 try:
     from ultralytics import YOLO
@@ -85,6 +86,27 @@ class YOLOv8Detector(Detector):
 
         # Cache dei nomi classi (best-effort)
         self.names = self._resolve_names()
+
+    def warmup(self, example_image=None, use_half: Optional[bool] = None) -> None:
+        """Attempt a lightweight warmup: set use_half if provided and run a tiny
+        prediction on a resized image to allocate memory. Errors are ignored.
+        """
+        if use_half is not None:
+            try:
+                self.use_half = bool(use_half) and (str(self.device).startswith("cuda") and torch.cuda.is_available())
+            except Exception:
+                pass
+
+        if example_image is None:
+            return
+
+        try:
+            small = example_image.resize((self.imgsz, self.imgsz))
+            # run a single predict to allocate model memory
+            _ = self._predict(np.array(self._ensure_rgb(small)))
+        except Exception:
+            # warmup must be best-effort
+            pass
 
     # ------------------ API ------------------
 
@@ -237,14 +259,8 @@ class YOLOv8Detector(Detector):
         return float(x1), float(y1), float(x2), float(y2)
 
     def _make_detection(self, box_xyxy: Sequence[float], label: str, score: float) -> Detection:
-        b = self._as_xyxy(box_xyxy)
-        try:
-            return Detection(box=b, label=label, score=score, source="yolov8")
-        except TypeError:
-            try:
-                return Detection(box=b, label=label, score=score)
-            except TypeError:
-                return Detection(box=b, label=label)
+        # Use centralized helper to normalize and construct Detection.
+        return make_detection(box_xyxy, label, score, source="yolov8")
 
     def _rebox(self, det: Detection, new_box_xyxy: Sequence[float]) -> Detection:
         b = self._as_xyxy(new_box_xyxy)

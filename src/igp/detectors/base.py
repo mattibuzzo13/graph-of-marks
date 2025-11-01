@@ -4,6 +4,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List, Sequence, Optional
 from PIL import Image
+import concurrent.futures
+import os
+import logging
 
 from igp.types import Detection
 
@@ -52,7 +55,13 @@ class Detector(ABC):
     # -------------------- lifecycle hooks --------------------
 
     def warmup(self) -> None:
-        """Optional hook, e.g., to allocate/load models into memory."""
+        """Optional hook, e.g., to allocate/load models into memory.
+
+        New signature: warmup(example_image: Optional[PIL.Image]=None, use_half: Optional[bool]=None)
+        Subclasses may override to allocate memory and optionally run a tiny
+        inference to stabilise memory allocation. Default implementation is a
+        no-op.
+        """
         return None
 
     def close(self) -> None:
@@ -84,10 +93,35 @@ class Detector(ABC):
 
     def detect_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
         """
-        Default implementation: calls `detect` for each image.
-        Subclasses with true batching should override this.
+        Default implementation: calls `detect` for each image. This fallback
+        parallelizes across a threadpool which often speeds up native-backed
+        detectors (IO / C-bound inference).
+
+        Subclasses with true batching should override this for best performance.
         """
-        return [self.detect(img) for img in images]
+        if not images:
+            return []
+
+        max_workers = min(len(images), (os.cpu_count() or 4))
+        results: List[List[Detection]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(self.detect, img) for img in images]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(f.result())
+                except Exception:
+                    # preserve ordering: fall back to synchronous detect for this index
+                    logging.exception("detect_batch: worker failed; falling back to sync detect")
+                    results.append([])
+
+        # as_completed loses original order; rebuild results in original order
+        ordered_results = [None] * len(images)
+        for i, fut in enumerate(futures):
+            try:
+                ordered_results[i] = fut.result()
+            except Exception:
+                ordered_results[i] = []
+        return ordered_results
 
     # -------------------- generic helpers --------------------
 

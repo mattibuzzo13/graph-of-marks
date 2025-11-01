@@ -9,6 +9,7 @@ from PIL import Image
 
 from igp.types import Detection
 from igp.detectors.base import Detector
+from igp.utils.detector_utils import make_detection
 
 # Keep Detectron2 imports local to this module to avoid overhead elsewhere.
 from detectron2.config import get_cfg
@@ -96,11 +97,37 @@ class Detectron2Detector(Detector):
         except Exception:
             pass
 
+    def warmup(self, example_image=None, use_half: Optional[bool] = None) -> None:
+        """Warmup the Detectron2 predictor by running a small forward pass.
+
+        This is best-effort and must not raise on error.
+        """
+        if example_image is None:
+            return
+        try:
+            img = example_image
+            if hasattr(img, "mode") and img.mode != "RGB":
+                img = img.convert("RGB")
+            arr = np.array(img)[:, :, ::-1].copy()
+            height, width = arr.shape[:2]
+            tensor = torch.as_tensor(arr.astype("float32").transpose(2, 0, 1))
+            with torch.no_grad():
+                _ = self.predictor.model([{"image": tensor, "height": height, "width": width}])
+        except Exception:
+            pass
+
     # --------------- core API -----------------
 
     def detect(self, image: Image.Image) -> List[Detection]:
-        # PIL provides RGB; DefaultPredictor expects BGR input.
-        # Always convert to BGR; DefaultPredictor will flip only if cfg expects RGB.
+        # Ensure image is RGB (PIL may supply other modes). DefaultPredictor
+        # expects BGR numpy arrays, so convert -> np.array -> BGR.
+        try:
+            if hasattr(image, "mode") and image.mode != "RGB":
+                image = image.convert("RGB")
+        except Exception:
+            # If conversion fails, fall back to using the raw array.
+            pass
+
         img_np = np.array(image)[:, :, ::-1].copy()  # RGB -> BGR
 
         use_cuda_amp = str(self.cfg.MODEL.DEVICE).lower().startswith("cuda") and torch.cuda.is_available()
@@ -153,6 +180,12 @@ class Detectron2Detector(Detector):
         aug = getattr(self.predictor, "aug", None)
 
         for img in images:
+            # Ensure RGB input before converting format for the model.
+            try:
+                if hasattr(img, "mode") and img.mode != "RGB":
+                    img = img.convert("RGB")
+            except Exception:
+                pass
             arr = np.array(img)  # RGB
             # Convert to model's expected format prior to augmentation.
             if fmt == "BGR":
@@ -238,24 +271,8 @@ class Detectron2Detector(Detector):
         of `igp.types.Detection`.
         """
         # Box as (x1, y1, x2, y2) floats.
-        b = tuple(float(x) for x in box[:4])
-
-        # Try the richest set of fields first; gracefully degrade on TypeError.
-        try:
-            # If Detection supports all fields.
-            return Detection(box=b, label=label, score=score, mask=mask, source=self.name)
-        except TypeError:
-            try:
-                # If it does not support `source`.
-                return Detection(box=b, label=label, score=score, mask=mask)
-            except TypeError:
-                try:
-                    # If it does not support `mask`.
-                    return Detection(box=b, label=label, score=score)
-                except TypeError:
-                    # Minimal fallback — check the concrete Detection definition.
-                    from igp.types import Detection as DetectionType
-                    return DetectionType(box=b, label=label, score=score)
+        # Use centralized factory which will place mask under `extra['segmentation']`
+        return make_detection(box, label, score, source=self.name, mask=mask)
 
 
 __all__ = ["Detectron2Detector"]

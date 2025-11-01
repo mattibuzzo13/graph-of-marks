@@ -16,6 +16,7 @@ from transformers import Owlv2Processor, Owlv2ForObjectDetection
 
 from igp.detectors.base import Detector
 from igp.types import Detection
+from igp.utils.detector_utils import make_detection
 
 
 # Queries di default (COCO-like + extra)
@@ -73,6 +74,28 @@ class OwlViTDetector(Detector):
             low_cpu_mem_usage=low_cpu_mem_usage,
         ).to(self.device)
         self.model.eval()
+
+    def warmup(self, example_image=None, use_half: Optional[bool] = None) -> None:
+        """Set fp16 preference and run a tiny forward pass to warmup memory (best-effort)."""
+        # try to set dtype preference
+        if use_half is not None:
+            try:
+                # only allow fp16 on CUDA
+                if use_half and str(self.device).startswith("cuda"):
+                    # no-op here; model was created with torch_dtype at init
+                    pass
+            except Exception:
+                pass
+
+        if example_image is None:
+            return
+
+        try:
+            small = example_image.resize((min(512, example_image.width), min(512, example_image.height)))
+            _ = self._detect_once(small)
+        except Exception:
+            # best-effort
+            pass
 
     # ----------------- API -----------------
 
@@ -198,14 +221,7 @@ class OwlViTDetector(Detector):
             return str(idx)
 
     def _make_detection(self, box_xyxy: Sequence[float], label: str, score: float) -> Detection:
-        b = tuple(float(x) for x in box_xyxy[:4])
-        try:
-            return Detection(box=b, label=label, score=score, source="owlvit")
-        except TypeError:
-            try:
-                return Detection(box=b, label=label, score=score)
-            except TypeError:
-                return Detection(box=b, label=label)
+        return make_detection(box_xyxy, label, score, source="owlvit")
 
     def _rebox(self, det: Detection, new_box_xyxy: Sequence[float]) -> Detection:
         b = tuple(float(x) for x in new_box_xyxy[:4])
