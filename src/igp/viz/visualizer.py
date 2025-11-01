@@ -82,6 +82,15 @@ class VisualizerConfig:
     bbox_linewidth: float = 1.0
     rel_arrow_linewidth: float = 1.5
     rel_arrow_mutation_scale: float = 22.0
+    # Make contours/labels/relations more prominent by default
+    seg_fill_alpha: float = 0.75
+    bbox_linewidth: float = 2.0
+    rel_arrow_linewidth: float = 2.5
+    rel_arrow_mutation_scale: float = 26.0
+    # Label/legend styling
+    label_bbox_linewidth: float = 3.0
+    relation_label_bbox_linewidth: float = 3.0
+    connector_linewidth: float = 1.5
 
     # Relation post-processing
     filter_redundant_relations: bool = True
@@ -458,7 +467,7 @@ class Visualizer:
                         facecolor="white",
                         alpha=1.0,
                         edgecolor=color,
-                        linewidth=2,
+                        linewidth=cfg.relation_label_bbox_linewidth,
                     ),
                     zorder=5,
                 )
@@ -520,11 +529,11 @@ class Visualizer:
                     fontsize=cfg.obj_fontsize_inside,
                     color=txt_col,
                     bbox=dict(
-                        facecolor=color,
-                        alpha=1.0,
-                        edgecolor=color,
-                        linewidth=2.0,
-                        boxstyle="round,pad=0.25",
+                            facecolor=color,
+                            alpha=1.0,
+                            edgecolor=color,
+                            linewidth=cfg.label_bbox_linewidth,
+                            boxstyle="round,pad=0.25",
                     ),
                     zorder=7,
                 )
@@ -550,7 +559,7 @@ class Visualizer:
                     label_text,
                     fontsize=cfg.obj_fontsize_outside,
                     color=font_col,
-                    bbox_params=dict(facecolor=color, alpha=1.0, edgecolor=color, linewidth=2.0, boxstyle="round,pad=0.25"),
+                    bbox_params=dict(facecolor=color, alpha=1.0, edgecolor=color, linewidth=cfg.label_bbox_linewidth, boxstyle="round,pad=0.25"),
                     ha="center",
                     va="bottom",
                     zorder=7,
@@ -569,7 +578,7 @@ class Visualizer:
                         facecolor=color,
                         alpha=1.0,
                         edgecolor=color,
-                        linewidth=2.0,
+                        linewidth=cfg.label_bbox_linewidth,
                         boxstyle="round,pad=0.25",
                     ),
                     zorder=7,
@@ -588,7 +597,7 @@ class Visualizer:
                         alpha=0.45,
                         shrinkA=4,
                         shrinkB=4,
-                        linewidth=1,
+                        linewidth=cfg.connector_linewidth,
                         linestyle="-",
                     ),
                     zorder=6,

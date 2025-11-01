@@ -266,14 +266,14 @@ class PreprocessorConfig:
     show_segmentation: bool = True
     fill_segmentation: bool = True
     display_legend: bool = True
-    seg_fill_alpha: float = 0.30
+    seg_fill_alpha: float = 0.75
     bbox_linewidth: float = 2.0
     obj_fontsize_inside: int = 12
     obj_fontsize_outside: int = 12
     rel_fontsize: int = 10
     legend_fontsize: int = 8
     rel_arrow_linewidth: float = 2.5
-    rel_arrow_mutation_scale: float = 22.0
+    rel_arrow_mutation_scale: float = 26.0
     resolve_overlaps: bool = True
     show_bboxes: bool = True
     show_confidence: bool = False
