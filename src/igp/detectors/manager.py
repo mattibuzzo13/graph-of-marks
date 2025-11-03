@@ -98,6 +98,11 @@ class DetectorManager:
         self.merge_mask_iou_thr = 0.6
         self.merge_box_iou_thr = 0.9
         
+        # Keep low-score detections if no competing objects in region
+        self.keep_non_competing_low_scores = True
+        self.non_competing_iou_threshold = 0.30
+        self.non_competing_min_score = 0.05
+        
         # Advanced optimizations
         self.use_spatial_fusion = bool(use_spatial_fusion) and _HAVE_SPATIAL_WBF
         self.spatial_cell_size = int(spatial_cell_size)
@@ -349,6 +354,9 @@ class DetectorManager:
 
             if fuse:
                 W, H = images[orig_idx].size
+                # 🚀 Save all original detections before fusion for recovery later
+                all_original_detections = list(per_image_dets) if self.keep_non_competing_low_scores else []
+                
                 try:
                     # Use optimized spatial WBF if available and enabled
                     if self.use_spatial_fusion and _HAVE_SPATIAL_WBF:
@@ -736,6 +744,18 @@ class DetectorManager:
                     except Exception:
                         logger.exception("Mask IoU suppression failed; continuing")
 
+                # 🚀 NEW: Recover low-score detections if no competing objects in region
+                if self.keep_non_competing_low_scores and fuse and all_original_detections:
+                    try:
+                        fused = self._recover_non_competing_detections(
+                            fused,
+                            all_original_detections,
+                            iou_threshold=self.non_competing_iou_threshold,
+                            min_score=self.non_competing_min_score
+                        )
+                    except Exception:
+                        logger.exception("Non-competing detection recovery failed; continuing")
+
                 results[orig_idx] = fused
                 # store in cache
                 try:
@@ -837,5 +857,88 @@ class DetectorManager:
         
         return unique_labels
 
+    def _recover_non_competing_detections(
+        self,
+        fused_detections: List[Detection],
+        all_original_detections: List[Detection],
+        iou_threshold: float = 0.30,
+        min_score: float = 0.05,
+    ) -> List[Detection]:
+        """
+        🚀 Recover low-score detections that don't compete with higher-score ones.
+        
+        Strategy:
+        1. For each original detection below the normal threshold
+        2. Check if it has significant overlap (IoU > threshold) with ANY fused detection
+        3. If NO overlap, it's a non-competing detection → keep it
+        4. Only keep detections above min_score to filter noise
+        
+        Args:
+            fused_detections: High-confidence detections after fusion/NMS
+            all_original_detections: All original detections before filtering
+            iou_threshold: IoU threshold to determine if regions compete
+            min_score: Minimum score for recovery (avoid complete noise)
+            
+        Returns:
+            Combined list of fused detections + recovered non-competing ones
+        """
+        if not all_original_detections or not fused_detections:
+            return fused_detections
+        
+        try:
+            import numpy as np
+            from igp.fusion.nms import iou as compute_iou
+            
+            # Get boxes from fused detections
+            fused_boxes = np.array([np.array(d.box, dtype=np.float32) for d in fused_detections])
+            
+            # Prepare to collect recovered detections
+            recovered = []
+            
+            # Check each original detection
+            for orig_det in all_original_detections:
+                # Skip if already in fused (high score)
+                orig_score = float(getattr(orig_det, 'score', 0.0))
+                
+                # Only consider detections above minimum threshold
+                if orig_score < min_score:
+                    continue
+                
+                # Check if this detection is already represented in fused results
+                # by comparing boxes
+                orig_box = np.array(orig_det.box, dtype=np.float32)
+                
+                # Compute IoU with all fused boxes
+                ious = compute_iou(orig_box[None, :], fused_boxes)
+                max_iou = float(np.max(ious)) if len(ious) > 0 else 0.0
+                
+                # If no significant overlap with any fused detection, this is non-competing
+                if max_iou < iou_threshold:
+                    # Check it's not a duplicate of an already recovered detection
+                    if recovered:
+                        recovered_boxes = np.array([np.array(d.box, dtype=np.float32) for d in recovered])
+                        ious_rec = compute_iou(orig_box[None, :], recovered_boxes)
+                        if float(np.max(ious_rec)) >= iou_threshold:
+                            continue  # Already have similar recovered detection
+                    
+                    # This is a valid non-competing detection - recover it!
+                    recovered.append(orig_det)
+                    logger.debug(
+                        f"Recovered non-competing detection: {getattr(orig_det, 'label', 'unknown')} "
+                        f"with score {orig_score:.3f} (max_iou={max_iou:.3f})"
+                    )
+            
+            if recovered:
+                logger.info(f"Recovered {len(recovered)} non-competing low-score detections")
+                # Combine fused + recovered
+                return list(fused_detections) + recovered
+            
+            return fused_detections
+            
+        except Exception as e:
+            logger.exception(f"Error in non-competing detection recovery: {e}")
+            return fused_detections
+
 
 __all__ = ["DetectorManager"]
+

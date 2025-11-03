@@ -27,6 +27,7 @@ from igp.detectors.base import Detector
 from igp.detectors.owlvit import OwlViTDetector
 from igp.detectors.yolov8 import YOLOv8Detector
 from igp.detectors.detectron2 import Detectron2Detector
+from igp.detectors.grounding_dino import GroundingDINODetector
 from igp.detectors import DetectorManager
 
 # ---------- fusion ----------
@@ -293,6 +294,10 @@ class ImageGraphPreprocessor:
             self.detector_manager.enable_group_merge = getattr(self.cfg, "enable_group_merge", True)
             self.detector_manager.merge_mask_iou_thr = getattr(self.cfg, "merge_mask_iou_threshold", 0.50)
             self.detector_manager.merge_box_iou_thr = getattr(self.cfg, "merge_box_iou_threshold", 0.75)
+            # 🚀 NEW: Configure non-competing low-score detection recovery
+            self.detector_manager.keep_non_competing_low_scores = getattr(self.cfg, "keep_non_competing_low_scores", True)
+            self.detector_manager.non_competing_iou_threshold = getattr(self.cfg, "non_competing_iou_threshold", 0.30)
+            self.detector_manager.non_competing_min_score = getattr(self.cfg, "non_competing_min_score", 0.05)
         except Exception:
             # Fallback: None (pipeline will use legacy per-detector logic)
             self.detector_manager = None
@@ -423,6 +428,12 @@ class ImageGraphPreprocessor:
                 score_threshold=self.cfg.threshold_detectron
             ))
         
+        if "grounding_dino" in names or "groundingdino" in names:
+            dets.append(GroundingDINODetector(
+                device=self.device, 
+                score_threshold=self.cfg.threshold_grounding_dino
+            ))
+        
         return dets
 
     def _init_segmenter(self) -> Segmenter:
@@ -454,6 +465,7 @@ class ImageGraphPreprocessor:
             "owl": self.cfg.threshold_owl,
             "yolo": self.cfg.threshold_yolo,
             "detectron": self.cfg.threshold_detectron,
+            "grounding_dino": self.cfg.threshold_grounding_dino,
         }
         return ImageDetectionCache.generate_key(
             image=image_pil,
@@ -472,6 +484,7 @@ class ImageGraphPreprocessor:
             "owl": self.cfg.threshold_owl,
             "yolo": self.cfg.threshold_yolo,
             "detectron": self.cfg.threshold_detectron,
+            "grounding_dino": self.cfg.threshold_grounding_dino,
         }
         # Intentionally pass empty question to get a detection-only key
         return ImageDetectionCache.generate_key(
@@ -835,7 +848,8 @@ class ImageGraphPreprocessor:
                     sam_crop = sam_arr[:h, :w]
                     det2_crop = det2_arr[:h, :w]
                     iou = self._mask_iou(sam_crop, det2_crop)
-                    if iou >= 0.5:
+                    merge_threshold = getattr(self.cfg, "detection_mask_merge_iou_thr", 0.5)
+                    if iou >= merge_threshold:
                         # create a det2 array padded to sam_arr shape with zeros
                         new_det2 = np.zeros_like(sam_arr, dtype=bool)
                         new_det2[:h, :w] = det2_crop
@@ -846,7 +860,8 @@ class ImageGraphPreprocessor:
                     return sam_arr
 
         iou = self._mask_iou(sam_arr, det2_arr)
-        if iou >= 0.5:
+        merge_threshold = getattr(self.cfg, "detection_mask_merge_iou_thr", 0.5)
+        if iou >= merge_threshold:
             return np.logical_or(sam_arr, det2_arr)
         return sam_mask
 
@@ -1038,14 +1053,20 @@ class ImageGraphPreprocessor:
         Args:
             boxes: List of bounding boxes
             semantic_scores: Current semantic scores
-            radius: Multiplier for expansion area (2.0 = 2x box area)
-            min_iou: Minimum IoU for context inclusion
+            radius: Multiplier for expansion area (default from config)
+            min_iou: Minimum IoU for context inclusion (default from config)
         
         Returns:
             Updated semantic_scores with context boost
         """
         if not semantic_scores or not boxes:
             return semantic_scores
+        
+        # Use config defaults if not provided
+        if radius is None:
+            radius = getattr(self.cfg, "context_expansion_radius", 2.0)
+        if min_iou is None:
+            min_iou = getattr(self.cfg, "context_min_iou", 0.1)
         
         expanded_scores = dict(semantic_scores)
         
@@ -1330,8 +1351,10 @@ class ImageGraphPreprocessor:
             for i in range(len(boxes)):
                 base_score = float(scores[i])
                 sem_boost = semantic_boost.get(i, 0.0) if semantic_boost else 0.0
-                # Weight: 60% detection confidence, 40% semantic relevance
-                composite = 0.6 * base_score + 0.4 * sem_boost
+                # Weight configured via semantic_boost_weight
+                weight_sem = getattr(self.cfg, "semantic_boost_weight", 0.4)
+                weight_conf = 1.0 - weight_sem
+                composite = weight_conf * base_score + weight_sem * sem_boost
                 composite_scores.append((i, composite))
             
             # Keep top-K by composite score
@@ -1425,8 +1448,10 @@ class ImageGraphPreprocessor:
             for i, clip_score in clip_scores.items():
                 text_score = semantic_boost.get(i, 0.0)
                 # Blend text and CLIP scores (CLIP weighted higher as it's more robust)
-                # 40% text matching, 60% CLIP similarity
-                combined = 0.4 * text_score + 0.6 * clip_score
+                # Configurable via semantic_boost_weight
+                weight_text = getattr(self.cfg, "semantic_boost_weight", 0.4)
+                weight_clip = 1.0 - weight_text
+                combined = weight_text * text_score + weight_clip * clip_score
                 semantic_boost[i] = max(semantic_boost.get(i, 0.0), combined)
 
         # Cap per label (with semantic awareness)
@@ -1652,9 +1677,10 @@ class ImageGraphPreprocessor:
                     term_words = set(term_normalized.split())
                     label_words = set(base_normalized.split())
                     if term_words and label_words:
-                        # Match if >50% words overlap
+                        # Match if >threshold words overlap (configurable)
+                        overlap_thresh = getattr(self.cfg, "context_min_iou", 0.5)
                         overlap = len(term_words & label_words) / max(len(term_words), len(label_words))
-                        if overlap >= 0.5:
+                        if overlap >= overlap_thresh:
                             matched = True
                             break
             
@@ -1968,7 +1994,7 @@ class ImageGraphPreprocessor:
                 depths=depths_rel,
                 use_geometry=True,
                 use_clip=True,
-                clip_threshold=0.23,
+                clip_threshold=getattr(self.cfg, "clip_pruning_threshold", 0.23),
             )
             mark("relations_infer")
 
@@ -2413,6 +2439,7 @@ class ImageGraphPreprocessor:
         """Among Detectron2 detections, return the mask with maximum IoU w.r.t. the given box."""
         best = None
         best_iou = 0.0
+        min_iou_thresh = getattr(self.cfg, "detection_mask_merge_iou_thr", 0.30)
         for d in detections:
             m = d.get("mask")
             if m is None:
@@ -2422,7 +2449,7 @@ class ImageGraphPreprocessor:
             if i > best_iou:
                 best_iou = i
                 best = m
-        return best if best_iou >= 0.30 else None
+        return best if best_iou >= min_iou_thresh else None
 
     def _format_labels_for_display(self, labels: List[str]) -> List[str]:
         """Apply label display mode (original/numeric/alphabetic)."""

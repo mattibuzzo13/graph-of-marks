@@ -37,12 +37,18 @@ except Exception as _exc:
         filter_relations_by_question: bool = True
         threshold_object_similarity: float = 0.50
         threshold_relation_similarity: float = 0.50
+        clip_pruning_threshold: float = 0.25
+        semantic_boost_weight: float = 0.4
+        context_expansion_radius: float = 2.0
+        context_min_iou: float = 0.1
 
         # detectors & thresholds
         detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
         threshold_owl: float = 0.10
         threshold_yolo: float = 0.25
         threshold_detectron: float = 0.50
+        threshold_grounding_dino: float = 0.30
+        grounding_dino_text_threshold: float = 0.25
 
         # per-object relation limits
         max_relations_per_object: int = 3
@@ -55,6 +61,7 @@ except Exception as _exc:
         label_nms_threshold: float = 0.60
         seg_iou_threshold: float = 0.70
         wbf_iou_threshold: float = 0.55
+        skip_box_threshold: float = 0.10
         cross_class_suppression: bool = False
         cross_class_iou_threshold: float = 0.75
         enable_group_merge: bool = False
@@ -64,6 +71,13 @@ except Exception as _exc:
         semantic_dedup_iou_threshold: float = 0.70
         enable_containment_removal: bool = False
         containment_threshold: float = 0.95
+        cascade_conf_threshold: float = 0.40
+        detection_mask_merge_iou_thr: float = 0.60
+        clip_cache_max_age_days: float = 30.0
+        # Keep low-score detections if no competing objects in region
+        keep_non_competing_low_scores: bool = True
+        non_competing_iou_threshold: float = 0.30
+        non_competing_min_score: float = 0.05
 
         # geometry
         margin: int = 20

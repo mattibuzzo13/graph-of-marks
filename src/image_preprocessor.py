@@ -39,6 +39,14 @@ def _parse_args() -> argparse.Namespace:
                    help="Non filtrare relazioni in base alla domanda")
     p.add_argument("--threshold_object_similarity", type=float, default=0.50)
     p.add_argument("--threshold_relation_similarity", type=float, default=0.50)
+    p.add_argument("--clip_pruning_threshold", type=float, default=0.25, 
+                   help="Soglia minima CLIP similarity per pruning")
+    p.add_argument("--semantic_boost_weight", type=float, default=0.4,
+                   help="Peso per rilevanza semantica vs confidenza detection")
+    p.add_argument("--context_expansion_radius", type=float, default=2.0,
+                   help="Moltiplicatore per area espansione contesto")
+    p.add_argument("--context_min_iou", type=float, default=0.1,
+                   help="IoU minimo per oggetti contestuali")
 
     # Detector e soglie
     p.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
@@ -46,6 +54,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--owl_threshold", type=float, default=0.40)
     p.add_argument("--yolo_threshold", type=float, default=0.80)
     p.add_argument("--detectron_threshold", type=float, default=0.80)
+    p.add_argument("--grounding_dino_threshold", type=float, default=0.30)
+    p.add_argument("--grounding_dino_text_threshold", type=float, default=0.25,
+                   help="Soglia text per GroundingDINO")
 
     # Vincoli relazioni (geometria e limiti per oggetto)
     p.add_argument("--max_relations_per_object", type=int, default=3)
@@ -57,6 +68,24 @@ def _parse_args() -> argparse.Namespace:
     # NMS per label e IoU per segmentazione
     p.add_argument("--label_nms_threshold", type=float, default=0.50)
     p.add_argument("--seg_iou_threshold", type=float, default=0.70)
+    p.add_argument("--wbf_iou_threshold", type=float, default=0.55,
+                   help="Soglia IoU per WBF fusion")
+    p.add_argument("--skip_box_threshold", type=float, default=0.10,
+                   help="Soglia per saltare box a bassa confidenza")
+    p.add_argument("--cross_class_iou_threshold", type=float, default=0.75,
+                   help="Soglia IoU per cross-class suppression")
+    p.add_argument("--cascade_conf_threshold", type=float, default=0.40,
+                   help="Soglia confidenza per cascade detector")
+    p.add_argument("--detection_mask_merge_iou_thr", type=float, default=0.60,
+                   help="Soglia IoU per merge maschere detection")
+    p.add_argument("--clip_cache_max_age_days", type=float, default=30.0,
+                   help="TTL cache CLIP in giorni")
+    p.add_argument("--keep_non_competing_low_scores", action="store_true",
+                   help="Mantieni detection a basso score se non ci sono competitori nella regione")
+    p.add_argument("--non_competing_iou_threshold", type=float, default=0.30,
+                   help="Soglia IoU per determinare se oggetti competono")
+    p.add_argument("--non_competing_min_score", type=float, default=0.05,
+                   help="Score minimo per recovery detection non competitive")
 
     # Backend SAM
     p.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
@@ -196,12 +225,18 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.filter_relations_by_question = not args.no_filter_relations_by_question
     cfg.threshold_object_similarity = float(args.threshold_object_similarity)
     cfg.threshold_relation_similarity = float(args.threshold_relation_similarity)
+    cfg.clip_pruning_threshold = float(args.clip_pruning_threshold)
+    cfg.semantic_boost_weight = float(args.semantic_boost_weight)
+    cfg.context_expansion_radius = float(args.context_expansion_radius)
+    cfg.context_min_iou = float(args.context_min_iou)
 
     # Detector e soglie
     cfg.detectors_to_use = tuple(d.strip() for d in args.detectors.split(",") if d.strip())
     cfg.threshold_owl = float(args.owl_threshold)
     cfg.threshold_yolo = float(args.yolo_threshold)
     cfg.threshold_detectron = float(args.detectron_threshold)
+    cfg.threshold_grounding_dino = float(args.grounding_dino_threshold)
+    cfg.grounding_dino_text_threshold = float(args.grounding_dino_text_threshold)
 
     # Vincoli relazioni
     cfg.max_relations_per_object = int(args.max_relations_per_object)
@@ -213,6 +248,15 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     # NMS / segmentazione
     cfg.label_nms_threshold = float(args.label_nms_threshold)
     cfg.seg_iou_threshold = float(args.seg_iou_threshold)
+    cfg.wbf_iou_threshold = float(args.wbf_iou_threshold)
+    cfg.skip_box_threshold = float(args.skip_box_threshold)
+    cfg.cross_class_iou_threshold = float(args.cross_class_iou_threshold)
+    cfg.cascade_conf_threshold = float(args.cascade_conf_threshold)
+    cfg.detection_mask_merge_iou_thr = float(args.detection_mask_merge_iou_thr)
+    cfg.clip_cache_max_age_days = float(args.clip_cache_max_age_days)
+    cfg.keep_non_competing_low_scores = bool(args.keep_non_competing_low_scores)
+    cfg.non_competing_iou_threshold = float(args.non_competing_iou_threshold)
+    cfg.non_competing_min_score = float(args.non_competing_min_score)
 
     # Backend SAM
     cfg.sam_version = args.sam_version
