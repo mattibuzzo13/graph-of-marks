@@ -33,11 +33,17 @@ DISPLAY_RELATION_LABELS ?= false
 DISPLAY_RELATIONSHIPS   ?= false
 DISPLAY_LABELS         ?= false
 NO_LEGEND               ?= false
+NO_BBOXES               ?= false
+SHOW_SEGMENTATION       ?= false
+FILL_SEGMENTATION       ?= false
+SEG_FILL_ALPHA          ?= 0.15
 
 # Output configurations
 SAVE_IMAGE_ONLY         ?= false
 SKIP_GRAPH              ?= false
 SKIP_PROMPT             ?= false
+OUTPUT_FORMAT           ?= jpg
+SAVE_WITHOUT_BACKGROUND ?= false
 
 # Dataset parameters
 DATASET                 ?=
@@ -234,9 +240,15 @@ run_vqa: check_vqa_input
 	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
 	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
 	    $(if $(filter true,$(NO_LEGEND)),--no_legend) \
+	    $(if $(filter true,$(NO_BBOXES)),--no_bboxes) \
+	    $(if $(filter true,$(SHOW_SEGMENTATION)),--show_segmentation) \
+	    $(if $(filter true,$(FILL_SEGMENTATION)),--fill_segmentation) \
+	    --seg_fill_alpha $(SEG_FILL_ALPHA) \
 	    $(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
 	    $(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
-	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt)
+	    $(if $(filter true,$(SKIP_PROMPT)),--skip_prompt) \
+	    --output_format $(OUTPUT_FORMAT) \
+	    $(if $(filter true,$(SAVE_WITHOUT_BACKGROUND)),--save_without_background)
 
 #------------------------------------------------------------------------------
 # VQA on an image folder

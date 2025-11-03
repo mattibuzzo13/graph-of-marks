@@ -127,6 +127,8 @@ except Exception as _exc:
         skip_prompt: bool = False
         skip_visualization: bool = False
         export_preproc_only: bool = False
+        output_format: str = "jpg"  # jpg, png, svg
+        save_without_background: bool = False
         verbose: bool = False
 
         # device

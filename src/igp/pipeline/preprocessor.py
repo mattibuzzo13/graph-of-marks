@@ -217,6 +217,10 @@ class PreprocessorConfig:
     skip_prompt: bool = False
     skip_visualization: bool = False
     export_preproc_only: bool = False
+    
+    # output format and background
+    output_format: str = "jpg"  # jpg, png, svg
+    save_without_background: bool = False  # save only overlays without original image
 
     # detection cache
     enable_detection_cache: bool = True
@@ -1743,6 +1747,18 @@ class ImageGraphPreprocessor:
         W, H = image_pil.size
         # Record last processed size to let _get_optimal_batch_size adapt batch size
         self._last_processed_size = (W, H)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # 🖼️  PREPROCESSING START
+        # ═══════════════════════════════════════════════════════════════════
+        self.logger.info(f"")
+        self.logger.info(f"{'='*70}")
+        self.logger.info(f"🖼️  Processing: {image_name}")
+        self.logger.info(f"📐 Size: {W}x{H} px")
+        if custom_question or self.cfg.question:
+            q = custom_question or self.cfg.question
+            self.logger.info(f"❓ Question: {q[:80]}{'...' if len(q) > 80 else ''}")
+        self.logger.info(f"{'='*70}")
         # Use a detection-only cache key so we can reuse detections across
         # different questions while still re-running all question-dependent
         # filters (CLIP scoring, relation filtering, pruning, etc.). If the
@@ -1764,8 +1780,10 @@ class ImageGraphPreprocessor:
 
         # 1) DETECTION (+ cache)
         # Optionally force preprocessing per question by bypassing the detection cache.
+        self.logger.info(f"\n🔍 [1/7] Object Detection")
         cached = None if getattr(self.cfg, "force_preprocess_per_question", False) else self._cache_get(detection_key)
         if cached is None:
+            self.logger.info(f"   ⚙️  Running detectors...")
             mark("start_detection")
             det_raw = self._run_detectors(image_pil)
             # DetectorManager now performs fusion centrally; consume its outputs
@@ -1795,16 +1813,23 @@ class ImageGraphPreprocessor:
             # Persist detection-only results under the detection_key so they can
             # be reused by other questions referring to the same image.
             self._cache_put(detection_key, cached)
+            self.logger.info(f"   ✅ Detected {len(boxes_fused)} objects")
         else:
-            pass  # use cached results
+            self.logger.info(f"   💾 Using cached detections")
 
         boxes = list(cached["boxes"])
         labels = list(cached["labels"])
         scores = list(cached["scores"])
         det2_for_mask = list(cached["det2"])
         mark("load_cached_detection")
+        
+        if getattr(self.cfg, "verbose", False):
+            # Show top detected objects
+            top_objects = sorted(zip(labels, scores), key=lambda x: -x[1])[:5]
+            self.logger.info(f"   📊 Top objects: {', '.join([f'{l}({s:.2f})' for l, s in top_objects])}")
 
         # 2) QUESTION FILTER (objects)
+        self.logger.info(f"\n🔎 [2/7] Question-Based Filtering")
         obj_terms, rel_terms = self._parse_question(custom_question or self.cfg.question)
 
         # Preserve originals in case aggressive pruning is too strong.
@@ -1893,11 +1918,14 @@ class ImageGraphPreprocessor:
 
         # 4) LIGHT PRUNING (area, per-label, total) BEFORE SEGMENTATION
         # 🚀 Pass question terms + CLIP scores for semantic-aware pruning
+        self.logger.info(f"\n✂️  [3/7] Pruning & NMS")
+        initial_count = len(boxes)
         boxes, labels, scores = self._limit_detections_advanced(
             boxes, labels, scores, 
             question_terms=obj_terms,
             clip_scores=clip_semantic_scores
         )
+        self.logger.info(f"   ✅ {initial_count} → {len(boxes)} objects (removed {initial_count - len(boxes)} duplicates/low-score)")
         # Sync det2_for_mask with possibly reduced boxes
         if len(det2_for_mask) != len(boxes):
             # Approximate alignment by score order
@@ -1907,17 +1935,25 @@ class ImageGraphPreprocessor:
         # 5) SEGMENTATION (SAM) + optional union with Detectron2 masks — only if needed
         masks = None
         if need_seg and boxes:
+            self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
+            self.logger.info(f"   ⚙️  Generating masks for {len(boxes)} objects...")
             masks = self.segmenter.segment(image_pil, boxes)
             # fuse with detectron2 masks if available
             for i in range(len(masks)):
                 d2m = det2_for_mask[i].get("det2_mask") if det2_for_mask and det2_for_mask[i] is not None else None
                 if d2m is not None:
                     masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
+            self.logger.info(f"   ✅ Generated {len(masks)} segmentation masks")
+        else:
+            self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
+            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
 
         # 6) DEPTH (at box centers) — only if needed
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         depths = None
         if need_depth and boxes:
+            self.logger.info(f"\n📏 [5/7] Depth Estimation")
+            self.logger.info(f"   ⚙️  Computing depth for {len(boxes)} objects...")
             if hasattr(self.depth_est, "depth_map"):
                 try:
                     dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
@@ -1926,10 +1962,16 @@ class ImageGraphPreprocessor:
                     depths = self.depth_est.relative_depth_at(image_pil, centers)
             else:
                 depths = self.depth_est.relative_depth_at(image_pil, centers)
+            self.logger.info(f"   ✅ Depth computed")
+        else:
+            self.logger.info(f"\n📏 [5/7] Depth Estimation")
+            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
 
         # 7) RELATIONS (geometry + CLIP) — only if needed
         rels_all: List[Dict[str, Any]] = []
         if need_rel and boxes:
+            self.logger.info(f"\n🔗 [6/7] Spatial Relations Inference")
+            self.logger.info(f"   ⚙️  Analyzing relationships between {len(boxes)} objects...")
             # Prepare relations config with image-level geometry params
             r_cfg = RelationsConfig(
                 margin_px=self.cfg.margin,
@@ -1997,6 +2039,8 @@ class ImageGraphPreprocessor:
                 clip_threshold=getattr(self.cfg, "clip_pruning_threshold", 0.23),
             )
             mark("relations_infer")
+            
+            self.logger.info(f"   ✅ Found {len(rels_rel)} candidate relationships")
 
             # If we pruned objects, remap relation indices back to the original indexing
             if len(indices_for_rel) != len(boxes):
@@ -2013,12 +2057,18 @@ class ImageGraphPreprocessor:
                 rels_all = remapped_rels
             else:
                 rels_all = rels_rel
+        else:
+            self.logger.info(f"\n🔗 [6/7] Spatial Relations Inference")
+            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
         
         # 🧹 CRITICAL: Clean relations to remove references to deduplicated objects
         # After DetectorManager's aggressive deduplication, some object indices may be invalid.
         # This removes relations pointing to non-existent objects.
         if rels_all and boxes:
+            initial_rels = len(rels_all)
             rels_all = self._clean_invalid_relations(rels_all, len(boxes))
+            if initial_rels != len(rels_all):
+                self.logger.info(f"   🧹 Cleaned {initial_rels - len(rels_all)} invalid relations")
         
         # 🎯 SINGLETON FALLBACK Logic
         # If question mentions only ONE object type, keep:
@@ -2179,8 +2229,29 @@ class ImageGraphPreprocessor:
             rels_for_viz = rels_all
 
         # 8) VISUALIZATION / EXPORT
+        self.logger.info(f"\n🎨 [7/7] Visualization & Export")
         if not self.cfg.skip_visualization:
-            out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.jpg")
+            # Determine output file extension and background settings
+            ext = self.cfg.output_format if self.cfg.output_format in ["jpg", "png", "svg"] else "jpg"
+            draw_bg = not (self.cfg.export_preproc_only or self.cfg.save_without_background)
+            
+            # Show what will be rendered
+            render_components = []
+            if self.cfg.show_segmentation and masks:
+                render_components.append("segmentation")
+            if self.cfg.display_relationships and rels_for_viz:
+                render_components.append("relationships")
+            if self.cfg.display_labels:
+                render_components.append("labels")
+            if self.cfg.show_bboxes:
+                render_components.append("bboxes")
+            
+            self.logger.info(f"   ⚙️  Rendering: {', '.join(render_components) if render_components else 'all elements'}")
+            self.logger.info(f"   📁 Format: {ext.upper()}")
+            if not draw_bg:
+                self.logger.info(f"   🖼️  Background: transparent")
+            
+            out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.{ext}")
             self.visualizer.draw(
                 image=image_pil,
                 boxes=boxes,
@@ -2189,9 +2260,13 @@ class ImageGraphPreprocessor:
                 relationships=rels_for_viz,
                 masks=masks,
                 save_path=out_img,
-                draw_background=not self.cfg.export_preproc_only,
+                draw_background=draw_bg,
                 bg_color=(1, 1, 1, 0),
             )
+            self.logger.info(f"   ✅ Saved: {out_img}")
+        else:
+            self.logger.info(f"   ⏭️  Skipped (visualization disabled)")
+            
         if self.cfg.export_preproc_only:
             out_png = os.path.join(self.cfg.output_folder, f"{image_name}_preproc.png")
             self.visualizer.draw(
@@ -2209,8 +2284,21 @@ class ImageGraphPreprocessor:
         # Cleanup GPU/CPU memory between runs (useful for batches).
         self._free_memory()
         dt = time.time() - t0
-        if getattr(self.cfg, "verbose", False):
-            self.logger.info(f"[DONE] {image_name} processed in {dt:.2f}s")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # ✅ PREPROCESSING COMPLETE
+        # ═══════════════════════════════════════════════════════════════════
+        self.logger.info(f"\n{'='*70}")
+        self.logger.info(f"✅ Preprocessing complete!")
+        self.logger.info(f"⏱️  Total time: {dt:.2f}s")
+        self.logger.info(f"📊 Final results:")
+        self.logger.info(f"   • Objects: {len(boxes)}")
+        if rels_for_viz:
+            self.logger.info(f"   • Relationships: {len(rels_for_viz)}")
+        if masks:
+            self.logger.info(f"   • Segmentation masks: {len(masks)}")
+        self.logger.info(f"{'='*70}")
+        self.logger.info(f"")
 
     def _get_connected_object_indices(
         self,  

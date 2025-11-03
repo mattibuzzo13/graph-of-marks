@@ -160,6 +160,7 @@ class Visualizer:
     def __init__(self, config: Optional[VisualizerConfig] = None) -> None:
         self.cfg = config or VisualizerConfig()
         self._label2color_cache: Dict[str, str] = {}
+        self._draw_background = True  # Track if we're drawing background
 
     # -----------------------------------------------------------
     # PUBLIC ENTRY POINT
@@ -197,13 +198,29 @@ class Visualizer:
         -------
         fig, ax
         """
+        # Store draw_background state for use in drawing methods
+        self._draw_background = draw_background
+        
+        # Assign colors first (needed for all rendering paths)
+        colors = self._assign_colors(labels)
+        
+        # When saving without background, use special rendering mode
+        # that creates a clean canvas without the original image
+        if not draw_background:
+            # Check if we have something to draw (masks or relationships)
+            has_masks = masks and self.cfg.show_segmentation
+            has_relations = relationships and self.cfg.display_relationships
+            
+            if has_masks or has_relations:
+                return self._draw_without_background(
+                    image, boxes, labels, scores, relationships, masks, colors,
+                    save_path, bg_color, dpi
+                )
+        
         fig, ax = self._create_canvas(image, draw_background, bg_color)
 
         # 1) preprocess relations
         relations = self._preprocess_relations(relationships, boxes)
-
-        # 2) assign colors
-        colors = self._assign_colors(labels)
 
         # 3) draw passes
         self._draw_objects(ax, boxes, masks, labels, scores, colors, image)
@@ -227,6 +244,7 @@ class Visualizer:
         self, image: Image.Image, draw_background: bool, bg_color: Tuple[float, float, float, float]
     ) -> Tuple[plt.Figure, plt.Axes]:
         W, H = image.size
+        
         fig, ax = plt.subplots(figsize=(W / 100, H / 100))
         ax.axis("off")
         if draw_background:
@@ -234,9 +252,13 @@ class Visualizer:
         else:
             ax.set_xlim(0, W)
             ax.set_ylim(H, 0)
-            ax.set_facecolor(bg_color)
+            # Set transparent background for both figure and axes
             if len(bg_color) == 4 and bg_color[3] == 0:
                 fig.patch.set_alpha(0)
+                ax.patch.set_alpha(0)
+                ax.set_facecolor('none')
+            else:
+                ax.set_facecolor(bg_color)
         return fig, ax
 
     def _finalize_figure(
@@ -245,12 +267,20 @@ class Visualizer:
     ) -> None:
         fig.tight_layout()
         if save_path:
-            fig.savefig(
-                save_path,
-                bbox_inches="tight",
-                transparent=(not draw_background and (len(bg_color) == 4 and bg_color[3] == 0)),
-                dpi=dpi,
-            )
+            # Determine if we need transparency
+            is_transparent = not draw_background and (len(bg_color) == 4 and bg_color[3] == 0)
+            
+            # For SVG, also set facecolor to 'none' for true transparency
+            kwargs = {
+                'bbox_inches': 'tight',
+                'transparent': is_transparent,
+                'dpi': dpi,
+            }
+            
+            if save_path.endswith('.svg') and is_transparent:
+                kwargs['facecolor'] = 'none'
+            
+            fig.savefig(save_path, **kwargs)
             plt.close(fig)
         else:
             plt.show()
@@ -380,8 +410,12 @@ class Visualizer:
         self, ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float, zorder: float = 2
     ) -> None:
         """Draw mask (filled + opaque border)."""
+        # Use seg_fill_alpha from config (respects user setting)
+        alpha_to_use = self.cfg.seg_fill_alpha
+        
         if cv2 is None:
-            ax.imshow(mask.astype(float), alpha=self.cfg.seg_fill_alpha, extent=(0, mask.shape[1], mask.shape[0], 0))
+            ax.imshow(mask.astype(float), alpha=alpha_to_use, extent=(0, mask.shape[1], mask.shape[0], 0), 
+                     cmap='Greys', vmin=0, vmax=1)
             return
 
         mask_uint8 = (mask.astype(np.uint8) * 255) if mask.dtype != np.uint8 else mask.copy()
@@ -396,8 +430,8 @@ class Visualizer:
             cnt = cnt.squeeze()
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
-            if self.cfg.fill_segmentation:
-                ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=self.cfg.seg_fill_alpha, zorder=zorder)
+            # Always fill when this function is called (the caller decides whether to call it)
+            ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=alpha_to_use, zorder=zorder)
             # Opaque border
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=1.0, zorder=zorder + 0.1)
 
@@ -651,6 +685,112 @@ class Visualizer:
         handles = [patches.Patch(color=self._pick_color(lb, 0), label=lb) for lb in uniq_base[:10]]
         if handles:
             ax.legend(handles=handles, fontsize=cfg.legend_fontsize, loc="upper right")
+
+    # ===========================================================
+    # NO-BACKGROUND RENDERING (for save_without_background mode)
+    # ===========================================================
+    def _draw_without_background(
+        self,
+        image: Image.Image,
+        boxes: Sequence[Sequence[float]],
+        labels: Sequence[str],
+        scores: Sequence[float],
+        relationships: Sequence[Dict[str, Any]],
+        masks: Optional[Sequence[np.ndarray | Dict[str, Any]]],
+        colors: Sequence[str],
+        save_path: Optional[str],
+        bg_color: Tuple[float, float, float, float],
+        dpi: int,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        """
+        Special rendering mode for save_without_background=True.
+        Creates a clean transparent/white canvas with only masks and/or relationships.
+        """
+        W, H = image.size
+        
+        # Create figure with transparent background
+        fig, ax = plt.subplots(figsize=(W / 100, H / 100))
+        ax.axis("off")
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        
+        # Set transparent background
+        if len(bg_color) == 4 and bg_color[3] == 0:
+            fig.patch.set_alpha(0)
+            ax.patch.set_alpha(0)
+            ax.set_facecolor('none')
+        else:
+            # White or custom color background
+            ax.set_facecolor(bg_color[:3] if len(bg_color) >= 3 else (1, 1, 1))
+        
+        # Draw segmentation masks if enabled
+        if self.cfg.show_segmentation and masks:
+            self._draw_masks_on_clean_canvas(ax, masks, colors, W, H)
+        
+        # Draw relationships if enabled
+        if self.cfg.display_relationships and relationships:
+            relations = self._preprocess_relations(relationships, boxes)
+            # Draw relationship arrows and labels
+            self._draw_relationships(ax, relations, boxes, colors, [])
+        
+        # Draw labels if enabled (optional, for context)
+        if self.cfg.display_labels:
+            obj_texts = self._draw_labels(ax, boxes, labels, scores, masks, colors, image)
+        
+        # Save
+        fig.tight_layout()
+        if save_path:
+            is_transparent = len(bg_color) == 4 and bg_color[3] == 0
+            kwargs = {
+                'bbox_inches': 'tight',
+                'transparent': is_transparent,
+                'dpi': dpi,
+                'pad_inches': 0,
+            }
+            
+            if save_path.endswith('.svg') and is_transparent:
+                kwargs['facecolor'] = 'none'
+            
+            fig.savefig(save_path, **kwargs)
+            plt.close(fig)
+        else:
+            plt.show()
+            
+        return fig, ax
+    
+    def _draw_masks_on_clean_canvas(
+        self,
+        ax: plt.Axes,
+        masks: Sequence[np.ndarray | Dict[str, Any]],
+        colors: Sequence[str],
+        W: int,
+        H: int,
+    ) -> None:
+        """Draw masks directly on a clean canvas using opaque colors."""
+        # Create numpy array for compositing
+        if len(colors) == 0:
+            return
+            
+        # Use the standard segmentation drawing but with opaque alpha
+        for i, (mask_data, color) in enumerate(zip(masks, colors)):
+            if mask_data is None:
+                continue
+                
+            mask_info = self._get_mask_for_index(i, masks)
+            if not mask_info or "segmentation" not in mask_info:
+                continue
+                
+            mask = mask_info["segmentation"]
+            if mask is None or mask.size == 0:
+                continue
+            
+            # Draw with opaque color (alpha=1.0)
+            self._draw_segmentation(ax, mask, color, self.cfg.bbox_linewidth, zorder=2)
+    
+    def _hex_to_rgb(self, hex_color: str) -> Tuple[int, int, int]:
+        """Convert hex color to RGB tuple (0-255)."""
+        hex_color = hex_color.lstrip('#')
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
     # ===========================================================
     # HELPERS (MASK, DEPTH, LABEL FORMAT)

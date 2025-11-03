@@ -117,6 +117,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no_masks", action="store_true", help="Non disegnare maschere")
     p.add_argument("--no_instances", action="store_true", help="Nasconde sia bbox che maschere (override)")
     p.add_argument("--show_confidence", action="store_true", help="Aggiunge la confidenza nelle etichette")
+    
+    # Output format
+    p.add_argument("--output_format", type=str, choices=["jpg", "png", "svg"], default="jpg",
+                   help="Formato output (jpg, png, svg)")
+    p.add_argument("--save_without_background", action="store_true",
+                   help="Salva solo le overlays senza l'immagine originale di fondo")
+
 
     # Colori overlay
     p.add_argument("--color_sat_boost", type=float, default=1.30)
@@ -310,6 +317,8 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.skip_prompt = bool(args.skip_prompt)
     cfg.skip_visualization = bool(args.skip_visualization)
     cfg.export_preproc_only = bool(args.export_preproc_only)
+    cfg.output_format = args.output_format
+    cfg.save_without_background = bool(args.save_without_background)
 
     # Cache
     cfg.enable_detection_cache = bool(args.enable_detection_cache)

@@ -124,6 +124,12 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--skip_prompt", action="store_true")
     ap.add_argument("--skip_visualization", action="store_true")
     ap.add_argument("--export_preproc_only", action="store_true")
+    
+    # Output format
+    ap.add_argument("--output_format", type=str, choices=["jpg", "png", "svg"], default="jpg",
+                   help="Formato output (jpg, png, svg)")
+    ap.add_argument("--save_without_background", action="store_true",
+                   help="Salva solo le overlays senza l'immagine originale di fondo")
 
     # Detection cache
     ap.add_argument("--enable_detection_cache", action="store_true")
@@ -186,12 +192,12 @@ def main() -> int:
     'relations_max_clip_pairs': args.relations_max_clip_pairs if args.relations_max_clip_pairs != 500 else None,
     'relations_per_src_clip_pairs': args.relations_per_src_clip_pairs if args.relations_per_src_clip_pairs != 20 else None,
         'label_mode': args.label_mode if args.label_mode != "original" else None,
-        'display_labels': True if args.display_labels else None,
-        'display_relationships': True if args.display_relationships else None,
-        'display_relation_labels': True if args.display_relation_labels else None,
-        'show_segmentation': True if args.show_segmentation else None,
-        'fill_segmentation': True if args.fill_segmentation else None,
-        'display_legend': False if args.no_legend else None,
+        'display_labels': bool(args.display_labels),
+        'display_relationships': bool(args.display_relationships),
+        'display_relation_labels': bool(args.display_relation_labels),
+        'show_segmentation': bool(args.show_segmentation),
+        'fill_segmentation': bool(args.fill_segmentation),
+        'display_legend': not bool(args.no_legend),
         'seg_fill_alpha': args.seg_fill_alpha if args.seg_fill_alpha != 0.30 else None,
         'bbox_linewidth': args.bbox_linewidth if args.bbox_linewidth != 2.0 else None,
         'obj_fontsize_inside': args.obj_fontsize_inside if args.obj_fontsize_inside != 12 else None,
@@ -201,7 +207,7 @@ def main() -> int:
         'rel_arrow_linewidth': args.rel_arrow_linewidth if args.rel_arrow_linewidth != 2.5 else None,
         'rel_arrow_mutation_scale': args.rel_arrow_mutation_scale if args.rel_arrow_mutation_scale != 22.0 else None,
         'resolve_overlaps': True if args.resolve_overlaps else None,
-        'show_bboxes': False if args.no_bboxes else None,
+        'show_bboxes': not bool(args.no_bboxes),
         'show_confidence': True if args.show_confidence else None,
         'color_sat_boost': args.color_sat_boost if args.color_sat_boost != 1.30 else None,
         'color_val_boost': args.color_val_boost if args.color_val_boost != 1.15 else None,
@@ -213,6 +219,8 @@ def main() -> int:
         'skip_prompt': True if args.skip_prompt else None,
         'skip_visualization': True if args.skip_visualization else None,
         'export_preproc_only': True if args.export_preproc_only else None,
+        'output_format': args.output_format if args.output_format != "jpg" else None,
+        'save_without_background': True if args.save_without_background else None,
         'enable_detection_cache': True if args.enable_detection_cache else None,
         'max_cache_size': args.max_cache_size if args.max_cache_size != 100 else None,
         'enable_spatial_3d': True if args.enable_spatial_3d else None,
