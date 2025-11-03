@@ -80,7 +80,10 @@ class Sam2Segmenter(Segmenter):
         # Postprocess per qualità e coerenza API
         final: List[Dict[str, Any]] = []
         for r in results:
-            mask = self.postprocess_mask(r["segmentation"].astype(bool))
+            mask = r["segmentation"].astype(bool)
+            # Postprocessing configurabile: solo se abilitato (ottimizzazione)
+            if self.config.close_holes or self.config.remove_small_components:
+                mask = self.postprocess_mask(mask)
             final.append(
                 {
                     "segmentation": mask,
@@ -260,6 +263,7 @@ class Sam2Segmenter(Segmenter):
     def _release_predictor_memory(self) -> None:
         """
         Libera feature/attivazioni tra chiamate per ridurre l'uso di VRAM.
+        Smart cache clear: solo se memoria > 80% utilizzata.
         """
         # Alcune versioni hanno attributi interni con cache; facciamo best-effort.
         for attr in ("features", "embedding", "image_embedding", "is_image_set"):
@@ -268,5 +272,20 @@ class Sam2Segmenter(Segmenter):
                     delattr(self._predictor, attr)
                 except Exception:
                     pass
-        if torch.cuda.is_available():
+        # Smart cache clear
+        if self._should_clear_cache():
             torch.cuda.empty_cache()
+    
+    def _should_clear_cache(self) -> bool:
+        """Clear cache solo se memoria GPU utilizzata > 80%."""
+        if not torch.cuda.is_available() or self.device != "cuda":
+            return False
+        try:
+            allocated = torch.cuda.memory_allocated(self.device)
+            reserved = torch.cuda.memory_reserved(self.device)
+            if reserved == 0:
+                return False
+            ratio = allocated / reserved
+            return ratio > 0.80  # Soglia 80%
+        except Exception:
+            return False  # Fallback sicuro

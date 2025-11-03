@@ -160,7 +160,8 @@ class PhysicsReasoner:
     ) -> bool:
         """Check if a relation is physically plausible."""
         
-        # Gravity-based plausibility checks
+        # Size-based plausibility for "on_top_of" relations
+        # Large/heavy objects cannot be on top of small/light objects
         if relation in ("on_top_of", "above"):
             # Source must be above target (smaller y in image coords)
             cy_src = (box_src[1] + box_src[3]) / 2
@@ -168,6 +169,14 @@ class PhysicsReasoner:
             
             if cy_src > cy_tgt:
                 return False  # Source is below target (violates "on_top_of")
+            
+            # Size constraint: source area should not be much larger than target
+            # (e.g., sofa cannot be on top of book)
+            area_src = (box_src[2] - box_src[0]) * (box_src[3] - box_src[1])
+            area_tgt = (box_tgt[2] - box_tgt[0]) * (box_tgt[3] - box_tgt[1])
+            
+            if area_src > area_tgt * 3.0:  # Source more than 3x larger
+                return False  # Too large to be on top
         
         elif relation in ("below", "under"):
             # Source must be below target

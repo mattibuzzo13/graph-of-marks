@@ -179,8 +179,9 @@ class GroundingDINODetector(Detector):
         # Convert PIL to format expected by Grounding DINO
         image_np = np.array(image_rgb)
         
-        # Run inference
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
+        # Run inference using torch.amp.autocast with explicit device_type to avoid FutureWarning
+        device_type = "cuda" if self.use_amp else "cpu"
+        with torch.amp.autocast(device_type, enabled=self.use_amp):
             boxes, logits, phrases = predict(
                 model=self.model,
                 image=image_np,
@@ -262,7 +263,8 @@ class GroundingDINODetector(Detector):
             # call the predict util to run a tiny forward; ignore results
             try:
                 from groundingdino.util.inference import predict
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                device_type = "cuda" if self.use_amp else "cpu"
+                with torch.amp.autocast(device_type, enabled=self.use_amp):
                     _ = predict(
                         model=self.model,
                         image=image_np,

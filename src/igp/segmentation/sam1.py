@@ -96,8 +96,9 @@ class Sam1Segmenter(Segmenter):
         final: List[Dict[str, Any]] = []
         for res in results:
             mask = res["segmentation"].astype(bool)
-            # Postprocessing configurabile (close holes + remove_small_components)
-            mask = self.postprocess_mask(mask)
+            # Postprocessing configurabile: solo se abilitato (ottimizzazione)
+            if self.config.close_holes or self.config.remove_small_components:
+                mask = self.postprocess_mask(mask)
             bbox_xywh = self.bbox_from_mask(mask)
             final.append({
                 "segmentation": mask,
@@ -112,10 +113,25 @@ class Sam1Segmenter(Segmenter):
                 delattr(self._predictor, "features")
             except Exception:
                 pass
-        if torch.cuda.is_available():
+        # Smart cache clear: solo se memoria > 80% utilizzata
+        if self._should_clear_cache():
             torch.cuda.empty_cache()
 
         return final
+    
+    def _should_clear_cache(self) -> bool:
+        """Clear cache solo se memoria GPU utilizzata > 80%."""
+        if not torch.cuda.is_available() or self.device != "cuda":
+            return False
+        try:
+            allocated = torch.cuda.memory_allocated(self.device)
+            reserved = torch.cuda.memory_reserved(self.device)
+            if reserved == 0:
+                return False
+            ratio = allocated / reserved
+            return ratio > 0.80  # Soglia 80%
+        except Exception:
+            return False  # Fallback sicuro
 
     # ----------------- internals -----------------
 

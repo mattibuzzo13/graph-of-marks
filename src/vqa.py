@@ -83,6 +83,12 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--label_nms_threshold", type=float, default=0.50)
     ap.add_argument("--seg_iou_threshold", type=float, default=0.70)
 
+    # Relation inference tuning (performance vs recall)
+    ap.add_argument("--relations_max_clip_pairs", type=int, default=500,
+                   help="Global cap on CLIP-scored pairs per image (default 500)")
+    ap.add_argument("--relations_per_src_clip_pairs", type=int, default=20,
+                   help="Per-source cap on CLIP-scored target candidates (default 20)")
+
     # Visualization toggles and style
     ap.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
     ap.add_argument("--display_labels", action="store_true")
@@ -177,6 +183,8 @@ def main() -> int:
         'max_distance': args.max_distance if args.max_distance != 20000 else None,
         'label_nms_threshold': args.label_nms_threshold if args.label_nms_threshold != 0.50 else None,
         'seg_iou_threshold': args.seg_iou_threshold if args.seg_iou_threshold != 0.70 else None,
+    'relations_max_clip_pairs': args.relations_max_clip_pairs if args.relations_max_clip_pairs != 500 else None,
+    'relations_per_src_clip_pairs': args.relations_per_src_clip_pairs if args.relations_per_src_clip_pairs != 20 else None,
         'label_mode': args.label_mode if args.label_mode != "original" else None,
         'display_labels': True if args.display_labels else None,
         'display_relationships': True if args.display_relationships else None,

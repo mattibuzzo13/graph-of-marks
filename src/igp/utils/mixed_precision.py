@@ -69,7 +69,9 @@ class MixedPrecisionManager:
             ...     output = model(input)
         """
         if self.enabled:
-            with torch.cuda.amp.autocast(dtype=self.dtype):
+            device_type = "cuda" if torch.cuda.is_available() else "cpu"
+            # Use new torch.amp.autocast API with explicit device_type/dtype
+            with torch.amp.autocast(device_type=device_type, dtype=self.dtype):
                 yield
         else:
             yield
@@ -120,7 +122,7 @@ def autocast_inference(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         # Check if CUDA available
         if torch.cuda.is_available():
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 return func(*args, **kwargs)
         else:
             return func(*args, **kwargs)
@@ -166,7 +168,7 @@ def autocast(enabled: bool = True):
         ...     output = model(input)  # FP16
     """
     if enabled and torch.cuda.is_available():
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast("cuda"):
             yield
     else:
         yield

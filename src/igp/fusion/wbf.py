@@ -190,13 +190,64 @@ def fuse_detections_wbf(
             logger.debug("WBF: no boxes after filtering; returning empty list")
             return []
 
-        # Apply WBF
-        b_fused, s_fused, l_fused = _wbf_impl(
-            list_boxes, list_scores, list_labels,
-            weights=weights,
-            iou_thr=float(iou_thr),
-            skip_box_thr=float(skip_box_thr),
-        )
+        # Sanitization: ensemble-boxes expects boxes normalized in [0,1].
+        # Clip coordinates to [0,1] and ensure x1 < x2, y1 < y2. Remove any
+        # invalid boxes (zero-area) to avoid warnings and unpredictable
+        # behaviour from the backend.
+        def _sanitize_boxes_per_model(boxes_model: List[List[float]]) -> List[List[float]]:
+            sanitized: List[List[float]] = []
+            for box in boxes_model:
+                if len(box) < 4:
+                    continue
+                x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                # clip
+                x1 = max(0.0, min(1.0, x1))
+                y1 = max(0.0, min(1.0, y1))
+                x2 = max(0.0, min(1.0, x2))
+                y2 = max(0.0, min(1.0, y2))
+                # enforce ordering
+                if x2 <= x1 or y2 <= y1:
+                    # try to repair small numerical issues by nudging
+                    if x2 <= x1:
+                        x2 = min(1.0, x1 + 1e-3)
+                    if y2 <= y1:
+                        y2 = min(1.0, y1 + 1e-3)
+                # discard zero-area boxes
+                if (x2 - x1) <= 1e-6 or (y2 - y1) <= 1e-6:
+                    continue
+                sanitized.append([x1, y1, x2, y2])
+            return sanitized
+
+        # Apply sanitization per-model to avoid ensemble-boxes warnings
+        list_boxes_sanitized: List[List[List[float]]] = [_sanitize_boxes_per_model(bm) for bm in list_boxes]
+
+        # If any model became empty after sanitization, ensemble-boxes may still
+        # work but empty lists can cause issues; we keep empty lists (the
+        # implementation handles them) but log if we removed many boxes.
+        try:
+            b_fused, s_fused, l_fused = _wbf_impl(
+                list_boxes_sanitized, list_scores, list_labels,
+                weights=weights,
+                iou_thr=float(iou_thr),
+                skip_box_thr=float(skip_box_thr),
+            )
+        except Exception:
+            # In case ensemble-boxes fails (unexpected), log and fallback to
+            # per-class NMS via the existing path below.
+            logger.exception("ensemble_boxes WBF failed; falling back to NMS")
+            if _fallback_nms is None:
+                raise
+            kept = _fallback_nms(detections, iou_thr=iou_thr, class_aware=True, sort_desc=sort_desc)
+            for d in kept:
+                b = _as_xyxy(d.box)
+                fused_boxes.append(b)
+                fused_scores.append(float(getattr(d, "score", 1.0)))
+                fused_labels.append(_get_label(d))
+                out.append(_make_detection(b, _get_label(d), float(getattr(d, "score", 1.0)), source="fusion:nms"))
+            # proceed to mask fusion below
+            if sort_desc:
+                out.sort(key=lambda d: float(getattr(d, "score", 0.0)), reverse=True)
+            return out
 
         # Denormalize and build Detection objects
         for b, s, l in zip(b_fused, s_fused, l_fused):

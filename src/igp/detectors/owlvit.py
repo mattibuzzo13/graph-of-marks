@@ -139,7 +139,9 @@ class OwlViTDetector(Detector):
         encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
 
         use_amp = (self.model.device.type == "cuda")
-        with torch.inference_mode(), torch.cuda.amp.autocast(enabled=use_amp):
+        # Use the new torch.amp.autocast API (device_type first) to avoid FutureWarning
+        device_type = "cuda" if use_amp else "cpu"
+        with torch.inference_mode(), torch.amp.autocast(device_type, enabled=use_amp):
             outputs = self.model(**encoding)
 
         # Post-process: target_sizes = (H, W) per immagine
@@ -189,7 +191,8 @@ class OwlViTDetector(Detector):
         encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
 
         use_amp = (self.model.device.type == "cuda")
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        device_type = "cuda" if use_amp else "cpu"
+        with torch.amp.autocast(device_type, enabled=use_amp):
             outputs = self.model(**encoding)
 
         w, h = image.size

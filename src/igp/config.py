@@ -40,33 +40,47 @@ except Exception as _exc:
 
         # detectors & thresholds
         detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-        threshold_owl: float = 0.40
-        threshold_yolo: float = 0.80
-        threshold_detectron: float = 0.80
+        threshold_owl: float = 0.10
+        threshold_yolo: float = 0.25
+        threshold_detectron: float = 0.50
 
         # per-object relation limits
-        max_relations_per_object: int = 1
-        min_relations_per_object: int = 1
+        max_relations_per_object: int = 3
+        min_relations_per_object: int = 0
+        # Relation inference CLIP scoring limits
+        relations_max_clip_pairs: int = 1000
+        relations_per_src_clip_pairs: int = 50
 
         # NMS / fusion
-        label_nms_threshold: float = 0.50
+        label_nms_threshold: float = 0.60
         seg_iou_threshold: float = 0.70
+        wbf_iou_threshold: float = 0.55
+        cross_class_suppression: bool = False
+        cross_class_iou_threshold: float = 0.75
+        enable_group_merge: bool = False
+        merge_mask_iou_threshold: float = 0.80
+        merge_box_iou_threshold: float = 0.90
+        enable_semantic_dedup: bool = False
+        semantic_dedup_iou_threshold: float = 0.70
+        enable_containment_removal: bool = False
+        containment_threshold: float = 0.95
 
         # geometry
         margin: int = 20
         min_distance: float = 50
         max_distance: float = 20000
 
-        # SAM settings
-        sam_version: str = "1"           # "1" | "2" | "hq"
+                # SAM settings
+        sam_version: str = "1"  # "1" | "2" | "hq"
         sam_hq_model_type: str = "vit_h"
         points_per_side: int = 32
-        pred_iou_thresh: float = 0.90
-        stability_score_thresh: float = 0.92
+        pred_iou_thresh: float = 0.88
+        stability_score_thresh: float = 0.95
         min_mask_region_area: int = 100
 
-        # device
-        preproc_device: Optional[str] = None
+        # detection cache
+        enable_detection_cache: bool = True
+        max_cache_size: int = 100
 
         # visualization
         label_mode: str = "original"
@@ -99,10 +113,12 @@ except Exception as _exc:
         skip_prompt: bool = False
         skip_visualization: bool = False
         export_preproc_only: bool = False
+        verbose: bool = False
 
-        # detection cache
-        enable_detection_cache: bool = True
-        max_cache_size: int = 500
+        # device
+        preproc_device: Optional[str] = None
+        # If True, always run full preprocessing per question (ignore detection cache)
+        force_preprocess_per_question: bool = False
 
         # color tweaks
         color_sat_boost: float = 1.30

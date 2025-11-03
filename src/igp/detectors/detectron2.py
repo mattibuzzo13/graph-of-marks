@@ -131,7 +131,8 @@ class Detectron2Detector(Detector):
         img_np = np.array(image)[:, :, ::-1].copy()  # RGB -> BGR
 
         use_cuda_amp = str(self.cfg.MODEL.DEVICE).lower().startswith("cuda") and torch.cuda.is_available()
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda_amp):
+        device_type = "cuda" if use_cuda_amp else "cpu"
+        with torch.no_grad(), torch.amp.autocast(device_type, enabled=use_cuda_amp):
             outputs = self.predictor(img_np)
 
         instances = outputs["instances"].to("cpu")
@@ -197,7 +198,8 @@ class Detectron2Detector(Detector):
             inputs.append({"image": tensor, "height": height, "width": width})
 
         use_cuda_amp = str(self.cfg.MODEL.DEVICE).lower().startswith("cuda") and torch.cuda.is_available()
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda_amp):
+        device_type = "cuda" if use_cuda_amp else "cpu"
+        with torch.no_grad(), torch.amp.autocast(device_type, enabled=use_cuda_amp):
             outputs = self.predictor.model(inputs)
 
         results: List[List[Detection]] = []

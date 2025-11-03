@@ -18,11 +18,17 @@ except Exception:
 
 
 # Distinct, reproducible color palette (hex). Suitable for categorical labels.
+# Espansa a 40 colori per supportare più classi senza ripetizioni
 BASIC_COLORS: List[str] = [
     "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
     "#ffff33", "#a65628", "#f781bf", "#999999", "#1f78b4",
     "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#cab2d6",
     "#6a3d9a", "#b2df8a", "#ffed6f", "#a6cee3", "#b15928",
+    # 20 colori aggiuntivi per evitare ripetizioni
+    "#8dd3c7", "#ffffb3", "#bebada", "#fb8072", "#80b1d3",
+    "#fdb462", "#b3de69", "#fccde5", "#d9d9d9", "#bc80bd",
+    "#ccebc5", "#ffed6f", "#e78ac3", "#a6d854", "#ffd92f",
+    "#e5c494", "#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3",
 ]
 
 # Color-blind friendly palette (Okabe–Ito)
@@ -87,6 +93,26 @@ def base_label(label: str) -> str:
     Extract the base label by removing a trailing numeric suffix: 'person_1' -> 'person'.
     """
     return label.rsplit("_", 1)[0] if "_" in label and label.split("_")[-1].isdigit() else label
+
+
+def canonical_label(label: str) -> str:
+    """
+    Return a canonical form for labels by applying base normalization and
+    mapping known synonyms to a single canonical token. This helps avoid
+    duplicates like 'sofa' vs 'couch' being treated as distinct objects.
+    """
+    lb = base_label(label).lower()
+    # Small manual mapping of common synonyms -> canonical
+    CANONICAL_MAP = {
+        "couch": "sofa",
+        "settee": "sofa",
+        "loveseat": "sofa",
+        "sofa": "sofa",
+        "armchair": "chair",
+        "chair": "chair",
+        # Add more domain-specific mappings here as needed.
+    }
+    return CANONICAL_MAP.get(lb, lb)
 
 
 class ColorCycler:

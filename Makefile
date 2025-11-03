@@ -45,6 +45,10 @@ SPLIT                   ?= train
 IMAGE_COLUMN            ?= image
 NUM_INSTANCES           ?= -1
 
+# Relation constraints
+MAX_RELATIONS_PER_OBJECT ?= 5
+MIN_RELATIONS_PER_OBJECT ?= 1
+
 # VQA parameters
 VQA_INPUT_FILE          ?=
 VQA_OUTPUT_FILE         ?= vqa_results.json
@@ -64,9 +68,28 @@ SKIP_PREPROCESSING      ?= false
 INCLUDE_SCENE_GRAPH     ?= false
 PREPROCESS_ONLY         ?= false
 
-.PHONY: all preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 batch_preprocess run_vqa run_vqa_folder download_dataset clean help
+.PHONY: all preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 batch_preprocess run_vqa run_vqa_folder download_dataset clean help fast_preprocess
 
 all: preprocess
+
+#------------------------------------------------------------------------------
+# 🚀 ULTRA-FAST PREPROCESSING (< 10s per image)
+#------------------------------------------------------------------------------
+fast_preprocess:
+ifeq ($(strip $(JSON_FILE))$(strip $(INPUT_PATH)),)
+	$(error You must set either JSON_FILE or INPUT_PATH)
+endif
+	@echo "[INFO] 🚀 ULTRA-FAST preprocessing (< 10s per image)..."
+	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/run_fast_preprocessing.py \
+		$(if $(strip $(INPUT_PATH)),--input "$(INPUT_PATH)") \
+		$(if $(strip $(JSON_FILE)),--json "$(JSON_FILE)") \
+		$(if $(strip $(QUESTION)),--question "$(QUESTION)") \
+		--output "$(OUTPUT_FOLDER)" \
+		--max_images $(MAX_IMAGES) \
+		$(if $(filter true,$(SAVE_IMAGE_ONLY)),--save_image_only) \
+		$(if $(filter true,$(SKIP_GRAPH)),--skip_graph) \
+		$(if $(filter true,$(SKIP_VISUALIZATION)),--skip_viz) \
+		$(if $(filter true,$(VERBOSE)),--verbose)
 
 #------------------------------------------------------------------------------
 # Preconditions
@@ -205,6 +228,8 @@ run_vqa: check_vqa_input
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
+		--max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
+		--min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
 		$(if $(filter true,$(DISPLAY_RELATION_LABELS)),--display_relation_labels) \
 	    $(if $(filter true,$(DISPLAY_RELATIONSHIPS)),--display_relationships) \
 	    $(if $(filter true,$(DISPLAY_LABELS)),--display_labels) \
