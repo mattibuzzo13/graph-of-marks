@@ -1,4 +1,79 @@
 # igp/vqa/io.py
+"""
+VQA Dataset I/O Utilities
+
+Robust image loading and dataset I/O for Visual Question Answering workflows.
+Handles local files, HTTP URLs, file:// URLs with automatic retries and
+error recovery.
+
+Key Features:
+    - Multi-source image loading (local, HTTP, file://)
+    - EXIF orientation correction
+    - Automatic RGB conversion
+    - Smart path resolution with image_dir fallback
+    - HTTP retry logic with exponential backoff
+    - JSONL dataset loading/saving
+    - Comprehensive error handling
+
+Functions:
+    load_image(path_or_url, image_dir, timeout) → PIL.Image
+        Load image from any source with robust error handling
+    
+    load_vqa_examples(jsonl_path) → List[VQAExample]
+        Load VQA dataset from JSONL file
+    
+    save_vqa_examples(examples, jsonl_path)
+        Save VQA dataset to JSONL file
+
+Image Sources:
+    - HTTP(S) URLs: "https://example.com/image.jpg"
+    - File URLs: "file:///path/to/image.jpg"
+    - Absolute paths: "/home/user/images/img.jpg"
+    - Relative paths: "images/img.jpg" (resolved via image_dir)
+
+Path Resolution:
+    Given path_or_url="data/img.jpg" and image_dir="/datasets/vqa":
+    1. Try: data/img.jpg (relative to CWD)
+    2. Try: /datasets/vqa/data/img.jpg
+    3. Try: /datasets/vqa/img.jpg (basename only)
+    Returns first existing file.
+
+Usage:
+    >>> from igp.vqa.io import load_image, load_vqa_examples
+    >>> 
+    >>> # Load from URL
+    >>> img = load_image("https://example.com/image.jpg")
+    >>> 
+    >>> # Load from local file with fallback directory
+    >>> img = load_image("img123.jpg", image_dir="/datasets/vqav2/images")
+    >>> 
+    >>> # Load VQA dataset
+    >>> examples = load_vqa_examples("dataset.jsonl")
+    >>> for ex in examples:
+    ...     img = load_image(ex.image_path, image_dir="images/")
+    ...     print(ex.question)
+
+Error Handling:
+    - FileNotFoundError: Image not found in any candidate path
+    - UnidentifiedImageError: Corrupted or non-image file
+    - requests.exceptions.RequestException: HTTP download failed
+    - All errors include descriptive context
+
+EXIF Handling:
+    - Automatically applies EXIF orientation tag
+    - Fixes rotated iPhone/Android photos
+    - Uses PIL.ImageOps.exif_transpose()
+
+RGB Conversion:
+    - All images converted to RGB mode
+    - Handles RGBA (removes alpha), L (grayscale), P (palette)
+    - Consistent 3-channel output for model inputs
+
+See Also:
+    - igp.vqa.types: VQAExample data structure
+    - igp.vqa.preproc: Preprocessing utilities
+    - igp.vqa.runner: VQA inference pipeline
+"""
 from __future__ import annotations
 import json
 from io import BytesIO
@@ -18,6 +93,7 @@ log = logging.getLogger(__name__)
 # ---- internals --------------------------------------------------------------
 
 def _is_http_url(s: str) -> bool:
+    """Check if string is HTTP(S) URL."""
     try:
         p = urlparse(s)
         return p.scheme in ("http", "https")
@@ -25,6 +101,7 @@ def _is_http_url(s: str) -> bool:
         return False
 
 def _is_file_url(s: str) -> bool:
+    """Check if string is file:// URL."""
     try:
         p = urlparse(s)
         return p.scheme == "file" and p.path != ""
@@ -32,7 +109,28 @@ def _is_file_url(s: str) -> bool:
         return False
 
 def _candidate_paths(path_or_url: str, image_dir: Optional[Union[str, Path]]) -> List[Path]:
-    """Build a small set of plausible file paths to try, de-duplicated."""
+    """
+    Build candidate file paths for image resolution.
+    
+    Args:
+        path_or_url: Image path (relative or absolute)
+        image_dir: Optional base directory for resolution
+    
+    Returns:
+        List of Path objects to try, de-duplicated and ordered by priority
+    
+    Resolution Strategy:
+        1. path_or_url as-is (relative to CWD or absolute)
+        2. image_dir / path_or_url (full relative path)
+        3. image_dir / basename(path_or_url) (filename only)
+    
+    Example:
+        >>> paths = _candidate_paths("data/img.jpg", "/datasets")
+        >>> paths
+        [Path('data/img.jpg'),
+         Path('/datasets/data/img.jpg'),
+         Path('/datasets/img.jpg')]
+    """
     candidates: List[Path] = []
     p = Path(path_or_url).expanduser()
     candidates.append(p)
@@ -57,7 +155,23 @@ def _candidate_paths(path_or_url: str, image_dir: Optional[Union[str, Path]]) ->
     return uniq
 
 def _open_pil_rgb(fp: BytesIO | str | os.PathLike) -> Image.Image:
-    """Open with PIL, verify, fix EXIF orientation, return RGB."""
+    """
+    Open image with PIL, apply EXIF orientation, convert to RGB.
+    
+    Args:
+        fp: File path, BytesIO, or path-like object
+    
+    Returns:
+        PIL Image in RGB mode with EXIF orientation applied
+    
+    Raises:
+        UnidentifiedImageError: If file is not a valid image
+    
+    Notes:
+        - Verifies image header before loading
+        - Applies EXIF orientation tag (fixes rotated photos)
+        - Always returns RGB (converts RGBA, L, P, etc.)
+    """
     try:
         img = Image.open(fp)
         img.verify()              # verify header
@@ -74,6 +188,62 @@ def _open_pil_rgb(fp: BytesIO | str | os.PathLike) -> Image.Image:
 # ---- public API -------------------------------------------------------------
 
 def load_image(path_or_url: str, image_dir: str | None = None, *, timeout: float = 30.0, debug: bool = False) -> Image.Image:
+    """
+    Load image from local file, HTTP URL, or file:// URL with robust error handling.
+    
+    Args:
+        path_or_url: Image source (URL or file path)
+        image_dir: Optional base directory for relative path resolution
+        timeout: HTTP request timeout in seconds (default 30.0)
+        debug: Enable debug logging (default False)
+    
+    Returns:
+        PIL Image in RGB mode with EXIF orientation corrected
+    
+    Raises:
+        FileNotFoundError: Image not found in any candidate location
+        UnidentifiedImageError: File is not a valid image
+        requests.exceptions.RequestException: HTTP download failed
+    
+    Source Types:
+        HTTP(S) URL:
+            >>> img = load_image("https://example.com/photo.jpg")
+        
+        File URL:
+            >>> img = load_image("file:///home/user/images/photo.jpg")
+        
+        Absolute path:
+            >>> img = load_image("/datasets/vqav2/val2014/img.jpg")
+        
+        Relative path with image_dir:
+            >>> img = load_image("val2014/img.jpg", image_dir="/datasets/vqav2")
+            # Tries: val2014/img.jpg, /datasets/vqav2/val2014/img.jpg, /datasets/vqav2/img.jpg
+    
+    Path Resolution:
+        For relative paths, tries candidates in order:
+        1. path_or_url as-is (relative to CWD)
+        2. image_dir / path_or_url
+        3. image_dir / basename(path_or_url)
+        Returns first existing file.
+    
+    Error Handling:
+        - HTTP URLs: Retries with exponential backoff (3 attempts)
+        - Local files: Tries all candidate paths
+        - EXIF errors: Logs warning, continues without orientation fix
+        - Detailed error messages with tried paths
+    
+    Notes:
+        - Always returns RGB (converts RGBA, grayscale, etc.)
+        - Applies EXIF orientation automatically
+        - Thread-safe for concurrent loads
+        - No caching (load fresh each time)
+    
+    Example:
+        >>> # VQA dataset loading
+        >>> for example in load_vqa_examples("dataset.jsonl"):
+        ...     img = load_image(example.image_path, image_dir="images/")
+        ...     # Process img with example.question
+    """
     """
     Load an image from:
       • http(s) URL

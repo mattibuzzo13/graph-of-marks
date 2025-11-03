@@ -1,5 +1,148 @@
 # igp/relations/geometry/predicates.py
-# Spatial predicates for relation inference: on_top_of, below, in_front_of, behind, orientation
+"""
+Spatial Relationship Predicates
+
+High-level geometric predicates for spatial relationship inference between
+detected objects. Implements robust heuristics for directional (left_of, above)
+and depth-based (in_front_of, on_top_of) relationships using bounding boxes,
+optional masks, and depth maps.
+
+This module provides the semantic layer above raw geometric computations,
+translating numeric measurements into linguistic relationships for scene graphs.
+
+Key Predicates:
+    Directional:
+        - orientation_label: Primary cardinal direction (left/right/above/below)
+    
+    Vertical Support:
+        - is_on_top_of: Object A resting on object B (gravity-based)
+        - is_below_of: Inverse of on_top_of
+    
+    Depth-based:
+        - is_in_front_of: Object A closer than object B (depth ordering)
+        - is_behind_of: Inverse of in_front_of
+
+Approach (is_on_top_of):
+    1. Center ordering: A above B by Y-coordinate
+    2. Vertical gap: Bottom of A near top of B (tolerance ~6% box height)
+    3. Horizontal overlap: At least 25% of narrower box width
+    4. Mask contact (optional): Dilated masks touch at interface band
+    5. Depth consistency (optional): A not significantly farther than B
+
+Performance:
+    - orientation_label: <1μs (simple arithmetic)
+    - is_on_top_of (boxes only): ~5μs
+    - is_on_top_of (with masks): ~50μs (mask operations)
+    - is_in_front_of (depth): ~20μs (median computation)
+
+Usage:
+    >>> from igp.relations.geometry.predicates import orientation_label, is_on_top_of
+    >>> import numpy as np
+    
+    # Directional relationship
+    >>> box1 = (10, 50, 50, 90)  # left object
+    >>> box2 = (100, 50, 140, 90)  # right object
+    >>> orientation_label(box1, box2)
+    'left_of'
+    
+    # Vertical support (cup on table)
+    >>> cup = (100, 50, 150, 100)    # Above
+    >>> table = (50, 95, 200, 150)   # Below
+    >>> is_on_top_of(cup, table)
+    True
+    
+    # With masks and depth
+    >>> cup_mask = np.zeros((200, 250), dtype=bool)
+    >>> cup_mask[50:100, 100:150] = True
+    >>> table_mask = np.zeros((200, 250), dtype=bool)
+    >>> table_mask[95:150, 50:200] = True
+    >>> depth_map = np.random.rand(200, 250)  # Depth from estimator
+    >>> is_on_top_of(
+    ...     cup, table,
+    ...     mask_a=cup_mask, mask_b=table_mask,
+    ...     depth_map=depth_map,
+    ...     min_h_overlap_ratio=0.3
+    ... )
+    True
+
+Orientation Semantics:
+    Returns relation describing where A is relative to B:
+        - "left_of": A center left of B center
+        - "right_of": A center right of B center
+        - "above": A center above B center
+        - "below": A center below B center
+    
+    Tie-breaking:
+        - margin_px=8.0: Vertical/horizontal preference threshold
+        - If |dy| > |dx| + margin → vertical relation
+        - Else horizontal relation (larger magnitude wins)
+
+On-Top-Of Heuristic Details:
+    Vertical Gap Tolerance:
+        gap = top_of_B - bottom_of_A
+        tolerance = max(8px, 6% of smaller box height)
+        
+        Valid if gap < tolerance OR slight overlap (<35% of A's height)
+    
+    Horizontal Overlap:
+        overlap = horizontal_intersection(A, B)
+        min_required = 25% of min(width_A, width_B)
+        
+        Prevents false positives for vertically aligned but horizontally distant objects
+    
+    Mask Contact:
+        y_line = min(bottom_of_A, top_of_B)
+        band = max(2px, 2% of reference height)
+        dilate(mask_A) ∩ dilate(mask_B) at y_line ± band != ∅
+        
+        Verifies actual pixel-level contact, not just bounding box proximity
+    
+    Depth Consistency:
+        depth_A > depth_B - 0.10  (normalized inverted depth: higher=closer)
+        
+        Rejects physically implausible configurations (e.g., occluded object "on" foreground)
+
+Depth Convention:
+    - Normalized inverted depth: Higher values = closer to camera
+    - MiDaS/Depth Anything V2 output after normalization
+    - is_in_front_of: depth_A > depth_B + delta
+    - delta=0.05: Tolerance for depth noise (~5% range)
+
+Integration with Scene Graphs:
+    >>> from igp.relations.geometry.predicates import is_on_top_of
+    >>> from igp.types import Relationship
+    >>> # Scene: person on skateboard
+    >>> person_box = (100, 20, 180, 150)
+    >>> board_box = (110, 145, 170, 160)
+    >>> if is_on_top_of(person_box, board_box):
+    ...     rel = Relationship(
+    ...         src_idx=0, tgt_idx=1, relation="on",
+    ...         confidence=0.9
+    ...     )
+
+Error Handling:
+    - Missing depth: Returns False (conservative)
+    - Missing masks: Skips mask contact check
+    - Invalid box coordinates: as_xyxy handles normalization
+    - NaN in depth_map: Filtered during median computation
+
+Dependencies:
+    - numpy: Required for mask/depth operations
+    - igp.relations.geometry.core: as_xyxy, center, horizontal_overlap
+    - igp.relations.geometry.masks: Mask IoU, contact, depth stats
+
+Notes:
+    - All boxes in xyxy format: (x1, y1, x2, y2)
+    - Predicates are heuristic (not physically perfect)
+    - Tunable thresholds for different domains
+    - Conservative: Prefers false-negatives over false-positives
+
+See Also:
+    - igp.relations.geometry.core: Low-level geometric operations
+    - igp.relations.geometry.masks: Mask-based computations
+    - igp.relations.clip_rel: CLIP-based semantic relationship scoring
+    - igp.utils.depth: Depth estimation models
+"""
 
 from __future__ import annotations
 

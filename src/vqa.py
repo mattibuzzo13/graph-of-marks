@@ -1,4 +1,15 @@
-# vqa.py
+"""
+Visual Question Answering (VQA) Pipeline
+
+This module provides a complete VQA pipeline integrating:
+- Multiple vision-language models (VLLM, HuggingFace)
+- Automated image preprocessing with object detection and scene graphs
+- Batch processing with configurable parameters
+- Flexible visualization and caching options
+
+The pipeline supports both preprocessing-only mode and full VQA inference.
+"""
+
 from __future__ import annotations
 import argparse
 import json
@@ -11,118 +22,192 @@ from igp.vqa.models import VLLMWrapper, HFVLModel
 from igp.vqa.runner import run_vqa, evaluate
 from igp.vqa.preproc import run_preprocessing
 
+
 def _parse_args() -> argparse.Namespace:
-    # CLI for a modular VQA pipeline orchestrated with the IGP preprocessor.
-    # Exposes model, preprocessing, visualization, and caching controls.
-    ap = argparse.ArgumentParser("VQA pipeline (modulare) + IGP preprocessor",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    # I/O for datasets and output
-    ap.add_argument("--input_file", required=True, help="JSON file of QA examples")
-    ap.add_argument("--output_file", default="vqa_results.json", help="Where to save VQA results")
-    ap.add_argument("--image_dir", help="Base directory for relative image paths")
-    ap.add_argument("--single_question", type=str, default=None, help="Usa la stessa domanda per tutte le immagini")
-
-    # Model selection and decoding knobs
-    ap.add_argument("--model_name", default="google/gemma-3-4b-it")
-    ap.add_argument("--use_vllm", action="store_true")
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--max_length", type=int, default=512)
-    ap.add_argument("--temperature", type=float, default=0.2)
-    ap.add_argument("--top_p", type=float, default=0.9)
-    ap.add_argument("--tensor_parallel_size", type=int, default=1)
-
-    # Preprocessing controls
-    ap.add_argument("--preproc_folder", type=str, default="preprocessed")
-    ap.add_argument("--disable_question_filter", action="store_true")
-    ap.add_argument("--skip_preprocessing", action="store_true")
-    ap.add_argument("--preprocess_only", action="store_true")
-    ap.add_argument("--include_scene_graph", action="store_true")
-    ap.add_argument("--inference_image", choices=["preprocessed", "raw"], default="preprocessed")
-
-    # Batching and limits
-    ap.add_argument("--batch_size", type=int, default=1)
-    ap.add_argument("--max_images", type=int, default=-1)
-    ap.add_argument("--max_questions_per_image", type=int, default=-1)
-
-    # Prompt template
-    ap.add_argument("--prompt_template", default="Question: {question}\nAnswer:")
-
-    # Compatibility alias (mirror of image_preprocessor.py)
-    ap.add_argument("--output_folder", type=str, help="Output folder (alias for preproc_folder)")
+    """
+    Parse command-line arguments for the VQA pipeline.
     
-    # Detector configuration
-    ap.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
-                   help="Comma-separated list of detectors")
-    ap.add_argument("--owl_threshold", type=float, default=0.40)
-    ap.add_argument("--yolo_threshold", type=float, default=0.80)
-    ap.add_argument("--detectron_threshold", type=float, default=0.80)
+    Returns:
+        argparse.Namespace: Parsed arguments including model config, preprocessing options,
+                          visualization settings, and batch processing parameters.
+    """
+    ap = argparse.ArgumentParser(
+        "VQA pipeline with integrated IGP preprocessor",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-    # SAM backend configuration
-    ap.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
-    ap.add_argument("--sam_hq_model_type", type=str, choices=["vit_b", "vit_l", "vit_h"], default="vit_h")
-    ap.add_argument("--points_per_side", type=int, default=32)
-    ap.add_argument("--pred_iou_thresh", type=float, default=0.90)
-    ap.add_argument("--stability_score_thresh", type=float, default=0.92)
-    ap.add_argument("--min_mask_region_area", type=int, default=100)
-    ap.add_argument("--preproc_device", type=str, default=None)
+    # Input/Output configuration
+    ap.add_argument("--input_file", required=True, help="JSON file containing QA examples")
+    ap.add_argument("--output_file", default="vqa_results.json", help="Output path for VQA results")
+    ap.add_argument("--image_dir", help="Base directory for resolving relative image paths")
+    ap.add_argument("--single_question", type=str, default=None, 
+                    help="Use the same question for all images (overrides per-image questions)")
+
+    # Model configuration and generation parameters
+    ap.add_argument("--model_name", default="google/gemma-3-4b-it", 
+                    help="HuggingFace model identifier or local path")
+    ap.add_argument("--use_vllm", action="store_true", 
+                    help="Use VLLM backend for faster inference")
+    ap.add_argument("--device", default="cuda", help="Compute device (cuda/cpu)")
+    ap.add_argument("--max_length", type=int, default=512, help="Maximum generation length")
+    ap.add_argument("--temperature", type=float, default=0.2, 
+                    help="Sampling temperature (lower = more deterministic)")
+    ap.add_argument("--top_p", type=float, default=0.9, help="Nucleus sampling threshold")
+    ap.add_argument("--tensor_parallel_size", type=int, default=1, 
+                    help="Number of GPUs for tensor parallelism (VLLM only)")
+
+    # Preprocessing pipeline controls
+    ap.add_argument("--preproc_folder", type=str, default="preprocessed", 
+                    help="Directory for preprocessed outputs")
+    ap.add_argument("--disable_question_filter", action="store_true",
+                    help="Disable question-based object filtering")
+    ap.add_argument("--skip_preprocessing", action="store_true",
+                    help="Skip preprocessing step (use existing preprocessed images)")
+    ap.add_argument("--preprocess_only", action="store_true",
+                    help="Only run preprocessing, skip VQA inference")
+    ap.add_argument("--include_scene_graph", action="store_true",
+                    help="Include scene graph information in VQA prompt")
+    ap.add_argument("--inference_image", choices=["preprocessed", "raw"], 
+                    default="preprocessed",
+                    help="Image type to use for VQA (preprocessed with annotations or raw)")
+
+    # Batch processing and resource limits
+    ap.add_argument("--batch_size", type=int, default=1, 
+                    help="Number of questions to process in parallel")
+    ap.add_argument("--max_images", type=int, default=-1, 
+                    help="Maximum number of images to process (-1 for all)")
+    ap.add_argument("--max_questions_per_image", type=int, default=-1,
+                    help="Maximum questions per image (-1 for all)")
+
+    # Prompt formatting
+    ap.add_argument("--prompt_template", default="Question: {question}\nAnswer:",
+                    help="Template for formatting VQA prompts (use {question} placeholder)")
+
+
+    # Output folder compatibility (alias for backwards compatibility)
+    ap.add_argument("--output_folder", type=str, 
+                    help="Output folder (alias for preproc_folder, for compatibility)")
+    
+    # Object detection configuration
+    ap.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
+                    help="Comma-separated list of detectors to use (owlvit,yolov8,detectron2,grounding_dino)")
+    ap.add_argument("--owl_threshold", type=float, default=0.40,
+                    help="Confidence threshold for OWL-ViT detector")
+    ap.add_argument("--yolo_threshold", type=float, default=0.80,
+                    help="Confidence threshold for YOLOv8 detector")
+    ap.add_argument("--detectron_threshold", type=float, default=0.80,
+                    help="Confidence threshold for Detectron2 detector")
+
+    # SAM segmentation backend configuration
+    ap.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1",
+                    help="SAM model version (1=original, 2=SAM2, hq=SAM-HQ)")
+    ap.add_argument("--sam_hq_model_type", type=str, 
+                    choices=["vit_b", "vit_l", "vit_h"], default="vit_h",
+                    help="SAM-HQ backbone architecture")
+    ap.add_argument("--points_per_side", type=int, default=32,
+                    help="Grid density for automatic mask generation")
+    ap.add_argument("--pred_iou_thresh", type=float, default=0.90,
+                    help="IoU threshold for mask quality filtering")
+    ap.add_argument("--stability_score_thresh", type=float, default=0.92,
+                    help="Stability score threshold for mask filtering")
+    ap.add_argument("--min_mask_region_area", type=int, default=100,
+                    help="Minimum mask area in pixels")
+    ap.add_argument("--preproc_device", type=str, default=None,
+                    help="Device for preprocessing (defaults to --device if not specified)")
     ap.add_argument("--enable_spatial_3d", action="store_true",
-                   help="Enable Spatial3D reasoning in the preprocessor (depth/occlusion/support).")
+                    help="Enable 3D spatial reasoning (depth, occlusion, physical support)")
     
     ap.add_argument("--aggressive_pruning", action="store_true",
-                   help="Tieni solo oggetti citati e relazioni richieste (pruning più duro)")
+                    help="Keep only objects mentioned in question and their direct relations")
 
-    # Relation inference constraints
-    ap.add_argument("--max_relations_per_object", type=int, default=3)
-    ap.add_argument("--min_relations_per_object", type=int, default=1)
-    ap.add_argument("--margin", type=int, default=20)
-    ap.add_argument("--min_distance", type=float, default=50)
-    ap.add_argument("--max_distance", type=float, default=20000)
+    # Spatial relationship inference parameters
+    ap.add_argument("--max_relations_per_object", type=int, default=3,
+                    help="Maximum number of relationships per object")
+    ap.add_argument("--min_relations_per_object", type=int, default=1,
+                    help="Minimum number of relationships per object")
+    ap.add_argument("--margin", type=int, default=20,
+                    help="Pixel margin for proximity-based relationships")
+    ap.add_argument("--min_distance", type=float, default=50,
+                    help="Minimum distance (pixels) for 'near' relationships")
+    ap.add_argument("--max_distance", type=float, default=20000,
+                    help="Maximum distance (pixels) for relationship detection")
 
-    # NMS/segmentation thresholds
-    ap.add_argument("--label_nms_threshold", type=float, default=0.50)
-    ap.add_argument("--seg_iou_threshold", type=float, default=0.70)
+    # NMS and segmentation fusion thresholds
+    ap.add_argument("--label_nms_threshold", type=float, default=0.50,
+                    help="IoU threshold for per-label NMS")
+    ap.add_argument("--seg_iou_threshold", type=float, default=0.70,
+                    help="IoU threshold for segmentation mask merging")
 
-    # Relation inference tuning (performance vs recall)
+    # Relationship inference performance tuning
     ap.add_argument("--relations_max_clip_pairs", type=int, default=500,
-                   help="Global cap on CLIP-scored pairs per image (default 500)")
+                    help="Maximum total CLIP-scored relationship pairs per image")
     ap.add_argument("--relations_per_src_clip_pairs", type=int, default=20,
-                   help="Per-source cap on CLIP-scored target candidates (default 20)")
+                    help="Maximum CLIP-scored candidates per source object")
 
-    # Visualization toggles and style
-    ap.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
-    ap.add_argument("--display_labels", action="store_true")
-    ap.add_argument("--display_relationships", action="store_true")
-    ap.add_argument("--display_relation_labels", action="store_true")
-    ap.add_argument("--show_segmentation", action="store_true")
-    ap.add_argument("--fill_segmentation", action="store_true")
-    ap.add_argument("--no_legend", action="store_true")
-    ap.add_argument("--seg_fill_alpha", type=float, default=0.15)
-    ap.add_argument("--bbox_linewidth", type=float, default=1.0)
-    ap.add_argument("--obj_fontsize_inside", type=int, default=10)
-    ap.add_argument("--obj_fontsize_outside", type=int, default=10)
-    ap.add_argument("--rel_fontsize", type=int, default=8)
-    ap.add_argument("--legend_fontsize", type=int, default=6)
-    ap.add_argument("--rel_arrow_linewidth", type=float, default=1.5)
-    ap.add_argument("--rel_arrow_mutation_scale", type=float, default=22.0)
-    ap.add_argument("--resolve_overlaps", action="store_true")
-    ap.add_argument("--no_bboxes", action="store_true")
-    ap.add_argument("--show_confidence", action="store_true")
+    # Visualization content control
+    ap.add_argument("--label_mode", type=str, 
+                    choices=["original", "numeric", "alphabetic"], default="original",
+                    help="Label display mode (original names, numeric IDs, or alphabetic IDs)")
+    ap.add_argument("--display_labels", action="store_true",
+                    help="Show object labels in visualization")
+    ap.add_argument("--display_relationships", action="store_true",
+                    help="Show relationship arrows between objects")
+    ap.add_argument("--display_relation_labels", action="store_true",
+                    help="Show text labels on relationship arrows")
+    ap.add_argument("--show_segmentation", action="store_true",
+                    help="Show segmentation masks")
+    ap.add_argument("--fill_segmentation", action="store_true",
+                    help="Fill segmentation masks (vs outline only)")
+    ap.add_argument("--no_legend", action="store_true",
+                    help="Hide legend from visualization")
+    ap.add_argument("--no_bboxes", action="store_true",
+                    help="Hide bounding boxes from visualization")
+    ap.add_argument("--show_confidence", action="store_true",
+                    help="Display confidence scores in labels")
 
-    # Color tuning
-    ap.add_argument("--color_sat_boost", type=float, default=1.30)
-    ap.add_argument("--color_val_boost", type=float, default=1.15)
+    # Visualization style parameters
+    ap.add_argument("--seg_fill_alpha", type=float, default=0.15,
+                    help="Transparency of segmentation mask fill (0.0-1.0)")
+    ap.add_argument("--bbox_linewidth", type=float, default=1.0,
+                    help="Line width for bounding boxes")
+    ap.add_argument("--obj_fontsize_inside", type=int, default=10,
+                    help="Font size for labels inside bounding boxes")
+    ap.add_argument("--obj_fontsize_outside", type=int, default=10,
+                    help="Font size for labels outside bounding boxes")
+    ap.add_argument("--rel_fontsize", type=int, default=8,
+                    help="Font size for relationship labels")
+    ap.add_argument("--legend_fontsize", type=int, default=6,
+                    help="Font size for legend text")
+    ap.add_argument("--rel_arrow_linewidth", type=float, default=1.5,
+                    help="Line width for relationship arrows")
+    ap.add_argument("--rel_arrow_mutation_scale", type=float, default=22.0,
+                    help="Arrow head size scaling factor")
+    ap.add_argument("--resolve_overlaps", action="store_true",
+                    help="Attempt to resolve overlapping labels")
 
-    # Mask post-processing (hole filling)
-    ap.add_argument("--close_holes", action="store_true")
-    ap.add_argument("--hole_kernel", type=int, default=7)
-    ap.add_argument("--min_hole_area", type=int, default=100)
+    # Color enhancement parameters
+    ap.add_argument("--color_sat_boost", type=float, default=1.30,
+                    help="Saturation boost factor for visualization colors")
+    ap.add_argument("--color_val_boost", type=float, default=1.15,
+                    help="Value/brightness boost factor for visualization colors")
 
-    # Output artifacts
-    ap.add_argument("--save_image_only", action="store_true")
-    ap.add_argument("--skip_graph", action="store_true")
-    ap.add_argument("--skip_prompt", action="store_true")
-    ap.add_argument("--skip_visualization", action="store_true")
+    # Mask post-processing (morphological operations)
+    ap.add_argument("--close_holes", action="store_true",
+                    help="Apply morphological closing to fill holes in masks")
+    ap.add_argument("--hole_kernel", type=int, default=7,
+                    help="Kernel size for morphological closing")
+    ap.add_argument("--min_hole_area", type=int, default=100,
+                    help="Minimum area (pixels) of holes to fill")
+
+    # Output artifact control
+    ap.add_argument("--save_image_only", action="store_true",
+                    help="Save only visualization image, skip other outputs")
+    ap.add_argument("--skip_graph", action="store_true",
+                    help="Skip scene graph generation")
+    ap.add_argument("--skip_prompt", action="store_true",
+                    help="Skip prompt/triples generation")
+    ap.add_argument("--skip_visualization", action="store_true",
+                    help="Skip visualization generation")
     ap.add_argument("--export_preproc_only", action="store_true")
     
     # Output format

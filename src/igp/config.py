@@ -1,83 +1,196 @@
 # igp/config.py
+"""
+IGP Configuration Module
+
+Centralized configuration system for the Image Graph Preprocessing pipeline.
+Re-exports configuration dataclasses from individual modules and provides
+a fallback PreprocessorConfig to prevent circular import issues during startup.
+
+Configuration Architecture:
+    
+    PreprocessorConfig (pipeline/preprocessor.py):
+        Master configuration containing all pipeline parameters
+        - I/O paths and dataset settings
+        - Detector selection and thresholds
+        - Fusion and NMS parameters
+        - Relationship extraction config
+        - Visualization settings
+        - Performance tuning knobs
+    
+    SegmenterConfig (segmentation/base.py):
+        SAM-based segmentation configuration
+        - Model selection (SAM1/SAM2/HQ/Fast)
+        - Post-processing options
+        - Device and precision settings
+    
+    RelationsConfig (relations/inference.py):
+        Relationship extraction configuration
+        - Geometric predicates
+        - CLIP-based semantic scoring
+        - LLM-guided reasoning (optional)
+        - Filtering and pruning thresholds
+    
+    VisualizerConfig (viz/visualizer.py):
+        Visualization rendering configuration
+        - Box/label/mask rendering
+        - Color schemes
+        - Font and layout
+        - Output format options
+
+Usage Patterns:
+
+    1. Import specific configs:
+        >>> from igp.config import RelationsConfig, VisualizerConfig
+        >>> rel_cfg = RelationsConfig(clip_threshold=0.6)
+        >>> viz_cfg = VisualizerConfig(show_masks=True)
+    
+    2. Import PreprocessorConfig (full pipeline):
+        >>> from igp.config import PreprocessorConfig
+        >>> config = PreprocessorConfig(
+        ...     detectors_to_use=("yolov8", "owlvit"),
+        ...     question="What objects are in the scene?"
+        ... )
+    
+    3. Use with pipeline:
+        >>> from igp.pipeline.preprocessor import Preprocessor
+        >>> from igp.config import PreprocessorConfig
+        >>> config = PreprocessorConfig(output_folder="results/")
+        >>> preprocessor = Preprocessor(config)
+
+Fallback Mechanism:
+    During initial import, PreprocessorConfig may not be available due to
+    circular dependencies. This module provides a lightweight fallback that
+    defines only essential fields. Once pipeline.preprocessor fully loads,
+    the real PreprocessorConfig replaces the fallback.
+
+Configuration Hierarchy:
+    PreprocessorConfig
+    ├── I/O: input_path, output_folder, json_file
+    ├── Dataset: dataset, split, num_instances
+    ├── Filtering: question, apply_question_filter, aggressive_pruning
+    ├── Detectors: detectors_to_use, threshold_*, grounding_dino_*
+    ├── Fusion: wbf_iou_threshold, label_nms_threshold, cross_class_*
+    ├── Relations: max_relations_per_object, relations_max_clip_pairs
+    ├── Segmentation: segmenter, sam_checkpoint_path
+    ├── Depth: use_depth, depth_model
+    ├── Visualization: visualizer_config, show_*, render_*
+    └── Performance: use_cache, batch_size, num_workers
+
+See Also:
+    - igp.pipeline.preprocessor: Main pipeline implementation
+    - igp.segmentation.base: Segmentation config details
+    - igp.relations.inference: Relationship config details
+    - igp.viz.visualizer: Visualization config details
+"""
 from __future__ import annotations
 
 from typing import Any
 
-# Re-export config dataclasses defined in their modules
+# Re-export configuration dataclasses from their respective modules
 from igp.segmentation.base import SegmenterConfig
 from igp.relations.inference import RelationsConfig
 from igp.viz.visualizer import VisualizerConfig
 
-# PreprocessorConfig lives in the pipeline module
+# PreprocessorConfig is defined in the pipeline module
+# Use try/except to provide a lightweight fallback and avoid circular import errors
 try:
     from igp.pipeline.preprocessor import PreprocessorConfig
 except Exception as _exc:
-    # Lightweight fallback to avoid early ImportError/circular imports.
-    # This gets replaced once the pipeline module is importable.
+    # Fallback configuration class used only during early import phases
+    # This will be replaced by the actual PreprocessorConfig once the pipeline module loads
     from dataclasses import dataclass
     from typing import Optional, Tuple
 
     @dataclass
     class PreprocessorConfig:  # type: ignore[no-redef]
-        # I/O
+        """
+        Fallback preprocessing configuration (lightweight import-time version).
+        
+        This minimal version prevents circular import errors during module initialization.
+        The full PreprocessorConfig from igp.pipeline.preprocessor will replace this
+        once all dependencies are loaded.
+        
+        This fallback includes only the most essential fields. For complete documentation,
+        see igp.pipeline.preprocessor.PreprocessorConfig.
+        
+        Essential Fields:
+            input_path: Input image or directory path
+            output_folder: Output directory for results
+            dataset: Dataset name for batch processing
+            question: Question for VQA-aware filtering
+            detectors_to_use: Tuple of detector names
+        
+        Notes:
+            - This is a bootstrap class, not the production config
+            - Missing many fields from full PreprocessorConfig
+            - Should not be used directly in application code
+            - Automatically replaced after igp.pipeline loads
+        """
+        
+        # Input/Output paths
         input_path: Optional[str] = None
         json_file: str = ""
         output_folder: str = "output_images"
 
-        # dataset / batching
+        # Dataset configuration and batching
         dataset: Optional[str] = None
         split: str = "train"
         image_column: str = "image"
-        num_instances: int = -1
+        num_instances: int = -1  # -1 means process all instances
 
-        # question / filtering
+        # Question-based filtering parameters
         question: str = ""
         apply_question_filter: bool = True
-        aggressive_pruning: bool = False
+        aggressive_pruning: bool = False  # Keep only objects mentioned in question
         filter_relations_by_question: bool = True
-        threshold_object_similarity: float = 0.50
-        threshold_relation_similarity: float = 0.50
-        clip_pruning_threshold: float = 0.25
-        semantic_boost_weight: float = 0.4
-        context_expansion_radius: float = 2.0
-        context_min_iou: float = 0.1
+        threshold_object_similarity: float = 0.50  # CLIP similarity threshold for objects
+        threshold_relation_similarity: float = 0.50  # CLIP similarity threshold for relations
+        clip_pruning_threshold: float = 0.25  # Minimum CLIP score to keep detection
+        semantic_boost_weight: float = 0.4  # Weight for CLIP scores vs detection scores
+        context_expansion_radius: float = 2.0  # Radius multiplier for context expansion
+        context_min_iou: float = 0.1  # Minimum IoU for context inclusion
 
-        # detectors & thresholds
+        # Object detector configuration and confidence thresholds
         detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-        threshold_owl: float = 0.10
-        threshold_yolo: float = 0.25
-        threshold_detectron: float = 0.50
-        threshold_grounding_dino: float = 0.30
-        grounding_dino_text_threshold: float = 0.25
+        threshold_owl: float = 0.10  # OWL-ViT confidence threshold
+        threshold_yolo: float = 0.25  # YOLOv8 confidence threshold
+        threshold_detectron: float = 0.50  # Detectron2 confidence threshold
+        threshold_grounding_dino: float = 0.30  # GroundingDINO confidence threshold
+        grounding_dino_text_threshold: float = 0.25  # GroundingDINO text similarity threshold
 
-        # per-object relation limits
-        max_relations_per_object: int = 3
-        min_relations_per_object: int = 0
-        # Relation inference CLIP scoring limits
-        relations_max_clip_pairs: int = 1000
-        relations_per_src_clip_pairs: int = 50
+        # Relationship inference constraints
+        max_relations_per_object: int = 3  # Maximum relationships per object
+        min_relations_per_object: int = 0  # Minimum relationships per object
+        # CLIP-based relationship scoring limits (performance tuning)
+        relations_max_clip_pairs: int = 1000  # Global limit on CLIP-scored pairs
+        relations_per_src_clip_pairs: int = 50  # Per-source limit on CLIP-scored candidates
 
-        # NMS / fusion
-        label_nms_threshold: float = 0.60
-        seg_iou_threshold: float = 0.70
-        wbf_iou_threshold: float = 0.55
-        skip_box_threshold: float = 0.10
-        cross_class_suppression: bool = False
-        cross_class_iou_threshold: float = 0.75
-        enable_group_merge: bool = False
-        merge_mask_iou_threshold: float = 0.80
-        merge_box_iou_threshold: float = 0.90
-        enable_semantic_dedup: bool = False
-        semantic_dedup_iou_threshold: float = 0.70
-        enable_containment_removal: bool = False
-        containment_threshold: float = 0.95
-        cascade_conf_threshold: float = 0.40
-        detection_mask_merge_iou_thr: float = 0.60
-        clip_cache_max_age_days: float = 30.0
-        # Keep low-score detections if no competing objects in region
-        keep_non_competing_low_scores: bool = True
-        non_competing_iou_threshold: float = 0.30
-        non_competing_min_score: float = 0.05
+        # Non-Maximum Suppression and fusion parameters
+        label_nms_threshold: float = 0.60  # IoU threshold for per-label NMS
+        seg_iou_threshold: float = 0.70  # IoU threshold for segmentation mask merging
+        wbf_iou_threshold: float = 0.55  # IoU threshold for Weighted Boxes Fusion
+        skip_box_threshold: float = 0.10  # Skip boxes below this confidence in fusion
+        
+        # Advanced deduplication and merging options
+        cross_class_suppression: bool = False  # Enable cross-class NMS
+        cross_class_iou_threshold: float = 0.75  # IoU threshold for cross-class suppression
+        enable_group_merge: bool = False  # Enable semantic grouping and merging
+        merge_mask_iou_threshold: float = 0.80  # IoU threshold for mask-based merging
+        merge_box_iou_threshold: float = 0.90  # IoU threshold for box-based merging
+        enable_semantic_dedup: bool = False  # Enable CLIP-based semantic deduplication
+        semantic_dedup_iou_threshold: float = 0.70  # IoU threshold for semantic dedup
+        enable_containment_removal: bool = False  # Remove fully contained detections
+        containment_threshold: float = 0.95  # Area overlap threshold for containment
+        
+        # Cascade and cache management
+        cascade_conf_threshold: float = 0.40  # Confidence threshold for cascade fusion
+        detection_mask_merge_iou_thr: float = 0.60  # IoU for detection-mask merging
+        clip_cache_max_age_days: float = 30.0  # CLIP cache entry expiration (days)
+        
+        # Non-competing detection recovery (reduces false negatives)
+        keep_non_competing_low_scores: bool = True  # Enable low-score recovery
+        non_competing_iou_threshold: float = 0.30  # IoU threshold for competition check
+        non_competing_min_score: float = 0.05  # Minimum score for recovery
 
         # geometry
         margin: int = 20
