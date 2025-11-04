@@ -3,42 +3,112 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 
-An optimized pipeline for **visual scene understanding** that combines object detection, segmentation, relationship extraction, and Visual Question Answering (VQA) into a unified system.
+## 📋 Overview
 
-## 🚀 Key Features
+**Graph of Marks (GoM)** transforms images into structured semantic graphs for visual scene understanding. It combines multiple state-of-the-art detection and segmentation models to extract objects, relationships, and scene graphs, enabling both visual analysis and Visual Question Answering (VQA).
 
-- ⚡ **25-35% faster** with advanced optimizations
-- 🎯 **20-30% better precision** with CLIP semantic filtering
-- 🧠 **<1% impossible relations** with physics validation
-- 📊 **Multi-detector fusion** (YOLOv8, OWL-ViT, Detectron2, GroundingDINO)
-- 🎨 **Publication-ready outputs** (SVG/PNG/JPG with transparent backgrounds)
-- 💾 **5-7x less GPU overhead** with adaptive cache management
+**Key Capabilities:**
+- 🎯 Multi-model object detection fusion (YOLOv8, OWL-ViT, Detectron2, GroundingDINO)
+- 🎨 Adaptive segmentation (SAM, SAM2, SAM-HQ, FastSAM)
+- 🔗 Spatial & semantic relationship extraction (10+ types)
+- 📊 Scene graph generation with NetworkX
+- 🤖 VQA integration with vision-language models (LLaVA, Qwen, BLIP-2)
+
+**Performance:**
+- ⚡ 25-35% faster with optimizations
+- 🎯 20-30% better precision via CLIP filtering
+- 💾 5-7x less GPU memory overhead
+
+## �️ Prerequisites
+
+**Hardware:**
+- NVIDIA GPU with 8GB+ VRAM (12GB+ recommended for SAM-HQ)
+- ~15GB disk space for models
+
+**Software:**
+- Python 3.8+
+- CUDA 11.8+
+- PyTorch 2.0+
+
+**Supported OS:** Linux, macOS, Windows (via WSL2)
 
 ## 📦 Installation
+
+### Quick Install
 
 ```bash
 # Clone repository
 git clone https://github.com/disi-unibo-nlp/graph-of-marks.git
 cd graph-of-marks
 
-# Install dependencies
+# Install PyTorch with CUDA support
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Install dependencies
 pip install -r build/requirements.txt
 
-# Download models
+# Download pretrained models
 bash download_ckpt.sh
 ```
 
+### Docker Install
+
+```bash
+docker build -f build/Dockerfile -t gom:latest .
+```
+
+## 🔄 How It Works
+
+GoM processes images through a 7-stage pipeline:
+
+```
+📸 Input Image
+    ↓
+🔍 1. DETECTION
+    Multiple detectors (YOLOv8, OWL-ViT, etc.) find objects
+    → Weighted Box Fusion (WBF) combines results
+    ↓
+✂️ 2. SEGMENTATION  
+    SAM models generate precise masks for each object
+    → Smart GPU cache management
+    ↓
+🔗 3. RELATION EXTRACTION
+    Compute spatial (left/right/above), semantic (CLIP),
+    physical (support/occlusion), and depth (3D) relations
+    ↓
+🎯 4. SEMANTIC FILTERING
+    CLIP filters irrelevant objects based on question context
+    → Physics validation removes impossible relations
+    ↓
+📊 5. SCENE GRAPH GENERATION
+    Build NetworkX graph: nodes = objects, edges = relations
+    ↓
+🎨 6. VISUALIZATION
+    Render annotated images (SVG/PNG/JPG) with labels,
+    masks, and relationship arrows
+    ↓
+💬 7. VQA (Optional)
+    Pass scene graph + image to vision-language models
+    → Generate answers to questions
+```
+
+### Output Files
+
+For each image, GoM generates:
+- `{id}_detections.json` - Bounding boxes, labels, confidence scores
+- `{id}_relations.json` - All detected relationships
+- `{id}_scene_graph.json` - Graph structure (nodes + edges)
+- `{id}_viz.{svg,png,jpg}` - Annotated visualization
+
 ## 🚀 Quick Start
 
-### Image Preprocessing
+### Basic Image Preprocessing
 
 ```bash
 python src/image_preprocessor.py \
-  --input_file room.json \
-  --image_dir room_image/ \
-  --preproc_folder room_image_output/ \
-  --preprocess_only
+  --input_file data.json \
+  --image_dir images/ \
+  --preproc_folder output/
 ```
 
 ### Visual Question Answering
@@ -47,198 +117,129 @@ python src/image_preprocessor.py \
 python src/vqa.py \
   --input_file vqa_data.json \
   --model_name llava-hf/llava-1.5-7b-hf \
-  --output_file results.json \
   --include_scene_graph
 ```
 
-### Docker
+### Docker Usage
 
 ```bash
-# Build
-docker build -f build/Dockerfile -t gom:latest .
-
-# Run
 docker run --rm --gpus all \
   -v $(pwd):/workdir \
-  gom:latest python src/image_preprocessor.py --help
+  gom:latest python src/image_preprocessor.py \
+    --input_file data.json
 ```
 
-## 🏗️ Pipeline (7 Stages)
+## 📖 Advanced Usage
 
-```
-Input Image
-    ↓
-1. DETECTION → Multi-model fusion (WBF)
-    ↓
-2. SEGMENTATION → Adaptive SAM with smart cache
-    ↓
-3. RELATIONS → 10+ types (geometric, semantic, physical, depth)
-    ↓
-4. FILTERING → CLIP-based semantic pruning
-    ↓
-5. SCENE GRAPH → NetworkX structure
-    ↓
-6. VISUALIZATION → Optimized vectorial rendering
-    ↓
-7. VQA → Vision-language models integration
-```
-
-## 📖 Usage Examples
-
-### 1. Preprocessing with Specific Detectors
+### Custom Detectors & Fusion
 
 ```bash
+# Use specific detectors with custom IoU threshold
 python src/image_preprocessor.py \
   --input_file data.json \
   --detectors owlvit yolov8 \
-  --fusion_iou_threshold 0.45 \
-  --enable_q_filter
+  --fusion_iou_threshold 0.45
 ```
 
-### 2. High-Quality Segmentation
+### High-Quality Segmentation
 
 ```bash
+# SAM-HQ with smart caching
 python src/image_preprocessor.py \
   --input_file data.json \
   --sam_version sam_hq \
-  --seg_smart_cache \
-  --output_format svg
+  --seg_smart_cache
 ```
 
-### 3. Custom Visualization
+### CLIP Semantic Filtering
 
 ```bash
-# Segmentation only (transparent SVG)
+# Filter objects by question relevance
 python src/image_preprocessor.py \
   --input_file data.json \
-  --display_labels \
-  --no_display_relationships \
+  --enable_q_filter \
+  --clip_pruning_threshold 0.25
+```
+
+### Custom Visualizations
+
+```bash
+# Transparent SVG with segmentation masks only
+python src/image_preprocessor.py \
+  --input_file data.json \
   --show_segmentation \
+  --no_display_relationships \
   --save_without_background \
   --output_format svg
-
-# Relations only (PNG)
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --no_display_labels \
-  --display_relationships \
-  --no_show_segmentation \
-  --output_format png
 ```
 
-### 4. VQA Multi-GPU con vLLM
+### Multi-GPU VQA
 
 ```bash
+# vLLM with tensor parallelism
 python src/vqa.py \
-  --input_file large_dataset.json \
+  --input_file dataset.json \
   --model_name Qwen/Qwen2.5-VL-7B-Instruct \
   --use_vllm \
   --tensor_parallel_size 2 \
   --batch_size 8
 ```
 
-## 🎯 Main Components
+## 🎯 Components Overview
 
-### Detection
-- **4 Models**: YOLOv8, OWL-ViT, Detectron2, GroundingDINO
-- **WBF Fusion**: Intelligent combination with confidence-based weights
-- **Non-Competing Recovery**: Low-score detection recovery when no spatial competition exists
+### Detection Models
+- **YOLOv8**: Fast real-time detection
+- **OWL-ViT**: Open-vocabulary detection
+- **Detectron2**: High-accuracy instance detection
+- **GroundingDINO**: Text-guided detection
 
-### Segmentation
-- **4 SAM Versions**: SAM 1, SAM 2, SAM-HQ, FastSAM
-- **Smart Cache**: Adaptive GPU memory management (80% threshold)
-- **Refinement**: Prompt-based (box, point, mask)
+**Fusion:** Weighted Box Fusion (WBF) combines predictions with confidence-based weights
 
-### Relations
-- **Geometric 2D**: left, right, above, below, near, far
-- **Semantic**: CLIP-based similarity between objects
-- **Physical**: support, containment, occlusion (with size-ratio validation)
-- **Depth 3D**: front, behind (Depth Anything V2)
+### Segmentation Models
+- **SAM 1/2**: Meta's Segment Anything
+- **SAM-HQ**: High-quality segmentation
+- **FastSAM**: Lightweight alternative
+
+**Optimization:** Smart GPU cache with 80% threshold, adaptive memory management
+
+### Relationship Types
+- **Spatial (2D)**: left, right, above, below, near, far
+- **Semantic**: CLIP-based object similarity
+- **Physical**: support, containment, occlusion (size-validated)
+- **Depth (3D)**: front, behind (Depth Anything V2)
 
 ### VQA Models
-- LLaVA 1.5/1.6 (7B-34B)
-- BLIP-2 (2.7B-6.7B)
-- Qwen2.5-VL (7B-72B)
-- Gemma-2, Pixtral, Llama-3.2-Vision
+- **LLaVA** 1.5/1.6 (7B-34B)
+- **BLIP-2** (2.7B-6.7B)
+- **Qwen2.5-VL** (7B-72B)
+- **Gemma-3** (4B)
+- **LLaMA-v-o1** (11B)
+- **Others**: Gemma-2, Pixtral, Llama-3.2-Vision
 
-## 📊 Performance
+## ⚙️ Key Parameters
 
-| Component | Optimization | Speedup |
-|------------|----------------|---------|
-| Relations | CLIP threshold + physics | +20-30% |
-| Segmentation | Smart cache | +10-22% |
-| Visualization | Vectorial rendering | 2-2.5x |
-| Color extraction | KMeans | 5-10x |
-| **End-to-End** | **All** | **+25-35%** |
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--detectors` | Detection models to use | `owlvit yolov8` |
+| `--sam_version` | Segmentation model | `sam1` |
+| `--fusion_iou_threshold` | IoU for WBF fusion | `0.45` |
+| `--enable_q_filter` | CLIP semantic filtering | `False` |
+| `--clip_pruning_threshold` | Relevance threshold | `0.25` |
+| `--seg_smart_cache` | Adaptive GPU cache | `False` |
+| `--output_format` | Output format | `svg` |
+| `--display_labels` | Show object labels | `True` |
+| `--display_relationships` | Show relations | `True` |
+| `--show_segmentation` | Show masks | `True` |
 
-## 🔧 Main CLI Parameters
+**Full documentation:** `python src/image_preprocessor.py --help`
 
-### Input/Output
-- `--input_file`: JSON file with images and questions
-- `--image_dir`: Images folder
-- `--preproc_folder`: Preprocessing output folder
-- `--output_format`: svg, png, jpg
-
-### Detection
-- `--detectors`: Detector list (owlvit, yolov8, detectron2, grounding_dino)
-- `--fusion_iou_threshold`: IoU threshold for WBF fusion (default: 0.45)
-- `--non_competing_iou_threshold`: Recovery threshold (default: 0.30)
-
-### Segmentation
-- `--sam_version`: sam1, sam2, sam_hq, fastsam
-- `--seg_smart_cache`: Enable adaptive GPU cache
-- `--seg_cache_threshold`: Cache threshold (default: 0.80)
-
-### Filtering
-- `--enable_q_filter`: Enable CLIP semantic filter
-- `--clip_pruning_threshold`: Relevance threshold (default: 0.25)
-- `--use_physics_filtering`: Physical relations validation
-
-### Visualization
-- `--display_labels`: Show labels
-- `--display_relationships`: Show relationships
-- `--show_segmentation`: Show masks
-- `--save_without_background`: Transparent background
-
-## 📁 Output Structure
-
-```
-room_image_output/
-├── {image_id}_detections.json      # Detections with bbox and confidence
-├── {image_id}_relations.json       # Spatial/semantic relations
-├── {image_id}_scene_graph.json     # Scene graph (NetworkX)
-└── {image_id}_viz.{svg,png,jpg}   # Annotated visualization
-```
-
-## 🐳 Docker
-
-```bash
-# Build
-docker build -f build/Dockerfile -t gom:latest .
-
-# Preprocessing
-docker run --rm --gpus all \
-  -v $(pwd):/workdir \
-  gom:latest python src/image_preprocessor.py \
-    --input_file room.json \
-    --preprocess_only
-
-# Full VQA
-docker run --rm --gpus device=0 \
-  -v $(pwd):/workdir \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  gom:latest python src/vqa.py \
-    --input_file data.json \
-    --model_name llava-hf/llava-1.5-7b-hf
-```
-
-## 🔍 Python API
+## � Python API
 
 ```python
 from igp.pipeline.preprocessor import ImagePreprocessor
 from igp.config import GoMConfig
 
-# Configuration
+# Configure pipeline
 config = GoMConfig(
     detectors=["owlvit", "yolov8"],
     sam_version="sam_hq",
@@ -246,46 +247,45 @@ config = GoMConfig(
     clip_pruning_threshold=0.25
 )
 
-# Preprocessing
+# Process image
 preprocessor = ImagePreprocessor(config)
 result = preprocessor.process_image(
     image_path="room.jpg",
     question="What objects are in the room?"
 )
 
-# Results
-print(f"Objects: {len(result.objects)}")
-print(f"Relations: {len(result.relations)}")
+# Access results
+print(f"Detected {len(result.objects)} objects")
+print(f"Found {len(result.relations)} relationships")
 print(f"Scene graph: {result.scene_graph}")
 ```
 
-## 📚 Supported Datasets
+## � Benchmarks & Datasets
+
+### Supported Datasets
+Download scripts available for: **COCO**, **GQA**, **RefCOCO/+/g**, **VQA v2**, **TextVQA**
 
 ```bash
-# Download dataset
 bash scripts/download/download_coco.sh /path/to/data
 bash scripts/download/download_gqa.sh /path/to/data
 bash scripts/download/download_vqa.sh /path/to/data
 ```
 
-**Available Datasets**: COCO, GQA, RefCOCO/+/g, VQA v2, TextVQA
+### Performance Metrics
 
-## 🛠️ Requirements
-
-- Python 3.8+
-- CUDA 11.8+
-- GPU with 8GB+ VRAM (12GB+ recommended for SAM-HQ)
-- ~15GB disk space for models
-
+| Optimization | Improvement |
+|--------------|-------------|
+| CLIP filtering + physics | +20-30% precision |
+| Smart GPU cache | +10-22% speed |
+| Vectorial rendering | 2-2.5x faster |
+| **End-to-end pipeline** | **+25-35% overall** |
 
 ## 🙏 Acknowledgments
 
-This project integrates:
-- **SAM/SAM-HQ** (Meta AI)
-- **YOLOv8** (Ultralytics)
-- **OWL-ViT** (Google Research)
-- **Detectron2** (FAIR)
-- **GroundingDINO** (IDEA Research)
-- **Depth Anything V2** (Depth Estimation)
-- **LLaVA, BLIP-2, Qwen2.5-VL** (Vision-Language Models)
-
+This project integrates models from:
+- **Meta AI**: SAM, SAM-HQ
+- **Ultralytics**: YOLOv8
+- **Google Research**: OWL-ViT
+- **FAIR**: Detectron2
+- **IDEA Research**: GroundingDINO
+- **Vision-Language Models**: LLaVA, BLIP-2, Qwen2.5-VL, Depth Anything V2
