@@ -1242,7 +1242,7 @@ class Visualizer:
         Format label text according to configured display mode.
         
         Supports three label modes:
-        - "original": Show class name (default)
+        - "original": Show class name with unique identifier (e.g., "table_1", "chair_2")
         - "numeric": Show sequential numbers (1, 2, 3, ...)
         - "alphabetic": Show letters (A, B, C, ..., Z, AA, AB, ...)
         
@@ -1265,7 +1265,6 @@ class Visualizer:
             "4 (87%)"
         """
         mode = self.cfg.label_mode
-        base = label.rsplit("_", 1)[0]
         if mode == "numeric":
             text = str(obj_index + 1)
         elif mode == "alphabetic":
@@ -1279,7 +1278,8 @@ class Visualizer:
                 n -= 1
             text = alphabet
         else:
-            text = base
+            # In "original" mode, keep the full label with unique identifier
+            text = label
         if self.cfg.show_confidence:
             text = f"{text} ({score * 100:.0f}%)"
         return text

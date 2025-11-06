@@ -3060,6 +3060,10 @@ class ImageGraphPreprocessor:
 
         # 7) GRAPH + PROMPT/TRIPLES (optional)
         if not self.cfg.skip_graph or not self.cfg.skip_prompt or not self.cfg.skip_visualization:
+            # Re-assign unique suffixes after all filtering to ensure correct identifiers
+            # (e.g., if filtering removed table_1 and table_3, remaining table_2 becomes table_1)
+            labels = self._add_unique_suffixes(labels)
+            
             scene_graph = build_scene_graph(
                 image_size=(W, H),
                 boxes=boxes,
