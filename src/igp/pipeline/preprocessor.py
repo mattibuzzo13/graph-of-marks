@@ -1901,20 +1901,8 @@ class ImageGraphPreprocessor:
         connected_indices = getattr(self, '_connected_only_indices', set())
         keep_indices = sorted(self._target_object_indices | connected_indices)
         
-        if len(keep_indices) == len(boxes):
-            # No filtering needed, but still filter relations to involve target
-            if relations:
-                filtered_rels = []
-                for rel in relations:
-                    src_idx = rel.get('src_idx', -1)
-                    tgt_idx = rel.get('tgt_idx', -1)
-                    # Keep relation only if at least one endpoint is a target object
-                    if src_idx in self._target_object_indices or tgt_idx in self._target_object_indices:
-                        filtered_rels.append(rel)
-                return boxes, labels, scores, masks, depths, filtered_rels
-            return boxes, labels, scores, masks, depths, relations
-        
-        # Filter objects
+        # Always filter objects - even if all objects happen to be connected
+        # We still want to go through the filtering logic for consistency
         filtered_boxes = [boxes[i] for i in keep_indices]
         filtered_labels = [labels[i] for i in keep_indices]
         filtered_scores = [scores[i] for i in keep_indices]
@@ -2767,40 +2755,73 @@ class ImageGraphPreprocessor:
         original_labels = list(cached["labels"])
         original_scores = list(cached["scores"])
         
-        # 🚀 NEW: Always check if question mentions only one object for fallback
-        # This enables automatic context expansion when only one object is mentioned
+        # 🚀 SINGLETON MODE: Check if question mentions EXACTLY ONE object type
+        # This enables keeping only target object + directly connected objects
         target_object_detected = None
+        self._singleton_mode_enabled = False
+        
+        # ALWAYS log to debug - use print() to bypass logger
+        print(f"\n[DEBUG SINGLETON CHECK]")
+        print(f"  Question: '{custom_question or self.cfg.question}'")
+        print(f"  obj_terms: {obj_terms}")
+        print(f"  apply_question_filter: {self.cfg.apply_question_filter}")
+        print(f"  len(labels): {len(labels)}")
+        
         if obj_terms and self.cfg.apply_question_filter:
-            # Try to identify objects mentioned in the question
-            bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
+            # Find which object types in detections match the question terms
+            mentioned_object_types = set()
             
-            # If exactly one object type is mentioned, prepare for single-object fallback
-            if len(bx_q) >= 1 and len(set(canonical_label(lb) for lb in lb_q)) == 1:
-                # Single object type identified - store it for potential fallback
-                target_object_detected = {
-                    'label': lb_q[0],
-                    'boxes': bx_q,
-                    'labels': lb_q,
-                    'scores': sc_q
-                }
-                if getattr(self.cfg, "verbose", False):
-                    self.logger.info(f"[SINGLE OBJECT] '{lb_q[0]}' mentioned in question ({len(bx_q)} instances)")
+            # More precise matching: term must match the base object type
+            for term in obj_terms:
+                term_lower = term.lower().strip()
+                for label in labels:
+                    canonical = canonical_label(label).lower()
+                    base = base_label(label).lower()
+                    
+                    # Exact match or term is base label
+                    if term_lower == canonical or term_lower == base or term_lower in base.split('_'):
+                        mentioned_object_types.add(canonical)
+                        break
+            
+            # ALWAYS log singleton detection - use print() to bypass logger
+            print(f"\n[SINGLETON DETECTION]")
+            print(f"  Question: '{custom_question or self.cfg.question}'")
+            print(f"  Question terms extracted: {obj_terms}")
+            print(f"  Available labels: {labels[:10]}")
+            print(f"  Matched object types: {mentioned_object_types}")
+            
+            # SINGLETON MODE: Exactly ONE object type mentioned
+            if len(mentioned_object_types) == 1:
+                target_obj_label = list(mentioned_object_types)[0]
                 
-                # 🎯 NEW: Set up single-object fallback ONLY if target was actually detected
-                # This will keep target object + directly connected objects + their relations
-                target_obj_label = lb_q[0]
+                # Find ALL instances of this object type in current detections
                 target_indices = [i for i, label in enumerate(labels)
-                                if canonical_label(label) == canonical_label(target_obj_label)]
+                                if canonical_label(label).lower() == target_obj_label]
                 
                 if target_indices:
-                    # Target object found in detections - enable fallback
+                    # ✅ ACTIVATE SINGLETON MODE
                     self._target_object_indices = set(target_indices)
-                    if getattr(self.cfg, "verbose", False):
-                        self.logger.info(f"[FALLBACK ENABLED] Target: {target_obj_label} at indices {target_indices}")
+                    self._singleton_mode_enabled = True
+                    
+                    print(f"\n🎯 [SINGLETON MODE ACTIVATED]")
+                    print(f"   Target object: '{target_obj_label}'")
+                    print(f"   Found {len(target_indices)} instance(s) at indices {target_indices}")
+                    print(f"   Will filter to: target + connected objects only")
+                    
+                    target_object_detected = {
+                        'label': target_obj_label,
+                        'indices': target_indices
+                    }
                 else:
-                    # Target object NOT found in detections - don't apply fallback
                     if getattr(self.cfg, "verbose", False):
-                        self.logger.warning(f"[FALLBACK DISABLED] Target '{target_obj_label}' not detected")
+                        self.logger.warning(f"[SINGLETON MODE DISABLED] '{target_obj_label}' mentioned but not detected")
+                        
+            elif len(mentioned_object_types) > 1:
+                self.logger.info(f"[MULTI-OBJECT MODE] Question mentions {len(mentioned_object_types)} types: {mentioned_object_types}")
+                
+            elif len(mentioned_object_types) == 0:
+                if getattr(self.cfg, "verbose", False):
+                    self.logger.info(f"[NO SINGLETON] No object types matched question terms")
 
         if self.cfg.aggressive_pruning:
             # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
@@ -2808,17 +2829,36 @@ class ImageGraphPreprocessor:
             if bx_q:
                 boxes, labels, scores = bx_q, lb_q, sc_q
                 
-                # Fallback: if only one object survives, restore all objects and filter relations later.
-                if len(boxes) == 1:
+                # Fallback: if only one object survives, restore all objects UNLESS singleton mode is active
+                # When singleton mode is active, we want to keep all objects now and filter by connections later
+                if len(boxes) == 1 and not self._singleton_mode_enabled:
                     if getattr(self.cfg, "verbose", False):
                         self.logger.info(f"[AGGRESSIVE PRUNING FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
                     
                     boxes, labels, scores = original_boxes, original_labels, original_scores
-                    # Note: _target_object_indices already set above if single object detected
+                elif len(boxes) == 1 and self._singleton_mode_enabled:
+                    if getattr(self.cfg, "verbose", False):
+                        self.logger.info(f"[AGGRESSIVE PRUNING] Only 1 object, but SINGLETON MODE active - restoring all for connection filtering")
+                    
+                    boxes, labels, scores = original_boxes, original_labels, original_scores
 
         # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores)
         det2_for_mask = [det2_for_mask[i] for i in keep]
+        
+        # 🎯 CRITICAL: Update target_object_indices after NMS (indices change!)
+        if hasattr(self, '_target_object_indices') and self._target_object_indices:
+            # Map old indices to new indices after NMS
+            old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep)}
+            new_target_indices = set()
+            for old_idx in self._target_object_indices:
+                if old_idx in old_to_new:
+                    new_target_indices.add(old_to_new[old_idx])
+            
+            self._target_object_indices = new_target_indices
+            
+            if getattr(self.cfg, "verbose", False) and self._singleton_mode_enabled:
+                self.logger.info(f"[SINGLETON] Updated target indices after NMS: {sorted(self._target_object_indices)}")
 
         # 3.5) CLIP SEMANTIC SCORING (if enabled)
         # Compute semantic relevance using CLIP embeddings before pruning
@@ -3006,41 +3046,6 @@ class ImageGraphPreprocessor:
         # 2. All objects directly connected to target via ANY relation
         # 3. ONLY relations that involve the target object (at least one endpoint)
         
-        # Apply fallback filtering if _target_object_indices was set
-        if hasattr(self, '_target_object_indices') and self._target_object_indices:
-            if getattr(self.cfg, "verbose", False):
-                self.logger.info(f"[SINGLETON] Filtering to target + connected objects")
-                self.logger.info(f"[SINGLETON] Target indices: {sorted(self._target_object_indices)}")
-            
-            # Step 1: Identify connected objects using ALL relations (before filtering)
-            # This finds objects connected to target via any relation in the full graph
-            connected_indices = self._get_connected_object_indices(rels_all, self._target_object_indices)
-            
-            if connected_indices:
-                self._connected_only_indices = connected_indices
-            else:
-                self._connected_only_indices = set()
-            
-            if getattr(self.cfg, "verbose", False):
-                self.logger.info(f"[SINGLETON] Connected object indices: {sorted(self._connected_only_indices)}")
-            
-            # Step 2: Filter objects to keep ONLY target + connected
-            # This updates boxes, labels, scores, masks, depths, and relations
-            boxes, labels, scores, masks, depths, rels_all = self._filter_objects_keep_target_and_connected(
-                boxes, labels, scores, masks, depths, rels_all
-            )
-            
-            if getattr(self.cfg, "verbose", False):
-                self.logger.info(f"[SINGLETON RESULT] Kept {len(boxes)} objects, {len(rels_all) if rels_all else 0} relations")
-            
-            # Clean up flags after use
-            if hasattr(self, '_target_object_indices'):
-                delattr(self, '_target_object_indices')
-            if hasattr(self, '_connected_only_indices'):
-                delattr(self, '_connected_only_indices')
-            if hasattr(self, '_single_object_fallback_active'):
-                delattr(self, '_single_object_fallback_active')
-
         # 6a) Relation filtering by question terms (optional).
         if self.cfg.filter_relations_by_question and rel_terms:
             rels_all = self.relations_inferencer.filter_by_question(
@@ -3057,6 +3062,46 @@ class ImageGraphPreprocessor:
             question_rel_terms=rel_terms if rel_terms else None,
         )
         rels_all = self.relations_inferencer.drop_inverse_duplicates(rels_all)
+
+        # 6c) Apply singleton filtering AFTER limiting relations per object
+        # This ensures we only consider the most important relations when finding connected objects
+        if hasattr(self, '_target_object_indices') and self._target_object_indices:
+            print(f"\n🎯 [SINGLETON FILTERING] Target + Connected Objects Only (post-relation-filter)")
+            print(f"   Target indices: {sorted(self._target_object_indices)}")
+            print(f"   Target labels: {[labels[i] for i in sorted(self._target_object_indices)]}")
+            print(f"   Total objects before filter: {len(boxes)}")
+            print(f"   Total relations before filter: {len(rels_all) if rels_all else 0}")
+            
+            # Step 1: Identify connected objects using FILTERED relations (after limit_relationships_per_object)
+            # This finds objects connected to target via the TOP relations only
+            connected_indices = self._get_connected_object_indices(rels_all, self._target_object_indices)
+            
+            if connected_indices:
+                self._connected_only_indices = connected_indices
+            else:
+                self._connected_only_indices = set()
+            
+            print(f"   Connected object indices: {sorted(self._connected_only_indices)}")
+            if self._connected_only_indices:
+                print(f"   Connected labels: {[labels[i] for i in sorted(self._connected_only_indices)]}")
+            
+            print(f"   Calling _filter_objects_keep_target_and_connected...")
+            # Step 2: Filter objects to keep ONLY target + connected
+            # This updates boxes, labels, scores, masks, depths, and relations
+            boxes, labels, scores, masks, depths, rels_all = self._filter_objects_keep_target_and_connected(
+                boxes, labels, scores, masks, depths, rels_all
+            )
+            
+            print(f"   ✅ After filter: {len(boxes)} objects, {len(rels_all) if rels_all else 0} relations")
+            print(f"   Kept objects: {labels}")
+            
+            # Clean up flags after use
+            if hasattr(self, '_target_object_indices'):
+                delattr(self, '_target_object_indices')
+            if hasattr(self, '_connected_only_indices'):
+                delattr(self, '_connected_only_indices')
+            if hasattr(self, '_single_object_fallback_active'):
+                delattr(self, '_single_object_fallback_active')
 
         # 7) GRAPH + PROMPT/TRIPLES (optional)
         if not self.cfg.skip_graph or not self.cfg.skip_prompt or not self.cfg.skip_visualization:

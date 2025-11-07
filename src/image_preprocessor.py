@@ -166,7 +166,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max_relations_per_object", type=int, default=3)
     p.add_argument("--min_relations_per_object", type=int, default=1)
     p.add_argument("--margin", type=int, default=20, help="Margine (px) per orientamento geometrico")
-    p.add_argument("--min_distance", type=float, default=50)
+    p.add_argument("--min_distance", type=float, default=10, help="Distanza minima tra centri (ridotta per più relazioni)")
     p.add_argument("--max_distance", type=float, default=20000)
 
     # NMS per label e IoU per segmentazione

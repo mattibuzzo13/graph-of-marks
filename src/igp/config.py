@@ -194,7 +194,7 @@ except Exception as _exc:
 
         # geometry
         margin: int = 20
-        min_distance: float = 50
+        min_distance: float = 10  # Reduced from 50 to allow closer object relationships
         max_distance: float = 20000
 
                 # SAM settings

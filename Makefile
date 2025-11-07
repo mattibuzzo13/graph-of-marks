@@ -125,6 +125,8 @@ ifeq ($(strip $(JSON_FILE)),)
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
+		--max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
+		--min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
 	    $(if $(strip $(QUESTION)),--question "$(QUESTION)") \
 	    $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \
@@ -149,6 +151,8 @@ else
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
+		--max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
+		--min_relations_per_object $(MIN_RELATIONS_PER_OBJECT) \
 	    $(if $(strip $(QUESTION)),--question "$(QUESTION)") \
 	    $(if $(filter false,$(ENABLE_Q_FILTER)),--disable_question_filter) \
 	    $(if $(strip $(DATASET)),--dataset "$(DATASET)") \

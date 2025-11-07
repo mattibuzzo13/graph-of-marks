@@ -551,12 +551,13 @@ class RelationInferencer:
 
                 # vertical candidate: |dy| >= |dx| and |dy| > margin
                 vertical_mask = (abs_dy >= abs_dx) & (abs_dy > margin) & mask
-                # exclude if vertical overlap too large
-                vertical_mask &= (inter_h <= (np.maximum(h[:, None], h[None, :]) * 0.5))
+                # exclude if vertical overlap too large (relaxed from 0.5 to 0.7)
+                vertical_mask &= (inter_h <= (np.maximum(h[:, None], h[None, :]) * 0.7))
 
                 # horizontal candidate: |dx| > margin
                 horizontal_mask = (abs_dx > margin) & mask
-                horizontal_mask &= (inter_w <= (np.maximum(w[:, None], w[None, :]) * 0.5))
+                # exclude if horizontal overlap too large (relaxed from 0.5 to 0.7)
+                horizontal_mask &= (inter_w <= (np.maximum(w[:, None], w[None, :]) * 0.7))
 
                 # iterate only over i < j to add primary+inverse relations (same semantics as before)
                 n_idx = boxes_np.shape[0]
