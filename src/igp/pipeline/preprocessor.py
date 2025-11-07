@@ -305,6 +305,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 import numpy as np
 import logging
 import warnings
+from igp.utils.colors import canonical_label, base_label
 
 # Detection modules
 from igp.detectors.base import Detector
@@ -1611,19 +1612,12 @@ class ImageGraphPreprocessor:
         if protected_indices:
             # Run NMS but always keep protected indices
             keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
-            print(f"[NMS DEBUG] NMS returned keep: {keep}, type: {type(keep)}")
-            print(f"[NMS DEBUG] Protected: {protected_indices}, type: {type(protected_indices)}")
             # Add back any protected indices that were removed
             keep_set = set(keep)
-            print(f"[NMS DEBUG] keep_set before adding protected: {keep_set}")
             for idx in protected_indices:
-                print(f"[NMS DEBUG]   Checking protected idx {idx}: in keep_set={idx in keep_set}, idx<len={idx < len(boxes)}")
                 if idx not in keep_set and idx < len(boxes):
-                    print(f"[NMS DEBUG]     Adding back protected idx {idx}")
                     keep_set.add(idx)
-            print(f"[NMS DEBUG] keep_set after adding protected: {keep_set}")
             keep = sorted(keep_set)
-            print(f"[NMS DEBUG] Final keep (sorted): {keep}")
         else:
             keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
             
@@ -1861,6 +1855,187 @@ class ImageGraphPreprocessor:
             )
         
         return valid_relations
+
+    def _remove_overlapping_objects(
+        self,
+        boxes: List[List[float]],
+        labels: List[str],
+        scores: List[float],
+        masks: Optional[List] = None,
+        depths: Optional[List] = None,
+        iou_threshold: float = 0.7,
+        mask_iou_threshold: float = 0.6,
+    ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
+        """
+        🧹 Remove highly overlapping objects (both same-class and cross-class).
+        
+        This function removes duplicates and overlaps that may have survived fusion/NMS:
+        - Same-class objects with high IoU (likely duplicates)
+        - Cross-class objects with very high IoU (one is probably wrong)
+        - Uses both box IoU and mask IoU (if available) for better accuracy
+        
+        Args:
+            boxes: List of bounding boxes
+            labels: List of object labels
+            scores: List of confidence scores
+            masks: Optional list of segmentation masks
+            depths: Optional list of depth values
+            iou_threshold: Box IoU threshold for same-class overlap (default: 0.7)
+            mask_iou_threshold: Mask IoU threshold for cross-class overlap (default: 0.6)
+        
+        Returns:
+            Tuple of (filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices)
+        """
+        if len(boxes) <= 1:
+            return boxes, labels, scores, masks, depths, list(range(len(boxes)))
+        
+        import numpy as np
+        
+        # Convert to numpy for easier computation
+        boxes_arr = np.array(boxes, dtype=float)
+        
+        # Compute all pairwise IoUs
+        def compute_iou(box1, box2):
+            x1_inter = max(box1[0], box2[0])
+            y1_inter = max(box1[1], box2[1])
+            x2_inter = min(box1[2], box2[2])
+            y2_inter = min(box1[3], box2[3])
+            
+            if x2_inter <= x1_inter or y2_inter <= y1_inter:
+                return 0.0, 0.0, 0.0
+            
+            inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+            box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+            box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            union_area = box1_area + box2_area - inter_area
+            
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            overlap_1 = inter_area / box1_area if box1_area > 0 else 0.0
+            overlap_2 = inter_area / box2_area if box2_area > 0 else 0.0
+            
+            return iou, overlap_1, overlap_2
+        
+        def compute_mask_iou(mask1, mask2):
+            """Compute IoU between two segmentation masks"""
+            if mask1 is None or mask2 is None:
+                return 0.0
+            try:
+                seg1 = mask1.get('segmentation') if isinstance(mask1, dict) else mask1
+                seg2 = mask2.get('segmentation') if isinstance(mask2, dict) else mask2
+                if seg1 is None or seg2 is None:
+                    return 0.0
+                intersection = np.logical_and(seg1, seg2).sum()
+                union = np.logical_or(seg1, seg2).sum()
+                return float(intersection / union) if union > 0 else 0.0
+            except Exception:
+                return 0.0
+        
+        # Track which indices to keep
+        keep = set(range(len(boxes)))
+        removed_count = 0
+        
+        # Check all pairs
+        for i in range(len(boxes)):
+            if i not in keep:
+                continue
+            
+            for j in range(i + 1, len(boxes)):
+                if j not in keep:
+                    continue
+                
+                # Compute box IoU
+                box_iou, overlap_i, overlap_j = compute_iou(boxes[i], boxes[j])
+                
+                # Same class: stricter threshold
+                same_class = canonical_label(labels[i]).lower() == canonical_label(labels[j]).lower()
+                
+                if same_class and box_iou >= iou_threshold:
+                    # Same class with high overlap -> keep higher score
+                    if scores[i] >= scores[j]:
+                        keep.discard(j)
+                        removed_count += 1
+                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} with IoU={box_iou:.3f})")
+                    else:
+                        keep.discard(i)
+                        removed_count += 1
+                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} with IoU={box_iou:.3f})")
+                        break  # i was removed, no need to check more pairs with i
+                
+                elif not same_class and box_iou >= 0.10:
+                    # Different classes with overlap -> check if one is likely a false positive
+                    # Strategy: remove if:
+                    # 1. High box/mask IoU (clear spatial overlap)
+                    # 2. One object is mostly contained within another (>80% overlap)
+                    # 3. Low score object overlapping higher score object (likely false positive)
+                    
+                    use_mask_iou = masks and i < len(masks) and j < len(masks)
+                    m_iou = 0.0
+                    if use_mask_iou:
+                        m_iou = compute_mask_iou(masks[i], masks[j])
+                    
+                    # Determine if we should remove based on overlap AND score difference
+                    score_ratio = abs(scores[i] - scores[j]) / max(scores[i], scores[j])
+                    
+                    # Check if one object is mostly contained in another
+                    mostly_contained_i = overlap_i >= 0.80  # i is 80%+ inside j
+                    mostly_contained_j = overlap_j >= 0.80  # j is 80%+ inside i
+                    
+                    # High mask overlap OR (moderate box overlap AND significant score difference)
+                    should_remove = False
+                    remove_idx = -1
+                    reason = ""
+                    
+                    if use_mask_iou and m_iou >= mask_iou_threshold:
+                        should_remove = True
+                        reason = f"mask IoU={m_iou:.3f}"
+                        # Keep higher score
+                        remove_idx = j if scores[i] >= scores[j] else i
+                    elif box_iou >= 0.25:
+                        should_remove = True
+                        reason = f"box IoU={box_iou:.3f}"
+                        # Keep higher score
+                        remove_idx = j if scores[i] >= scores[j] else i
+                    elif mostly_contained_i:
+                        # i is mostly contained in j -> remove i (smaller object is likely false positive)
+                        should_remove = True
+                        remove_idx = i
+                        reason = f"i {overlap_i*100:.1f}% contained in j (IoU={box_iou:.3f})"
+                    elif mostly_contained_j:
+                        # j is mostly contained in i -> remove j (smaller object is likely false positive)
+                        should_remove = True
+                        remove_idx = j
+                        reason = f"j {overlap_j*100:.1f}% contained in i (IoU={box_iou:.3f})"
+                    elif box_iou >= 0.10 and score_ratio >= 0.30:
+                        # Even low overlap: if one object has much lower score, it's likely wrong
+                        should_remove = True
+                        reason = f"IoU={box_iou:.3f}, score_diff={score_ratio:.3f}"
+                        # Keep higher score
+                        remove_idx = j if scores[i] >= scores[j] else i
+                    
+                    if should_remove:
+                        if remove_idx == i:
+                            keep.discard(i)
+                            removed_count += 1
+                            print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} score={scores[j]:.3f}, {reason})")
+                            break  # i was removed
+                        else:
+                            keep.discard(j)
+                            removed_count += 1
+                            print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} score={scores[i]:.3f}, {reason})")
+                            break
+        
+        # Filter to kept indices
+        kept_indices = sorted(keep)
+        filtered_boxes = [boxes[i] for i in kept_indices]
+        filtered_labels = [labels[i] for i in kept_indices]
+        filtered_scores = [scores[i] for i in kept_indices]
+        filtered_masks = [masks[i] for i in kept_indices] if masks else None
+        filtered_depths = [depths[i] for i in kept_indices] if depths else None
+        
+        if removed_count > 0:
+            print(f"  [DEDUP] Removed {removed_count} overlapping objects ({len(boxes)} → {len(filtered_boxes)})")
+        
+        return filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices
 
     def _get_connected_object_indices(
         self,
@@ -2731,7 +2906,9 @@ class ImageGraphPreprocessor:
             scores_fused = det_raw.get("scores", [d.get("score", 0.0) for d in det_raw.get("detections", [])])
             mark("detection+fusion")
             # Normalize labels to a base form to improve consistency downstream
-            labels_fused = [canonical_label(l) for l in labels_fused]
+            # local import to avoid closure/name issues in decorated method
+            from igp.utils.colors import canonical_label as _canonical_label
+            labels_fused = [_canonical_label(l) for l in labels_fused]
             # Persist for later stages (segmentation/union)
             det_for_mask = [
                 {
@@ -2847,7 +3024,6 @@ class ImageGraphPreprocessor:
         # Aggressive pruning: Apply ONLY if singleton mode is NOT active
         # In singleton mode, we want to keep ALL objects initially and filter by connections later
         if self.cfg.aggressive_pruning and not self._singleton_mode_enabled:
-            print(f"[AGGRESSIVE PRUNING] Filtering by question terms (singleton mode disabled)")
             # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
             bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
             if bx_q:
@@ -2855,16 +3031,13 @@ class ImageGraphPreprocessor:
                 
                 # Fallback: if only one object survives, restore all objects
                 if len(boxes) == 1:
-                    print(f"[AGGRESSIVE PRUNING FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
                     boxes, labels, scores = original_boxes, original_labels, original_scores
         elif self.cfg.aggressive_pruning and self._singleton_mode_enabled:
-            print(f"[AGGRESSIVE PRUNING SKIPPED] Singleton mode active - will filter by connections later")
+            pass  # Skip aggressive pruning in singleton mode
 
         # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
         # In singleton mode, protect target objects from being removed by NMS
         protected_indices = self._target_object_indices if hasattr(self, '_target_object_indices') else None
-        if protected_indices:
-            print(f"\n[NMS] Protecting target indices from removal: {sorted(protected_indices)}")
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores, protected_indices)
         det2_for_mask = [det2_for_mask[i] for i in keep]
         
@@ -2874,21 +3047,12 @@ class ImageGraphPreprocessor:
             old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep)}
             new_target_indices = set()
             
-            print(f"\n[NMS REMAPPING]")
-            print(f"  Target indices before NMS: {sorted(self._target_object_indices)}")
-            print(f"  NMS kept indices: {keep}")
-            print(f"  Old->New mapping: {old_to_new}")
-            
             for old_idx in self._target_object_indices:
                 if old_idx in old_to_new:
                     new_idx = old_to_new[old_idx]
                     new_target_indices.add(new_idx)
-                    print(f"  Mapped target {old_idx} -> {new_idx}")
-                else:
-                    print(f"  ⚠️  Target {old_idx} was removed by NMS!")
             
             self._target_object_indices = new_target_indices
-            print(f"  Target indices after NMS: {sorted(self._target_object_indices)}")
 
         # 3.5) CLIP SEMANTIC SCORING (if enabled)
         # Compute semantic relevance using CLIP embeddings before pruning
@@ -2944,6 +3108,43 @@ class ImageGraphPreprocessor:
                 if d2m is not None:
                     masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
             self.logger.info(f"   ✅ Generated {len(masks)} segmentation masks")
+            
+            # Post-segmentation deduplication: remove highly overlapping objects
+            print(f"\n🧹 [4.5/7] Post-Segmentation Deduplication")
+            print(f"   Checking for overlapping objects...")
+            initial_count = len(boxes)
+            boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
+                boxes, labels, scores, masks, depths=None,
+                iou_threshold=0.70,  # Same-class overlap threshold (lowered from 0.75)
+                mask_iou_threshold=0.60  # Cross-class mask overlap threshold (lowered from 0.65)
+            )
+            if len(boxes) < initial_count:
+                print(f"   ✅ Removed {initial_count - len(boxes)} overlapping objects")
+            # 🎯 CRITICAL: Update singleton target indices after post-segmentation deduplication
+            # kept_overlap contains the original indices (w.r.t. boxes before dedup) that were kept.
+            if hasattr(self, '_target_object_indices') and getattr(self, '_target_object_indices', None):
+                # Build mapping old_index -> new_index after dedup
+                old_to_new_after_dedup = {old_idx: new_idx for new_idx, old_idx in enumerate(kept_overlap)}
+                new_target_indices = set()
+                for old_idx in self._target_object_indices:
+                    if old_idx in old_to_new_after_dedup:
+                        new_target_indices.add(old_to_new_after_dedup[old_idx])
+
+                # If remapping yields an empty set, try a fallback: locate targets by canonical label matching
+                if not new_target_indices:
+                    target_labels = []
+                    # original target labels may be stored as canonical label strings in target_object_detected
+                    if 'target_object_detected' in locals() and isinstance(target_object_detected, dict):
+                        target_labels = [target_object_detected.get('label')]
+                    # find indices of boxes whose canonical label matches any target label
+                    if target_labels:
+                        for idx, lb in enumerate(labels):
+                            if canonical_label(lb).lower() in [t.lower() for t in target_labels]:
+                                new_target_indices.add(idx)
+
+                self._target_object_indices = new_target_indices
+            else:
+                print(f"   ✅ No overlapping objects found")
         else:
             self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
             self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
