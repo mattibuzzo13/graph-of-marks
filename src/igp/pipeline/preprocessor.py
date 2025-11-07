@@ -1583,7 +1583,8 @@ class ImageGraphPreprocessor:
                 pass
             return m
 
-    def _apply_label_nms(self, boxes: List[List[float]], labels: List[str], scores: List[float]) -> Tuple[List[List[float]], List[str], List[float], List[int]]:
+    def _apply_label_nms(self, boxes: List[List[float]], labels: List[str], scores: List[float], 
+                         protected_indices: Optional[Set[int]] = None) -> Tuple[List[List[float]], List[str], List[float], List[int]]:
         """
         Apply per-class (label-wise) Non-Maximum Suppression.
         
@@ -1595,6 +1596,7 @@ class ImageGraphPreprocessor:
             boxes: List of bounding boxes [x1, y1, x2, y2]
             labels: List of object class labels
             scores: List of confidence scores
+            protected_indices: Optional set of indices to protect from NMS removal (e.g., target objects in singleton mode)
         
         Returns:
             Tuple of (filtered_boxes, filtered_labels, filtered_scores, kept_indices)
@@ -1603,9 +1605,28 @@ class ImageGraphPreprocessor:
             - IoU threshold controlled by cfg.label_nms_threshold
             - Processes each class independently to avoid cross-class suppression
             - Preserves highest-scoring detection in each overlapping cluster
+            - Protected indices are always kept regardless of NMS
             - Typical threshold: 0.45 (aggressive) to 0.70 (conservative)
         """
-        keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
+        if protected_indices:
+            # Run NMS but always keep protected indices
+            keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
+            print(f"[NMS DEBUG] NMS returned keep: {keep}, type: {type(keep)}")
+            print(f"[NMS DEBUG] Protected: {protected_indices}, type: {type(protected_indices)}")
+            # Add back any protected indices that were removed
+            keep_set = set(keep)
+            print(f"[NMS DEBUG] keep_set before adding protected: {keep_set}")
+            for idx in protected_indices:
+                print(f"[NMS DEBUG]   Checking protected idx {idx}: in keep_set={idx in keep_set}, idx<len={idx < len(boxes)}")
+                if idx not in keep_set and idx < len(boxes):
+                    print(f"[NMS DEBUG]     Adding back protected idx {idx}")
+                    keep_set.add(idx)
+            print(f"[NMS DEBUG] keep_set after adding protected: {keep_set}")
+            keep = sorted(keep_set)
+            print(f"[NMS DEBUG] Final keep (sorted): {keep}")
+        else:
+            keep = labelwise_nms(boxes, labels, scores, iou_threshold=self.cfg.label_nms_threshold)
+            
         boxes_f = [boxes[i] for i in keep]
         labels_f = [labels[i] for i in keep]
         scores_f = [scores[i] for i in keep]
@@ -2823,27 +2844,28 @@ class ImageGraphPreprocessor:
                 if getattr(self.cfg, "verbose", False):
                     self.logger.info(f"[NO SINGLETON] No object types matched question terms")
 
-        if self.cfg.aggressive_pruning:
+        # Aggressive pruning: Apply ONLY if singleton mode is NOT active
+        # In singleton mode, we want to keep ALL objects initially and filter by connections later
+        if self.cfg.aggressive_pruning and not self._singleton_mode_enabled:
+            print(f"[AGGRESSIVE PRUNING] Filtering by question terms (singleton mode disabled)")
             # Hard pruning: keep ONLY mentioned objects; fallback if empty/singular.
             bx_q, lb_q, sc_q = self._filter_by_question_terms(boxes, labels, scores, obj_terms)
             if bx_q:
                 boxes, labels, scores = bx_q, lb_q, sc_q
                 
-                # Fallback: if only one object survives, restore all objects UNLESS singleton mode is active
-                # When singleton mode is active, we want to keep all objects now and filter by connections later
-                if len(boxes) == 1 and not self._singleton_mode_enabled:
-                    if getattr(self.cfg, "verbose", False):
-                        self.logger.info(f"[AGGRESSIVE PRUNING FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
-                    
+                # Fallback: if only one object survives, restore all objects
+                if len(boxes) == 1:
+                    print(f"[AGGRESSIVE PRUNING FALLBACK] Only 1 object after aggressive pruning; restoring all objects")
                     boxes, labels, scores = original_boxes, original_labels, original_scores
-                elif len(boxes) == 1 and self._singleton_mode_enabled:
-                    if getattr(self.cfg, "verbose", False):
-                        self.logger.info(f"[AGGRESSIVE PRUNING] Only 1 object, but SINGLETON MODE active - restoring all for connection filtering")
-                    
-                    boxes, labels, scores = original_boxes, original_labels, original_scores
+        elif self.cfg.aggressive_pruning and self._singleton_mode_enabled:
+            print(f"[AGGRESSIVE PRUNING SKIPPED] Singleton mode active - will filter by connections later")
 
         # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
-        boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores)
+        # In singleton mode, protect target objects from being removed by NMS
+        protected_indices = self._target_object_indices if hasattr(self, '_target_object_indices') else None
+        if protected_indices:
+            print(f"\n[NMS] Protecting target indices from removal: {sorted(protected_indices)}")
+        boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores, protected_indices)
         det2_for_mask = [det2_for_mask[i] for i in keep]
         
         # 🎯 CRITICAL: Update target_object_indices after NMS (indices change!)
@@ -2851,14 +2873,22 @@ class ImageGraphPreprocessor:
             # Map old indices to new indices after NMS
             old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep)}
             new_target_indices = set()
+            
+            print(f"\n[NMS REMAPPING]")
+            print(f"  Target indices before NMS: {sorted(self._target_object_indices)}")
+            print(f"  NMS kept indices: {keep}")
+            print(f"  Old->New mapping: {old_to_new}")
+            
             for old_idx in self._target_object_indices:
                 if old_idx in old_to_new:
-                    new_target_indices.add(old_to_new[old_idx])
+                    new_idx = old_to_new[old_idx]
+                    new_target_indices.add(new_idx)
+                    print(f"  Mapped target {old_idx} -> {new_idx}")
+                else:
+                    print(f"  ⚠️  Target {old_idx} was removed by NMS!")
             
             self._target_object_indices = new_target_indices
-            
-            if getattr(self.cfg, "verbose", False) and self._singleton_mode_enabled:
-                self.logger.info(f"[SINGLETON] Updated target indices after NMS: {sorted(self._target_object_indices)}")
+            print(f"  Target indices after NMS: {sorted(self._target_object_indices)}")
 
         # 3.5) CLIP SEMANTIC SCORING (if enabled)
         # Compute semantic relevance using CLIP embeddings before pruning
