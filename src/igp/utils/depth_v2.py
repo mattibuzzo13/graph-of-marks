@@ -282,7 +282,7 @@ class DepthEstimatorV2:
                         filename=f"depth_anything_v2_{encoder}.pth",
                         repo_type="model",
                         cache_dir=str(cache_dir),
-                        local_files_only=(attempt > 0)  # Try cache first on retry
+                        local_files_only=(attempt > 0)  # First try: allow download, retry: cache only
                     )
                     
                     # Check if file was from cache or downloaded

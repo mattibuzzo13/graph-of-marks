@@ -748,7 +748,6 @@ class ImageGraphPreprocessor:
 
         # 🚀 Advanced LRU detection cache with memory-aware eviction
         if self.cfg.enable_detection_cache:
-            from igp.utils.cache_advanced import ImageDetectionCache
             self.detection_cache = ImageDetectionCache(max_items=self.cfg.max_cache_size)
         else:
             self.detection_cache = None
@@ -1865,6 +1864,7 @@ class ImageGraphPreprocessor:
         depths: Optional[List] = None,
         iou_threshold: float = 0.7,
         mask_iou_threshold: float = 0.6,
+        target_indices: Optional[Set[int]] = None,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
         """
         🧹 Remove highly overlapping objects (both same-class and cross-class).
@@ -1873,6 +1873,7 @@ class ImageGraphPreprocessor:
         - Same-class objects with high IoU (likely duplicates)
         - Cross-class objects with very high IoU (one is probably wrong)
         - Uses both box IoU and mask IoU (if available) for better accuracy
+        - **PRIORITY PROTECTION**: In singleton mode, target objects are NEVER removed
         
         Args:
             boxes: List of bounding boxes
@@ -1882,6 +1883,7 @@ class ImageGraphPreprocessor:
             depths: Optional list of depth values
             iou_threshold: Box IoU threshold for same-class overlap (default: 0.7)
             mask_iou_threshold: Mask IoU threshold for cross-class overlap (default: 0.6)
+            target_indices: Optional set of target object indices (singleton mode) - these are NEVER removed
         
         Returns:
             Tuple of (filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices)
@@ -1949,9 +1951,28 @@ class ImageGraphPreprocessor:
                 # Same class: stricter threshold
                 same_class = canonical_label(labels[i]).lower() == canonical_label(labels[j]).lower()
                 
+                # 🎯 SINGLETON MODE PROTECTION: Never remove target objects
+                i_is_target = target_indices is not None and i in target_indices
+                j_is_target = target_indices is not None and j in target_indices
+                
                 if same_class and box_iou >= iou_threshold:
                     # Same class with high overlap -> keep higher score
-                    if scores[i] >= scores[j]:
+                    # BUT: If one is a target in singleton mode, ALWAYS keep it
+                    if i_is_target and not j_is_target:
+                        # i is target -> remove j regardless of score
+                        keep.discard(j)
+                        removed_count += 1
+                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps TARGET {labels[i]}, IoU={box_iou:.3f})")
+                    elif j_is_target and not i_is_target:
+                        # j is target -> remove i regardless of score
+                        keep.discard(i)
+                        removed_count += 1
+                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps TARGET {labels[j]}, IoU={box_iou:.3f})")
+                        break
+                    elif i_is_target and j_is_target:
+                        # Both are targets -> keep both (don't remove)
+                        continue
+                    elif scores[i] >= scores[j]:
                         keep.discard(j)
                         removed_count += 1
                         print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} with IoU={box_iou:.3f})")
@@ -1967,6 +1988,11 @@ class ImageGraphPreprocessor:
                     # 1. High box/mask IoU (clear spatial overlap)
                     # 2. One object is mostly contained within another (>80% overlap)
                     # 3. Low score object overlapping higher score object (likely false positive)
+                    # 🎯 BUT: NEVER remove target objects in singleton mode
+                    
+                    # Skip if both are targets
+                    if i_is_target and j_is_target:
+                        continue
                     
                     use_mask_iou = masks and i < len(masks) and j < len(masks)
                     m_iou = 0.0
@@ -1988,29 +2014,77 @@ class ImageGraphPreprocessor:
                     if use_mask_iou and m_iou >= mask_iou_threshold:
                         should_remove = True
                         reason = f"mask IoU={m_iou:.3f}"
-                        # Keep higher score
-                        remove_idx = j if scores[i] >= scores[j] else i
+                        # 🎯 SINGLETON MODE: Prefer target over non-target
+                        if i_is_target:
+                            remove_idx = j  # Keep target i, remove j
+                        elif j_is_target:
+                            remove_idx = i  # Keep target j, remove i
+                        else:
+                            # No targets: keep higher score
+                            remove_idx = j if scores[i] >= scores[j] else i
                     elif box_iou >= 0.25:
                         should_remove = True
                         reason = f"box IoU={box_iou:.3f}"
-                        # Keep higher score
-                        remove_idx = j if scores[i] >= scores[j] else i
+                        # 🎯 SINGLETON MODE: Prefer target over non-target
+                        if i_is_target:
+                            remove_idx = j  # Keep target i, remove j
+                        elif j_is_target:
+                            remove_idx = i  # Keep target j, remove i
+                        else:
+                            # No targets: keep higher score
+                            remove_idx = j if scores[i] >= scores[j] else i
                     elif mostly_contained_i:
-                        # i is mostly contained in j -> remove i (smaller object is likely false positive)
+                        # i is mostly contained in j
+                        # 🎯 SINGLETON MODE: If i is target, ALWAYS keep it (remove j)
                         should_remove = True
-                        remove_idx = i
-                        reason = f"i {overlap_i*100:.1f}% contained in j (IoU={box_iou:.3f})"
+                        if i_is_target:
+                            # i is target -> ALWAYS keep it, remove j
+                            remove_idx = j
+                            reason = f"TARGET i {overlap_i*100:.1f}% contained in j (keeping target, IoU={box_iou:.3f})"
+                        elif j_is_target:
+                            # j is target -> remove contained i
+                            remove_idx = i
+                            reason = f"i {overlap_i*100:.1f}% contained in TARGET j (IoU={box_iou:.3f})"
+                        elif scores[i] > scores[j]:
+                            # No targets: i has higher score despite being contained -> keep i, remove j
+                            remove_idx = j
+                            reason = f"i {overlap_i*100:.1f}% contained in j, but j has lower score (IoU={box_iou:.3f})"
+                        else:
+                            # No targets: j has higher score -> remove contained object i
+                            remove_idx = i
+                            reason = f"i {overlap_i*100:.1f}% contained in j (IoU={box_iou:.3f})"
                     elif mostly_contained_j:
-                        # j is mostly contained in i -> remove j (smaller object is likely false positive)
+                        # j is mostly contained in i
+                        # 🎯 SINGLETON MODE: If j is target, ALWAYS keep it (remove i)
                         should_remove = True
-                        remove_idx = j
-                        reason = f"j {overlap_j*100:.1f}% contained in i (IoU={box_iou:.3f})"
+                        if j_is_target:
+                            # j is target -> ALWAYS keep it, remove i
+                            remove_idx = i
+                            reason = f"TARGET j {overlap_j*100:.1f}% contained in i (keeping target, IoU={box_iou:.3f})"
+                        elif i_is_target:
+                            # i is target -> remove contained j
+                            remove_idx = j
+                            reason = f"j {overlap_j*100:.1f}% contained in TARGET i (IoU={box_iou:.3f})"
+                        elif scores[j] > scores[i]:
+                            # No targets: j has higher score despite being contained -> keep j, remove i
+                            remove_idx = i
+                            reason = f"j {overlap_j*100:.1f}% contained in i, but i has lower score (IoU={box_iou:.3f})"
+                        else:
+                            # No targets: i has higher score -> remove contained object j
+                            remove_idx = j
+                            reason = f"j {overlap_j*100:.1f}% contained in i (IoU={box_iou:.3f})"
                     elif box_iou >= 0.10 and score_ratio >= 0.30:
                         # Even low overlap: if one object has much lower score, it's likely wrong
+                        # 🎯 SINGLETON MODE: Prefer target over non-target
                         should_remove = True
                         reason = f"IoU={box_iou:.3f}, score_diff={score_ratio:.3f}"
-                        # Keep higher score
-                        remove_idx = j if scores[i] >= scores[j] else i
+                        if i_is_target:
+                            remove_idx = j  # Keep target i
+                        elif j_is_target:
+                            remove_idx = i  # Keep target j
+                        else:
+                            # No targets: keep higher score
+                            remove_idx = j if scores[i] >= scores[j] else i
                     
                     if should_remove:
                         if remove_idx == i:
@@ -3113,10 +3187,15 @@ class ImageGraphPreprocessor:
             print(f"\n🧹 [4.5/7] Post-Segmentation Deduplication")
             print(f"   Checking for overlapping objects...")
             initial_count = len(boxes)
+            
+            # 🎯 Pass target_indices to protect singleton targets from removal
+            current_target_indices = getattr(self, '_target_object_indices', None)
+            
             boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
                 boxes, labels, scores, masks, depths=None,
                 iou_threshold=0.70,  # Same-class overlap threshold (lowered from 0.75)
-                mask_iou_threshold=0.60  # Cross-class mask overlap threshold (lowered from 0.65)
+                mask_iou_threshold=0.60,  # Cross-class mask overlap threshold (lowered from 0.65)
+                target_indices=current_target_indices  # 🎯 Protect targets in singleton mode
             )
             if len(boxes) < initial_count:
                 print(f"   ✅ Removed {initial_count - len(boxes)} overlapping objects")
@@ -3162,7 +3241,12 @@ class ImageGraphPreprocessor:
                 except Exception:
                     depths = self.depth_est.relative_depth_at(image_pil, centers)
             else:
-                depths = self.depth_est.relative_depth_at(image_pil, centers)
+                try:
+                    depths = self.depth_est.relative_depth_at(image_pil, centers)
+                except Exception as e:
+                    self.logger.warning(f"   ⚠️  Depth estimation failed: {e}")
+                    self.logger.warning(f"   ⏭️  Continuing without depth information")
+                    depths = [0.5] * len(centers)  # Default depth values
             self.logger.info(f"   ✅ Depth computed")
         else:
             self.logger.info(f"\n📏 [5/7] Depth Estimation")

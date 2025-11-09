@@ -258,9 +258,9 @@ def main() -> int:
     
     preprocessor_params = {
         'detectors_to_use': f"({','.join(args.detectors.split(','))})" if args.detectors != "owlvit,yolov8,detectron2" else None,
-        'threshold_owl': args.owl_threshold if args.owl_threshold != 0.40 else None,
-        'threshold_yolo': args.yolo_threshold if args.yolo_threshold != 0.80 else None,
-        'threshold_detectron': args.detectron_threshold if args.detectron_threshold != 0.80 else None,
+        'threshold_owl': args.owl_threshold,
+        'threshold_yolo': args.yolo_threshold,
+        'threshold_detectron': args.detectron_threshold,
         'sam_version': args.sam_version if args.sam_version != "1" else None,
         'sam_hq_model_type': args.sam_hq_model_type if args.sam_hq_model_type != "vit_h" else None,
         'points_per_side': args.points_per_side if args.points_per_side != 32 else None,
@@ -283,7 +283,7 @@ def main() -> int:
         'show_segmentation': bool(args.show_segmentation),
         'fill_segmentation': bool(args.fill_segmentation),
         'display_legend': not bool(args.no_legend),
-        'seg_fill_alpha': args.seg_fill_alpha if args.seg_fill_alpha != 0.30 else None,
+        'seg_fill_alpha': args.seg_fill_alpha,
         'bbox_linewidth': args.bbox_linewidth if args.bbox_linewidth != 2.0 else None,
         'obj_fontsize_inside': args.obj_fontsize_inside if args.obj_fontsize_inside != 12 else None,
         'obj_fontsize_outside': args.obj_fontsize_outside if args.obj_fontsize_outside != 12 else None,
@@ -330,7 +330,7 @@ def main() -> int:
     preproc_cfg = _parse_overrides(preproc_overrides)
 
     # Optional preprocessing-only mode (no VQA generation)
-    if args.preprocess_only:
+    if args.preprocess_only or args.save_image_only:
         run_preprocessing(
             examples,
             preproc_folder=args.preproc_folder,

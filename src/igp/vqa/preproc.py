@@ -344,19 +344,31 @@ def _ensure_preproc(cfg_updates: Dict[str, Any] | None, preproc_obj: Optional[Pr
       - Unknown keys in `cfg_updates` are ignored to keep this robust across versions.
       - This avoids re-loading heavy models when reusing an existing pipeline object.
     """
+    # DEBUG: Print config updates being applied
+    if cfg_updates:
+        debug_params = ['seg_fill_alpha', 'threshold_owl', 'threshold_yolo', 'threshold_detectron']
+        debug_vals = {k: v for k, v in cfg_updates.items() if k in debug_params}
+        if debug_vals:
+            print(f"[DEBUG] Config updates received: {debug_vals}")
+    
     if preproc_obj is not None:
         if cfg_updates:
             # Update existing fields in a best-effort manner (ignore unknown keys)
             for k, v in cfg_updates.items():
                 if hasattr(preproc_obj.config, k):
                     setattr(preproc_obj.config, k, v)
+                    if k in ['seg_fill_alpha', 'threshold_owl', 'threshold_yolo', 'threshold_detectron']:
+                        print(f"[DEBUG] Updated preproc_obj.config.{k} = {v}")
         return preproc_obj
 
     cfg = default_config()
     if cfg_updates:
         for k, v in cfg_updates.items():
             if hasattr(cfg, k):
+                old_val = getattr(cfg, k)
                 setattr(cfg, k, v)
+                if k in ['seg_fill_alpha', 'threshold_owl', 'threshold_yolo', 'threshold_detectron']:
+                    print(f"[DEBUG] Updated cfg.{k}: {old_val} → {v}")
     return Preprocessor(cfg)
 
 def preprocess_for_qa(

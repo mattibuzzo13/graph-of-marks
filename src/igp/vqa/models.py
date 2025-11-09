@@ -14,6 +14,7 @@ Supported Models:
     vLLM Backend (fastest):
         - Gemma-2-VIT (Google)
         - SmolVLM2 (HuggingFace)
+        - Qwen2-VL (Alibaba)
         - Qwen2.5-VL (Alibaba)
         - LLaVA (various checkpoints)
         - Phi-4-Multimodal (Microsoft)
@@ -234,15 +235,30 @@ except Exception:
     VLLM_OK = False
 
 # Qwen (optional)
-# We also try to import Qwen 2.5-VL specific classes and helpers.
+# We try to import both Qwen2-VL and Qwen2.5-VL specific classes and helpers.
 # If they are missing, we set QWEN_OK=False and bypass those paths.
+try:
+    from transformers import Qwen2VLForConditionalGeneration  # type: ignore
+    from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig  # type: ignore
+    QWEN2_OK = True
+except Exception:
+    QWEN2_OK = False
+
 try:
     from transformers import Qwen2_5_VLForConditionalGeneration  # type: ignore
     from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig  # type: ignore
-    from qwen_vl_utils import process_vision_info  # type: ignore
-    QWEN_OK = True
+    QWEN25_OK = True
 except Exception:
-    QWEN_OK = False
+    QWEN25_OK = False
+
+try:
+    from qwen_vl_utils import process_vision_info  # type: ignore
+    QWEN_UTILS_OK = True
+except Exception:
+    QWEN_UTILS_OK = False
+
+# For backward compatibility
+QWEN_OK = QWEN2_OK or QWEN25_OK
 
 # ---------------------------------------------------------------------
 # Helper download (progress bar) — compatible with the Hugging Face Hub
@@ -371,7 +387,9 @@ class HFVLModel:
         name = model_name.lower()
         self.is_gemma  = "gemma" in name
         self.is_smol   = "smolvlm2" in name
-        self.is_qwen   = "qwen2.5-vl" in name
+        self.is_qwen25 = "qwen2.5-vl" in name
+        self.is_qwen2  = "qwen2-vl" in name and not self.is_qwen25
+        self.is_qwen   = self.is_qwen2 or self.is_qwen25
         self.is_phi4   = "phi-4-multimodal-instruct" in name
         self.is_pixtral= "pixtral" in name
         self.is_bagel  = "bagel" in name
@@ -412,7 +430,37 @@ class HFVLModel:
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, device_map="auto", torch_dtype=dtype, trust_remote_code=True
             )
-        elif self.is_qwen and QWEN_OK:
+        elif self.is_qwen2 and QWEN2_OK:
+            # Qwen 2-VL: 8-bit quantization for memory efficiency + robust config patching.
+            bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
+            cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+            local_repo = download_repo_with_bar(model_name, cache_dir)
+
+            # Patch for newer transformers: ensure "parallel_attn" fields are lists of valid values.
+            import transformers.modeling_utils as _mu
+            if not getattr(_mu, "ALL_PARALLEL_STYLES", None):
+                _mu.ALL_PARALLEL_STYLES = ["none", "tp", "rowwise", "colwise"]
+
+            raw_cfg_dict = AutoConfig.from_pretrained(local_repo, trust_remote_code=True).to_dict()
+            def _as_list(v):
+                if v is None: return ["none"]
+                return v if isinstance(v, list) else [v]
+            raw_cfg_dict["parallel_attn"] = _as_list(raw_cfg_dict.get("parallel_attn"))
+            if "text_config" in raw_cfg_dict:
+                raw_cfg_dict["text_config"]["parallel_attn"] = _as_list(raw_cfg_dict["text_config"].get("parallel_attn"))
+            if "vision_config" in raw_cfg_dict:
+                raw_cfg_dict["vision_config"]["parallel_attn"] = _as_list(raw_cfg_dict["vision_config"].get("parallel_attn"))
+            cfg = Qwen2VLConfig(**raw_cfg_dict)
+
+            self.processor = AutoProcessor.from_pretrained(local_repo, trust_remote_code=True)
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                local_repo, config=cfg, device_map="auto", torch_dtype=torch.float16,
+                quantization_config=bnb_cfg, low_cpu_mem_usage=True,
+                max_memory={0: "15GiB", "cpu": "4GiB"},
+                offload_folder="./offload", trust_remote_code=True,
+            )
+            self.model.eval()
+        elif self.is_qwen25 and QWEN25_OK:
             # Qwen 2.5-VL: 8-bit quantization for memory efficiency + robust config patching.
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
             cache_dir  = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
@@ -515,10 +563,10 @@ class HFVLModel:
 
     # — Model-specific generation implementations (required for some architectures) —
     def _gen_qwen(self, prompt: str, image_path: Optional[str]):
-        # Qwen 2.5-VL can handle both text-only and VL inputs. For text-only,
+        # Qwen 2-VL and Qwen 2.5-VL can handle both text-only and VL inputs. For text-only,
         # we call the tokenizer directly; for VL we construct a chat template
         # and process image/video inputs via process_vision_info.
-        assert QWEN_OK, "Install qwen_vl_utils to use Qwen2.5-VL"
+        assert QWEN_UTILS_OK, "Install qwen_vl_utils to use Qwen2-VL or Qwen2.5-VL"
         if not image_path:
             toks = self.processor(prompt, return_tensors="pt").to(self.device)
             gen = self.model.generate(**toks, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
