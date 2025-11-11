@@ -1,0 +1,33 @@
+# Include README and license
+include README.md
+include LICENSE
+
+# Include requirements
+include build/requirements.txt
+
+# Include documentation
+recursive-include docs *.md *.rst
+
+# Include scripts
+recursive-include scripts *.py *.sh *.txt
+
+# Include configuration files
+include *.toml *.ini *.cfg *.yaml *.yml
+
+# Exclude build artifacts
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude *.egg-info
+
+# Exclude development files
+exclude .gitignore
+exclude .dockerignore
+exclude Makefile
+recursive-exclude tests *
+recursive-exclude .git *
+recursive-exclude build *.dockerfile Dockerfile
+
+# Include type stubs
+recursive-include src *.pyi py.typed

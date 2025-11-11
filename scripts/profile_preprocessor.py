@@ -30,7 +30,7 @@ def main() -> int:
 
     # Lazy import heavy modules only when required
     try:
-        from igp.pipeline.preprocessor import ImageGraphPreprocessor, PreprocessorConfig
+        from gom.pipeline.preprocessor import ImageGraphPreprocessor, PreprocessorConfig
     except Exception as e:
         print(f"Failed to import preprocessor: {e}")
         return 3

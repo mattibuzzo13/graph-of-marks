@@ -67,8 +67,8 @@ Configuration Categories:
         --use_cache, --batch_size, --num_workers
 
 See Also:
-    - igp.pipeline.preprocessor: Core pipeline implementation
-    - igp.config: Configuration dataclasses
+    - gom.pipeline.preprocessor: Core pipeline implementation
+    - gom.config: Configuration dataclasses
     - README.md: Detailed usage examples
 """
 from __future__ import annotations
@@ -81,8 +81,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from igp.config import default_config, PreprocessorConfig
-from igp.pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
+from gom.config import default_config, PreprocessorConfig
+from gom.pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
 
 
 def _parse_args() -> argparse.Namespace:
@@ -456,7 +456,7 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
         - Optional flags applied via _apply_optional_flags()
     
     See Also:
-        - igp.config.PreprocessorConfig: Full config schema
+        - gom.config.PreprocessorConfig: Full config schema
         - _parse_args(): CLI argument definitions
     """
     cfg = default_config()
@@ -701,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
     See Also:
         - _parse_args(): CLI argument definitions
         - _build_config(): Config construction logic
-        - igp.pipeline.preprocessor.ImageGraphPreprocessor: Main pipeline
+        - gom.pipeline.preprocessor.ImageGraphPreprocessor: Main pipeline
     """
     args = _parse_args()
     _setup_logging(int(args.verbose or 0))

@@ -11,9 +11,9 @@ import numpy as np
 from PIL import Image
 from typing import List
 
-from igp.types import Detection
-from igp.fusion.wbf import fuse_detections_wbf
-from igp.fusion.wbf_optimized import fuse_detections_wbf_spatial
+from gom.types import Detection
+from gom.fusion.wbf import fuse_detections_wbf
+from gom.fusion.wbf_optimized import fuse_detections_wbf_spatial
 
 
 def generate_test_detections(

@@ -17,10 +17,10 @@ import os
 import torch
 from huggingface_hub import login as hf_login
 
-from igp.vqa.io import load_examples
-from igp.vqa.models import VLLMWrapper, HFVLModel
-from igp.vqa.runner import run_vqa, evaluate
-from igp.vqa.preproc import run_preprocessing
+from gom.vqa.io import load_examples
+from gom.vqa.models import VLLMWrapper, HFVLModel
+from gom.vqa.runner import run_vqa, evaluate
+from gom.vqa.preproc import run_preprocessing
 
 
 def _parse_args() -> argparse.Namespace:

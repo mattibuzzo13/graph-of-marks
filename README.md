@@ -236,8 +236,8 @@ python src/vqa.py \
 ## � Python API
 
 ```python
-from igp.pipeline.preprocessor import ImagePreprocessor
-from igp.config import GoMConfig
+from gom.pipeline.preprocessor import ImagePreprocessor
+from gom.config import GoMConfig
 
 # Configure pipeline
 config = GoMConfig(
