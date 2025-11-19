@@ -627,3 +627,66 @@ class HFVLModel:
             toks = self.processor(prompt, return_tensors="pt").to(self.device)
             gen = self.model.generate(**toks, max_new_tokens=self.max_length, do_sample=True, temperature=self.temperature, top_p=self.top_p)
             return self.processor.decode(gen[0], skip_special_tokens=True).strip()
+
+
+# ---------------------------------------------------------------------
+# Ollama Wrapper (Local Inference)
+# ---------------------------------------------------------------------
+class OllamaWrapper:
+    """
+    Wrapper for Ollama local inference API.
+    Requires 'ollama' package and a running Ollama server.
+    """
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+        **kwargs
+    ):
+        try:
+            import ollama
+            self.client = ollama.Client()
+        except ImportError:
+            raise ImportError("Install 'ollama' package to use OllamaWrapper: pip install ollama")
+        except Exception as e:
+            # Client init might fail if server not running, but usually it's lazy.
+            # We'll let it pass here and fail at generate time if needed.
+            import ollama
+            self.client = ollama
+            
+        self.model_name = model_name
+        self.options = {
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+
+    def generate(self, prompt: str, *, image_path: Optional[str] = None) -> str:
+        """
+        Generate response from Ollama model.
+        
+        Args:
+            prompt: Text prompt
+            image_path: Optional path to image file
+            
+        Returns:
+            Generated text response
+        """
+        messages = [{
+            'role': 'user',
+            'content': prompt,
+        }]
+        
+        if image_path:
+            messages[0]['images'] = [image_path]
+
+        try:
+            response = self.client.chat(
+                model=self.model_name,
+                messages=messages,
+                options=self.options
+            )
+            return response['message']['content'].strip()
+        except Exception as e:
+            return f"Error generating response from Ollama: {e}"

@@ -10,52 +10,56 @@ from pathlib import Path
 this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 
-# Read requirements
-requirements = []
-with open(this_directory / "build" / "requirements.txt", encoding="utf-8") as f:
-    requirements = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
 # Core dependencies that should always be installed
 core_deps = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
-    "pillow>=11.0.0",
-    "numpy>=1.24.0,<=2.2.0",
-    "opencv-python>=4.8.0",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "pillow>=10.2.0",  # Relaxed from 11.0.0 to support 10.2.0
+    "numpy>=1.24.0,<=2.2.0",  # Notebook uses 2.1.1
+    "opencv-python>=4.11.0",
     "transformers>=4.50.0",
     "networkx>=3.1",
-    "matplotlib>=3.8.0",
+    "matplotlib>=3.10.0",
     "tqdm>=4.65.0",
-    "datasets>=3.0.0",
-    "sentence-transformers>=3.0.0",
+    "datasets>=3.3.1",
+    "sentence-transformers>=3.4.1",
     "ensemble-boxes>=1.0.7",
-    "huggingface_hub>=0.31.0",
-    "psutil>=5.9.0",
+    "huggingface_hub>=0.31.1",
+    "psutil>=5.9.5",
     "omegaconf",
     "pycocotools",
+    "scipy>=1.11.4",
+    "pyyaml",
+    "fvcore>=0.1.5",
+    "iopath>=0.1.10",
+    "hydra-core>=1.3.2",
+    "einops",
+    "timm==0.9.12",
+    "spacy==3.8.4",
+    "nltk==3.9.1",
+    "blis",
+    "colorlog>=6.9.0",
+    "pretty-errors==1.2.25",
+    "sentencepiece==0.2.0",
+    "num2words==0.5.13",
 ]
 
 # Optional dependencies for specific features
 extras_require = {
     "segmentation": [
-        "segment-anything",
         "segment-anything-hq",
-        "fastsam",
-    ],
-    "sam2": [
-        "sam2",
+        # Note: fastsam, segment-anything, sam2 are git deps in notebook
     ],
     "detection": [
-        "ultralytics",
-    ],
-    "depth": [
-        "depth-anything-v2",
+        "ultralytics==8.3.99",
+        "flash-attn==2.7.4.post1",
     ],
     "vqa": [
-        "accelerate>=1.4.0",
-        "vllm>=0.8.0",
+        "accelerate==1.4.0",
+        "vllm>=0.8.0",  # Notebook has 0.8.2 in requirements.txt
         "qwen-vl-utils>=0.0.10",
         "peft>=0.9.0",
+        "ollama>=0.1.0",
     ],
     "dev": [
         "pytest>=7.0.0",
@@ -66,11 +70,10 @@ extras_require = {
         "flake8>=6.0.0",
     ],
     "visualization": [
-        "adjustText>=0.8",
+        "adjustText==0.8",
     ],
     "logging": [
         "wandb>=0.19.0",
-        "colorlog>=6.8.0",
     ],
 }
 
