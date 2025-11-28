@@ -16,13 +16,11 @@ __pycache__/
 *.pth
 *.pt
 *.json
-*.jpg
 
 
 **/data/
 **/data1/
 **/VQA_SoM/
-**/images/
 **/qf_preprocessing_inference_qwen/
 **/checkpoints/
 **/vqa_out/
