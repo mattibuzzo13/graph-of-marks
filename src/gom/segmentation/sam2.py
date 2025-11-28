@@ -31,8 +31,8 @@ Performance (hiera_large, V100 GPU, 1024x1024):
 
 Usage:
     >>> segmenter = Sam2Segmenter(
-    ...     model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
-    ...     checkpoint="checkpoints/sam2.1_hiera_large.pt"
+    ...     model_cfg="configs/sam2.1/sam2.1_hiera_t.yaml",
+    ...     checkpoint="checkpoints/sam2.1_hiera_tiny.pt"
     ... )
     >>> image = Image.open("photo.jpg")
     >>> boxes = [(100, 150, 300, 400), (500, 200, 700, 500)]
@@ -100,8 +100,8 @@ class Sam2Segmenter(Segmenter):
     
     Example:
         >>> segmenter = Sam2Segmenter(
-        ...     model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
-        ...     checkpoint="checkpoints/sam2.1_hiera_large.pt"
+        ...     model_cfg="configs/sam2.1/sam2.1_hiera_t.yaml",
+        ...     checkpoint="checkpoints/sam2.1_hiera_tiny.pt"
         ... )
         >>> img = Image.open("complex_scene.jpg")
         >>> boxes = [(x1, y1, x2, y2), ...]
@@ -118,8 +118,8 @@ class Sam2Segmenter(Segmenter):
 
     def __init__(
         self,
-        model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-        checkpoint: str = "./checkpoints/sam2.1_hiera_large.pt",
+        model_cfg: str = "configs/sam2.1/sam2.1_hiera_t.yaml",
+        checkpoint: str = "./checkpoints/sam2.1_hiera_tiny.pt",
         *,
         config: Optional[SegmenterConfig] = None,
         precision: Optional[str] = None,  # 'fp16' su CUDA, altrimenti 'fp32'
@@ -165,6 +165,10 @@ class Sam2Segmenter(Segmenter):
         """
         if not boxes:
             return []
+
+        # Ensure image is in RGB mode (SAM2 requires 3 channels)
+        if image_pil.mode != 'RGB':
+            image_pil = image_pil.convert('RGB')
 
         image_np = np.array(image_pil)
         H, W = image_np.shape[:2]

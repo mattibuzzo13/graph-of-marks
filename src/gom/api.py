@@ -134,7 +134,7 @@ class GraphOfMarks:
         config_dict = {
             "output_folder": output_folder,
             "sam_version": sam_version,
-            "use_depth": use_depth,
+            "enable_spatial_3d": use_depth,  # Map use_depth to enable_spatial_3d
             # Visualization settings
             "show_segmentation": show_masks,
             "display_relationships": show_relationships,
@@ -218,6 +218,11 @@ class GraphOfMarks:
             >>> print(f"Found {len(result['detections'])} objects")
             >>> print(f"Found {len(result['relations'])} relationships")
         """
+        import time
+        import json
+        from PIL import Image
+        import networkx as nx
+
         image_path = Path(image_path)
 
         if not image_path.exists():
@@ -227,12 +232,86 @@ class GraphOfMarks:
         if question is not None:
             self.config.question = question
 
-        # Process through pipeline
-        result = self.preprocessor.process_single_image(
-            str(image_path),
-            save_visualization=save_visualization,
-            **kwargs
+        # Update config for visualization if needed
+        if save_visualization is not None:
+            original_skip_viz = self.config.skip_visualization
+            self.config.skip_visualization = not save_visualization
+
+        # Load image and process
+        t0 = time.time()
+        image_pil = Image.open(image_path)
+        image_name = image_path.stem
+
+        # Process through pipeline (returns None, saves to disk)
+        self.preprocessor.process_single_image(
+            image_pil,
+            image_name,
+            custom_question=question
         )
+
+        processing_time = time.time() - t0
+
+        # Restore original visualization setting
+        if save_visualization is not None:
+            self.config.skip_visualization = original_skip_viz
+
+        # Build result dictionary from saved files
+        result = {
+            'detections': [],
+            'relations': [],
+            'scene_graph': None,
+            'scene_graph_json': None,
+            'output_path': None,
+            'depth_map': None,
+            'processing_time': processing_time,
+        }
+
+        # Load scene graph if it exists
+        graph_json_path = self.config.output_folder / f"{image_name}_graph.json"
+        if graph_json_path.exists():
+            with open(graph_json_path, 'r') as f:
+                result['scene_graph_json'] = json.load(f)
+
+            # Reconstruct scene graph from JSON
+            try:
+                from gom.types import Detection, Relation
+
+                # Extract detections
+                if 'nodes' in result['scene_graph_json']:
+                    for node_id, node_data in result['scene_graph_json']['nodes'].items():
+                        if node_data.get('label') != 'scene':  # Skip scene node
+                            det = Detection(
+                                box=node_data.get('bbox', [0, 0, 0, 0]),
+                                label=node_data.get('label', ''),
+                                score=node_data.get('score', 0.0),
+                                source=node_data.get('source', 'unknown')
+                            )
+                            result['detections'].append(det)
+
+                # Extract relations
+                if 'edges' in result['scene_graph_json']:
+                    for edge in result['scene_graph_json']['edges']:
+                        src_idx = edge.get('source', 0)
+                        tgt_idx = edge.get('target', 0)
+                        relation = edge.get('relation', 'unknown')
+
+                        rel = Relation(
+                            src_idx=src_idx,
+                            tgt_idx=tgt_idx,
+                            relation=relation
+                        )
+                        result['relations'].append(rel)
+            except Exception as e:
+                # If reconstruction fails, just pass the JSON
+                pass
+
+        # Add path to visualization if it was created
+        output_format = getattr(self.config, 'output_format', 'jpg')
+        if output_format not in ['jpg', 'png', 'svg']:
+            output_format = 'jpg'
+        viz_path = self.config.output_folder / f"{image_name}_output.{output_format}"
+        if viz_path.exists():
+            result['output_path'] = str(viz_path)
 
         return result
 

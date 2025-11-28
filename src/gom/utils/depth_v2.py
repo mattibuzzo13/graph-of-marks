@@ -525,40 +525,66 @@ class DepthEstimatorV2:
     def _infer_depth_anything_v2(self, image: Image.Image) -> Optional[np.ndarray]:
         """Inference using Depth Anything V2."""
         try:
-            # Convert PIL to numpy (RGB)
-            img_np = np.array(image)
+            # Ensure model is on the correct device
+            try:
+                param_device = next(self.model.parameters()).device
+                if param_device.type != self.device and self.device != "cpu":
+                    # If model is on CPU but we want GPU/MPS, move it
+                    if param_device.type == "cpu":
+                        print(f"[DEPTH] Moving model from {param_device} to {self.device}...")
+                        self.model = self.model.to(self.device)
+            except Exception:
+                pass
+
+            # Manual inference to ensure device consistency (avoids infer_image mismatch)
+            # Preprocessing: Resize -> Normalize -> ToTensor
+            w, h = image.size
+            input_size = 518
             
-            # Check if model has infer_image method (torch.hub version)
-            if hasattr(self.model, 'infer_image'):
-                # Torch.hub version - model handles preprocessing internally
-                depth = self.model.infer_image(img_np)
-                return depth.astype(np.float32)
+            # Resize maintaining aspect ratio
+            scale = input_size / max(h, w)
+            new_h, new_w = int(h * scale), int(w * scale)
             
-            # Transformers version - use preprocessor
-            if self.transform is None:
-                print("[ERROR] No transform available for Depth Anything V2")
-                return None
+            # Ensure multiple of 14 (patch size)
+            new_h = (new_h // 14) * 14
+            new_w = (new_w // 14) * 14
+            
+            if new_h == 0 or new_w == 0:
+                # Fallback for very small images
+                new_h, new_w = 518, 518
                 
-            inputs = self.transform(images=image, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            img_resized = image.resize((new_w, new_h), Image.BICUBIC)
+            img_np = np.array(img_resized, dtype=np.float32) / 255.0
             
-            # Inference with mixed precision
-            device_type = "cuda" if self._amp_enabled else "cpu"
-            with torch.autocast(device_type=device_type, dtype=self._amp_dtype, enabled=self._amp_enabled):  # type: ignore[attr-defined]
-                outputs = self.model(**inputs)
-                predicted_depth = outputs.predicted_depth
+            # Normalize (ImageNet stats)
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            img_np = (img_np - mean) / std
             
-            # Interpolate to original size
-            prediction = F.interpolate(
-                predicted_depth.unsqueeze(1),
-                size=image.size[::-1],  # (height, width)
-                mode="bicubic",
-                align_corners=False,
-            )
+            # To Tensor: (H, W, C) -> (C, H, W) -> (1, C, H, W)
+            img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0)
+            img_tensor = img_tensor.to(self.device)
             
-            # Convert to numpy
-            depth = prediction.squeeze().cpu().numpy()
-            return depth.astype(np.float32)
+            # Inference
+            with torch.no_grad():
+                # Handle mixed precision
+                device_type = "cuda" if self._amp_enabled else "cpu"
+                # MPS doesn't support autocast fully yet, so we skip it for MPS or use default
+                if self.device == "mps":
+                    depth = self.model(img_tensor)
+                else:
+                    with torch.autocast(device_type=device_type, dtype=self._amp_dtype, enabled=self._amp_enabled):
+                        depth = self.model(img_tensor)
+                
+            # Resize back to original resolution
+            depth = F.interpolate(
+                depth[:, None], 
+                size=(h, w), 
+                mode="bilinear", 
+                align_corners=True
+            )[0, 0]
+            
+            return depth.cpu().numpy().astype(np.float32)
             
         except Exception as e:
             print(f"[ERROR] Depth Anything V2 inference failed: {e}")

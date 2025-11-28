@@ -14,12 +14,12 @@ long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 core_deps = [
     "torch>=2.6.0",
     "torchvision>=0.21.0",
-    "pillow>=10.2.0",  # Relaxed from 11.0.0 to support 10.2.0
+    "pillow>=9.5.0",  # Support Python 3.9+, was >=10.2.0
     "numpy>=1.24.0,<=2.2.0",  # Notebook uses 2.1.1
     "opencv-python>=4.11.0",
     "transformers>=4.50.0",
     "networkx>=3.1",
-    "matplotlib>=3.10.0",
+    "matplotlib>=3.7.0",  # Changed from >=3.10.0 to support Python 3.9
     "tqdm>=4.65.0",
     "datasets>=3.3.1",
     "sentence-transformers>=3.4.1",
@@ -52,7 +52,6 @@ extras_require = {
     ],
     "detection": [
         "ultralytics==8.3.99",
-        "flash-attn==2.7.4.post1",
     ],
     "vqa": [
         "accelerate==1.4.0",

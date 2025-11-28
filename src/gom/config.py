@@ -98,8 +98,8 @@ try:
 except Exception as _exc:
     # Fallback configuration class used only during early import phases
     # This will be replaced by the actual PreprocessorConfig once the pipeline module loads
-    from dataclasses import dataclass
-    from typing import Optional, Tuple
+    from dataclasses import dataclass, field
+    from typing import Optional, List, Dict, Any, Tuple
 
     @dataclass
     class PreprocessorConfig:  # type: ignore[no-redef]
@@ -126,10 +126,11 @@ except Exception as _exc:
             - Should not be used directly in application code
             - Automatically replaced after gom.pipeline loads
         """
+        # Segmentation
+        segmenter: str = "sam2"
+        segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)
         
-        # Input/Output paths
-        input_path: Optional[str] = None
-        json_file: str = ""
+        # Depth estimationr = ""
         output_folder: str = "output_images"
 
         # Dataset configuration and batching

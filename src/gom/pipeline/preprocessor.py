@@ -297,7 +297,8 @@ from PIL import Image
 import os
 import time
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 import contextlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
@@ -309,11 +310,28 @@ from gom.utils.colors import canonical_label, base_label
 
 # Detection modules
 from gom.detectors.base import Detector
-from gom.detectors.owlvit import OwlViTDetector
-from gom.detectors.yolov8 import YOLOv8Detector
-from gom.detectors.detectron2 import Detectron2Detector
-from gom.detectors.grounding_dino import GroundingDINODetector
 from gom.detectors import DetectorManager
+
+# Try to import optional detectors
+try:
+    from gom.detectors.owlvit import OwlViTDetector
+except ImportError:
+    OwlViTDetector = None  # type: ignore
+
+try:
+    from gom.detectors.yolov8 import YOLOv8Detector
+except ImportError:
+    YOLOv8Detector = None  # type: ignore
+
+try:
+    from gom.detectors.detectron2 import Detectron2Detector
+except ImportError:
+    Detectron2Detector = None  # type: ignore
+
+try:
+    from gom.detectors.grounding_dino import GroundingDINODetector
+except ImportError:
+    GroundingDINODetector = None  # type: ignore
 
 # Detection fusion algorithms
 from gom.fusion.wbf import fuse_detections_wbf as weighted_boxes_fusion
@@ -467,6 +485,7 @@ class PreprocessorConfig:
 
     # SAM segmentation settings
     sam_version: str = "1"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
+    segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
     sam_hq_model_type: str = "vit_h"  # SAM-HQ model size
     points_per_side: int = 32  # Grid density for automatic mask generation
     pred_iou_thresh: float = 0.88  # Predicted IoU threshold for mask quality
@@ -812,31 +831,51 @@ class ImageGraphPreprocessor:
         """
         dets: List[Detector] = []
         names = set(d.strip().lower() for d in self.cfg.detectors_to_use)
-        
+
         if "owlvit" in names:
+            if OwlViTDetector is None:
+                raise ImportError(
+                    "OwlViT detector requested but not available. "
+                    "Install with: pip install transformers"
+                )
             dets.append(OwlViTDetector(
-                device=self.device, 
+                device=self.device,
                 score_threshold=self.cfg.threshold_owl
             ))
-        
+
         if "yolov8" in names:
+            if YOLOv8Detector is None:
+                raise ImportError(
+                    "YOLOv8 detector requested but not available. "
+                    "Install with: pip install ultralytics"
+                )
             dets.append(YOLOv8Detector(
-                device=self.device, 
+                device=self.device,
                 score_threshold=self.cfg.threshold_yolo
             ))
-        
+
         if "detectron2" in names:
+            if Detectron2Detector is None:
+                raise ImportError(
+                    "Detectron2 detector requested but not available. "
+                    "Install with: pip install detectron2"
+                )
             dets.append(Detectron2Detector(
-                device=self.device, 
+                device=self.device,
                 score_threshold=self.cfg.threshold_detectron
             ))
-        
+
         if "grounding_dino" in names or "groundingdino" in names:
+            if GroundingDINODetector is None:
+                raise ImportError(
+                    "GroundingDINO detector requested but not available. "
+                    "Install GroundingDINO following the official instructions"
+                )
             dets.append(GroundingDINODetector(
-                device=self.device, 
+                device=self.device,
                 score_threshold=self.cfg.threshold_grounding_dino
             ))
-        
+
         return dets
 
     def _init_segmenter(self) -> Segmenter:
@@ -865,10 +904,12 @@ class ImageGraphPreprocessor:
         
         # SAM variant selection
         if self.cfg.sam_version == "2":
-            return Sam2Segmenter(config=s_cfg)
+            return Sam2Segmenter(config=s_cfg, **self.cfg.segmenter_kwargs)
         if self.cfg.sam_version == "hq":
-            return SamHQSegmenter(config=s_cfg, model_type=self.cfg.sam_hq_model_type)
-        return Sam1Segmenter(config=s_cfg)
+            return SamHQSegmenter(config=s_cfg, model_type=self.cfg.sam_hq_model_type, **self.cfg.segmenter_kwargs)
+    
+        # SAM 1
+        return Sam1Segmenter(config=s_cfg, **self.cfg.segmenter_kwargs)
 
     # ----------------------------- Cache Management -----------------------------
 
@@ -3182,7 +3223,28 @@ class ImageGraphPreprocessor:
         if need_seg and boxes:
             self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
             self.logger.info(f"   ⚙️  Generating masks for {len(boxes)} objects...")
-            masks = self.segmenter.segment(image_pil, boxes)
+            if self._custom_segmenter:
+                self.logger.info(f"   ⚙️  Using custom segmenter...")
+                # Custom segmenter expects numpy image and boxes
+                custom_out = self._custom_segmenter(np.array(image_pil), boxes)
+                
+                # Adapt output to internal format (List[Dict])
+                if isinstance(custom_out, dict) and 'masks' in custom_out:
+                    masks = []
+                    for m in custom_out['masks']:
+                        # Create a standard mask dict
+                        masks.append({
+                            'segmentation': m,
+                            'bbox': [0, 0, 0, 0],  # Dummy bbox
+                            'predicted_iou': 1.0
+                        })
+                elif isinstance(custom_out, list):
+                    masks = custom_out
+                else:
+                    self.logger.warning("Custom segmenter returned unknown format, falling back to default.")
+                    masks = self.segmenter.segment(image_pil, boxes)
+            else:
+                masks = self.segmenter.segment(image_pil, boxes)
             # fuse with detectron2 masks if available
             for i in range(len(masks)):
                 d2m = det2_for_mask[i].get("det2_mask") if det2_for_mask and det2_for_mask[i] is not None else None

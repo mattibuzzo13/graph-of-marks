@@ -3,36 +3,11 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 
-## 📋 Overview
+## Overview
 
 **Graph of Marks (GoM)** transforms images into structured semantic graphs for visual scene understanding. It combines multiple state-of-the-art detection and segmentation models to extract objects, relationships, and scene graphs, enabling both visual analysis and Visual Question Answering (VQA).
 
-**Key Capabilities:**
-- 🎯 Multi-model object detection fusion (YOLOv8, OWL-ViT, Detectron2, GroundingDINO)
-- 🎨 Adaptive segmentation (SAM, SAM2, SAM-HQ, FastSAM)
-- 🔗 Spatial & semantic relationship extraction (10+ types)
-- 📊 Scene graph generation with NetworkX
-- 🤖 VQA integration with vision-language models (LLaVA, Qwen, BLIP-2)
-
-**Performance:**
-- ⚡ 25-35% faster with optimizations
-- 🎯 20-30% better precision via CLIP filtering
-- 💾 5-7x less GPU memory overhead
-
-## �️ Prerequisites
-
-**Hardware:**
-- NVIDIA GPU with 8GB+ VRAM (12GB+ recommended for SAM-HQ)
-- ~15GB disk space for models
-
-**Software:**
-- Python 3.8+
-- CUDA 11.8+
-- PyTorch 2.0+
-
-**Supported OS:** Linux, macOS, Windows (via WSL2)
-
-## 📦 Installation
+## Installation
 
 ### Quick Install
 
@@ -57,37 +32,37 @@ bash download_ckpt.sh
 docker build -f build/Dockerfile -t gom:latest .
 ```
 
-## 🔄 How It Works
+## How It Works
 
 GoM processes images through a 7-stage pipeline:
 
 ```
-📸 Input Image
+Input Image
     ↓
-🔍 1. DETECTION
+1. DETECTION
     Multiple detectors (YOLOv8, OWL-ViT, etc.) find objects
     → Weighted Box Fusion (WBF) combines results
     ↓
-✂️ 2. SEGMENTATION  
+2. SEGMENTATION  
     SAM models generate precise masks for each object
     → Smart GPU cache management
     ↓
-🔗 3. RELATION EXTRACTION
+3. RELATION EXTRACTION
     Compute spatial (left/right/above), semantic (CLIP),
     physical (support/occlusion), and depth (3D) relations
     ↓
-🎯 4. SEMANTIC FILTERING
+4. SEMANTIC FILTERING
     CLIP filters irrelevant objects based on question context
     → Physics validation removes impossible relations
     ↓
-📊 5. SCENE GRAPH GENERATION
+5. SCENE GRAPH GENERATION
     Build NetworkX graph: nodes = objects, edges = relations
     ↓
-🎨 6. VISUALIZATION
+6. VISUALIZATION
     Render annotated images (SVG/PNG/JPG) with labels,
     masks, and relationship arrows
     ↓
-💬 7. VQA (Optional)
+7. VQA (Optional)
     Pass scene graph + image to vision-language models
     → Generate answers to questions
 ```
@@ -100,7 +75,7 @@ For each image, GoM generates:
 - `{id}_scene_graph.json` - Graph structure (nodes + edges)
 - `{id}_viz.{svg,png,jpg}` - Annotated visualization
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Basic Image Preprocessing
 
@@ -173,19 +148,7 @@ python src/image_preprocessor.py \
   --output_format svg
 ```
 
-### Multi-GPU VQA
-
-```bash
-# vLLM with tensor parallelism
-python src/vqa.py \
-  --input_file dataset.json \
-  --model_name Qwen/Qwen2.5-VL-7B-Instruct \
-  --use_vllm \
-  --tensor_parallel_size 2 \
-  --batch_size 8
-```
-
-## 🎯 Components Overview
+## Components Overview
 
 ### Detection Models
 - **YOLOv8**: Fast real-time detection
@@ -216,7 +179,7 @@ python src/vqa.py \
 - **LLaMA-v-o1** (11B)
 - **Others**: Gemma-2, Pixtral, Llama-3.2-Vision
 
-## ⚙️ Key Parameters
+## Key Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -233,7 +196,7 @@ python src/vqa.py \
 
 **Full documentation:** `python src/image_preprocessor.py --help`
 
-## � Python API
+## Python API
 
 ```python
 from gom.pipeline.preprocessor import ImagePreprocessor
@@ -260,7 +223,7 @@ print(f"Found {len(result.relations)} relationships")
 print(f"Scene graph: {result.scene_graph}")
 ```
 
-## � Benchmarks & Datasets
+## Benchmarks & Datasets
 
 ### Supported Datasets
 Download scripts available for: **COCO**, **GQA**, **RefCOCO/+/g**, **VQA v2**, **TextVQA**
@@ -270,22 +233,3 @@ bash scripts/download/download_coco.sh /path/to/data
 bash scripts/download/download_gqa.sh /path/to/data
 bash scripts/download/download_vqa.sh /path/to/data
 ```
-
-### Performance Metrics
-
-| Optimization | Improvement |
-|--------------|-------------|
-| CLIP filtering + physics | +20-30% precision |
-| Smart GPU cache | +10-22% speed |
-| Vectorial rendering | 2-2.5x faster |
-| **End-to-end pipeline** | **+25-35% overall** |
-
-## 🙏 Acknowledgments
-
-This project integrates models from:
-- **Meta AI**: SAM, SAM-HQ
-- **Ultralytics**: YOLOv8
-- **Google Research**: OWL-ViT
-- **FAIR**: Detectron2
-- **IDEA Research**: GroundingDINO
-- **Vision-Language Models**: LLaVA, BLIP-2, Qwen2.5-VL, Depth Anything V2

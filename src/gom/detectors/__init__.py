@@ -72,17 +72,36 @@ See Also:
     - gom.fusion: Detection fusion strategies
 """
 from .base import Detector
-from .yolov8 import YOLOv8Detector
-from .owlvit import OwlViTDetector
-from .detectron2 import Detectron2Detector
-from .grounding_dino import GroundingDINODetector
 from .manager import DetectorManager
+
+# Try to import optional detectors - they may require additional dependencies
+_AVAILABLE_DETECTORS = []
+
+try:
+    from .yolov8 import YOLOv8Detector
+    _AVAILABLE_DETECTORS.append("YOLOv8Detector")
+except ImportError:
+    YOLOv8Detector = None  # type: ignore
+
+try:
+    from .owlvit import OwlViTDetector
+    _AVAILABLE_DETECTORS.append("OwlViTDetector")
+except ImportError:
+    OwlViTDetector = None  # type: ignore
+
+try:
+    from .detectron2 import Detectron2Detector
+    _AVAILABLE_DETECTORS.append("Detectron2Detector")
+except ImportError:
+    Detectron2Detector = None  # type: ignore
+
+try:
+    from .grounding_dino import GroundingDINODetector
+    _AVAILABLE_DETECTORS.append("GroundingDINODetector")
+except ImportError:
+    GroundingDINODetector = None  # type: ignore
 
 __all__ = [
     "Detector",
-    "YOLOv8Detector",
-    "OwlViTDetector",
-    "Detectron2Detector",
-    "GroundingDINODetector",
     "DetectorManager",
-]
+] + _AVAILABLE_DETECTORS

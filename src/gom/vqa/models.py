@@ -655,12 +655,14 @@ class OllamaWrapper:
             # We'll let it pass here and fail at generate time if needed.
             import ollama
             self.client = ollama
-            
+
         self.model_name = model_name
         self.options = {
             "temperature": temperature,
             "top_p": top_p,
         }
+        # Add any additional options from kwargs
+        self.options.update(kwargs)
 
     def generate(self, prompt: str, *, image_path: Optional[str] = None) -> str:
         """
