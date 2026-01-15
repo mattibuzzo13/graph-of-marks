@@ -170,14 +170,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max_distance", type=float, default=20000)
 
     # NMS per label e IoU per segmentazione
-    p.add_argument("--label_nms_threshold", type=float, default=0.50)
+    p.add_argument("--label_nms_threshold", type=float, default=0.25)
     p.add_argument("--seg_iou_threshold", type=float, default=0.70)
-    p.add_argument("--wbf_iou_threshold", type=float, default=0.55,
+    p.add_argument("--wbf_iou_threshold", type=float, default=0.25,
                    help="Soglia IoU per WBF fusion")
     p.add_argument("--skip_box_threshold", type=float, default=0.10,
                    help="Soglia per saltare box a bassa confidenza")
     p.add_argument("--cross_class_iou_threshold", type=float, default=0.75,
                    help="Soglia IoU per cross-class suppression")
+    p.add_argument("--same_class_iou_threshold", type=float, default=0.30,
+               help="IoU threshold for same-class deduplication (lower = more aggressive, default: 0.55)")
+    p.add_argument("--cross_class_score_diff_threshold", type=float, default=0.80,
+               help="Score difference ratio threshold for cross-class deduplication (default: 0.80 = 80% difference required)")
     p.add_argument("--cascade_conf_threshold", type=float, default=0.40,
                    help="Soglia confidenza per cascade detector")
     p.add_argument("--detection_mask_merge_iou_thr", type=float, default=0.60,
@@ -503,6 +507,8 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.wbf_iou_threshold = float(args.wbf_iou_threshold)
     cfg.skip_box_threshold = float(args.skip_box_threshold)
     cfg.cross_class_iou_threshold = float(args.cross_class_iou_threshold)
+    cfg.same_class_iou_threshold = float(args.same_class_iou_threshold)
+    cfg.cross_class_score_diff_threshold = float(args.cross_class_score_diff_threshold)
     cfg.cascade_conf_threshold = float(args.cascade_conf_threshold)
     cfg.detection_mask_merge_iou_thr = float(args.detection_mask_merge_iou_thr)
     cfg.clip_cache_max_age_days = float(args.clip_cache_max_age_days)

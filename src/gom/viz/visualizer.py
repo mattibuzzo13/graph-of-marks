@@ -162,23 +162,29 @@ class VisualizerConfig:
     use_batch_text_renderer: bool = True
 
     # Typography and visual style
-    obj_fontsize_inside: int = 12
-    obj_fontsize_outside: int = 12
-    rel_fontsize: int = 10
-    legend_fontsize: int = 8
+    font_family: str = "DejaVu Sans Mono"
+    obj_fontsize_inside: int = 32
+    obj_fontsize_outside: int = 32
+    rel_fontsize: int = 28
+    legend_fontsize: int = 14
+    auto_scale_styles: bool = True
+    style_ref_px: int = 1000
+    style_ref_dpi: int = 600
+    style_scale_min: float = 0.75
+    style_scale_max: float = 2.5
     seg_fill_alpha: float = 0.6  # Segmentation transparency (0=invisible, 1=opaque)
     bbox_linewidth: float = 1.0
     rel_arrow_linewidth: float = 1.5
     rel_arrow_mutation_scale: float = 22.0
     # Make contours/labels/relations more prominent by default
-    seg_fill_alpha: float = 0.75
-    bbox_linewidth: float = 2.0
-    rel_arrow_linewidth: float = 2.5
-    rel_arrow_mutation_scale: float = 26.0
+    seg_fill_alpha: float = 0.55
+    bbox_linewidth: float = 2.5
+    rel_arrow_linewidth: float = 6.0
+    rel_arrow_mutation_scale: float = 48.0
     # Label/legend styling
-    label_bbox_linewidth: float = 3.0
-    relation_label_bbox_linewidth: float = 3.0
-    connector_linewidth: float = 1.5
+    label_bbox_linewidth: float = 2.5
+    relation_label_bbox_linewidth: float = 2.0
+    connector_linewidth: float = 2.0
 
     # Relation post-processing
     filter_redundant_relations: bool = True
@@ -211,8 +217,8 @@ class VisualizerConfig:
     relation_label_max_dist_px: float = 50.0
 
     # Global color tweaks
-    color_sat_boost: float = 1.30
-    color_val_boost: float = 1.15
+    color_sat_boost: float = 1.40
+    color_val_boost: float = 1.20
 
     # Special knobs
     on_top_gap_px: int = 8
@@ -292,7 +298,7 @@ class Visualizer:
         save_path: Optional[str] = None,
         draw_background: bool = True,
         bg_color: Tuple[float, float, float, float] = (1, 1, 1, 0),
-        dpi: int = 200,
+        dpi: int = 800,
     ) -> Tuple[plt.Figure, plt.Axes]:
         """
         Main entry point for rendering complete scene visualization.
@@ -335,6 +341,28 @@ class Visualizer:
         """
         # Store draw_background state for use in drawing methods
         self._draw_background = draw_background
+
+        # Auto-scale fonts/arrows based on image size and resolution.
+        restore_cfg = None
+        if self.cfg.auto_scale_styles:
+            W, H = image.size
+            scale = max(W, H) / float(self.cfg.style_ref_px)
+            scale *= float(dpi) / float(self.cfg.style_ref_dpi)
+            scale = max(self.cfg.style_scale_min, min(self.cfg.style_scale_max, scale))
+            restore_cfg = {
+                "obj_fontsize_inside": self.cfg.obj_fontsize_inside,
+                "obj_fontsize_outside": self.cfg.obj_fontsize_outside,
+                "rel_fontsize": self.cfg.rel_fontsize,
+                "legend_fontsize": self.cfg.legend_fontsize,
+                "rel_arrow_linewidth": self.cfg.rel_arrow_linewidth,
+                "rel_arrow_mutation_scale": self.cfg.rel_arrow_mutation_scale,
+            }
+            self.cfg.obj_fontsize_inside = max(8, int(round(self.cfg.obj_fontsize_inside * scale)))
+            self.cfg.obj_fontsize_outside = max(8, int(round(self.cfg.obj_fontsize_outside * scale)))
+            self.cfg.rel_fontsize = max(6, int(round(self.cfg.rel_fontsize * scale)))
+            self.cfg.legend_fontsize = max(6, int(round(self.cfg.legend_fontsize * scale)))
+            self.cfg.rel_arrow_linewidth = max(0.5, float(self.cfg.rel_arrow_linewidth * scale))
+            self.cfg.rel_arrow_mutation_scale = max(8.0, float(self.cfg.rel_arrow_mutation_scale * scale))
         
         # Assign colors first (needed for all rendering paths)
         colors = self._assign_colors(labels)
@@ -370,6 +398,9 @@ class Visualizer:
 
         # 4) finalize
         self._finalize_figure(fig, save_path, draw_background, bg_color, dpi)
+        if restore_cfg is not None:
+            for k, v in restore_cfg.items():
+                setattr(self.cfg, k, v)
         return fig, ax
 
     # -----------------------------------------------------------
@@ -576,7 +607,7 @@ class Visualizer:
         ordered.sort(key=lambda x: x[2], reverse=True)
 
         # Vectorized rendering path: blend all masks at once for performance
-        if cfg.use_vectorized_masks and RENDERING_OPT_AVAILABLE and masks:
+        if cfg.show_segmentation and cfg.use_vectorized_masks and RENDERING_OPT_AVAILABLE and masks:
             # Collect masks and colors matching original order
             masks_list = []
             colors_list = []
@@ -753,6 +784,8 @@ class Visualizer:
 
         arrow_patches: List[patches.FancyArrowPatch] = []
         rel_texts: List[Any] = []
+        rel_label_anchors: List[Tuple[float, float]] = []
+        rel_label_dirs: List[Tuple[float, float]] = []
 
         # Track multiple arrows between same pair for curvature adjustment
         arrow_counts: Dict[Tuple[int, int], int] = {}
@@ -795,19 +828,22 @@ class Visualizer:
                     pos[1],
                     readable,
                     fontsize=cfg.rel_fontsize,
+                    fontfamily=cfg.font_family,
                     ha="center",
                     va="center",
                     color="black",
                     bbox=dict(
-                        boxstyle="round,pad=0.2",
+                        boxstyle="round,pad=0.25",
                         facecolor="white",
-                        alpha=1.0,
+                        alpha=0.95,
                         edgecolor=color,
                         linewidth=cfg.relation_label_bbox_linewidth,
                     ),
                     zorder=5,
                 )
                 rel_texts.append(t)
+                rel_label_anchors.append(pos)
+                rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
 
         # Resolve overlaps between relationship labels, avoiding object labels
         if cfg.resolve_overlaps and rel_texts:
@@ -815,7 +851,12 @@ class Visualizer:
             fig.canvas.draw()
             # Pass object_texts as fixed_texts to avoid overlapping them
             self._resolve_relation_vs_relation_overlaps(
-                ax, rel_texts, arrow_patches, cfg.relation_label_max_dist_px, 
+                ax,
+                rel_texts,
+                arrow_patches,
+                cfg.relation_label_max_dist_px,
+                anchors=rel_label_anchors,
+                arrow_dirs=rel_label_dirs,
                 fixed_texts=object_texts
             )
 
@@ -893,10 +934,11 @@ class Visualizer:
                     ha="center",
                     va="center",
                     fontsize=cfg.obj_fontsize_inside,
+                    fontfamily=cfg.font_family,
                     color=txt_col,
                     bbox=dict(
                             facecolor=color,
-                            alpha=1.0,
+                            alpha=0.95,
                             edgecolor=color,
                             linewidth=cfg.label_bbox_linewidth,
                             boxstyle="round,pad=0.25",
@@ -923,7 +965,8 @@ class Visualizer:
                     label_text,
                     fontsize=cfg.obj_fontsize_outside,
                     color=font_col,
-                    bbox_params=dict(facecolor=color, alpha=1.0, edgecolor=color, linewidth=cfg.label_bbox_linewidth, boxstyle="round,pad=0.25"),
+                    bbox_params=dict(facecolor=color, alpha=0.95, edgecolor=color, linewidth=cfg.label_bbox_linewidth, boxstyle="round,pad=0.25"),
+                    fontfamily=cfg.font_family,
                     ha="center",
                     va="bottom",
                     zorder=7,
@@ -935,12 +978,13 @@ class Visualizer:
                     border_pos[1],
                     label_text,
                     fontsize=cfg.obj_fontsize_outside,
+                    fontfamily=cfg.font_family,
                     color=font_col,
                     ha="center",
                     va="bottom",
                     bbox=dict(
                         facecolor=color,
-                        alpha=1.0,
+                        alpha=0.95,
                         edgecolor=color,
                         linewidth=cfg.label_bbox_linewidth,
                         boxstyle="round,pad=0.25",
@@ -1012,7 +1056,11 @@ class Visualizer:
         uniq_base = sorted({lab.rsplit("_", 1)[0] for lab in labels})
         handles = [patches.Patch(color=self._pick_color(lb, 0), label=lb) for lb in uniq_base[:10]]
         if handles:
-            ax.legend(handles=handles, fontsize=cfg.legend_fontsize, loc="upper right")
+            ax.legend(
+                handles=handles,
+                prop={"family": cfg.font_family, "size": cfg.legend_fontsize},
+                loc="upper right",
+            )
 
     # ===========================================================
     # NO-BACKGROUND RENDERING MODE
@@ -1409,7 +1457,7 @@ class Visualizer:
             - Use renderer for publication-quality spacing
         """
         if self.cfg.measure_text_with_renderer and ax is not None:
-            t = ax.text(0, 0, text, fontsize=fontsize_px, alpha=0)
+            t = ax.text(0, 0, text, fontsize=fontsize_px, fontfamily=self.cfg.font_family, alpha=0)
             fig = ax.figure
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
@@ -1540,8 +1588,15 @@ class Visualizer:
         self._resolve_overlaps(ax, movable_texts=obj_texts, movable_anchors=obj_anchors)
 
     def _resolve_relation_vs_relation_overlaps(
-        self, ax, rel_texts: List[Any], arrows: List[Any], max_dist_px: float,
-        fixed_texts: List[Any] = None
+        self,
+        ax,
+        rel_texts: List[Any],
+        arrows: List[Any],
+        max_dist_px: float,
+        *,
+        anchors: Optional[List[Tuple[float, float]]] = None,
+        arrow_dirs: Optional[List[Tuple[float, float]]] = None,
+        fixed_texts: List[Any] = None,
     ) -> None:
         """
         Resolve overlaps between relationship labels and with object labels.
@@ -1584,6 +1639,85 @@ class Visualizer:
 
         max_iter = 30
         push_strength = 12.0
+        to_px = ax.transData.transform
+        to_data = ax.transData.inverted().transform
+
+        if anchors is None:
+            anchors = [t.get_position() for t in rel_texts]
+        anchor_px = [np.array(to_px(a)) for a in anchors]
+
+        normals_px = []
+        if arrow_dirs is None:
+            arrow_dirs = [(1.0, 0.0)] * len(rel_texts)
+        for i, (dx, dy) in enumerate(arrow_dirs):
+            a0 = anchors[i]
+            p0 = np.array(to_px(a0))
+            p1 = np.array(to_px((a0[0] + dx, a0[1] + dy)))
+            v = p1 - p0
+            norm = np.hypot(v[0], v[1])
+            if norm < 1e-6:
+                n = np.array([0.0, 1.0])
+            else:
+                v = v / norm
+                n = np.array([-v[1], v[0]])
+            normals_px.append(n)
+
+        rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
+
+        def _greedy_place():
+            placed_bbs = []
+            fixed_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in fixed_texts]
+            arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
+            order = sorted(
+                range(len(rel_texts)),
+                key=lambda i: (-(rel_bbs[i].width * rel_bbs[i].height), -rel_bbs[i].height),
+            )
+            for i in order:
+                a_px = anchor_px[i]
+                n = normals_px[i]
+                # Step based on text height for stable spacing
+                h = max(6.0, rel_bbs[i].height * 0.75)
+                max_steps = int(max_dist_px / h) + 1
+                offsets = [0.0]
+                for k in range(1, max_steps + 1):
+                    offsets.append(k * h)
+                    offsets.append(-k * h)
+                chosen_bb = None
+                chosen_pos = None
+                for off in offsets:
+                    p = a_px + n * off
+                    pos = tuple(to_data(p))
+                    rel_texts[i].set_position(pos)
+                    bb = rel_texts[i].get_window_extent(renderer=renderer).expanded(1.05, 1.1)
+                    if any(bb.overlaps(b) for b in fixed_bbs):
+                        continue
+                    if any(bb.overlaps(b) for b in arrow_bbs):
+                        continue
+                    if any(bb.overlaps(b) for b in placed_bbs):
+                        continue
+                    chosen_bb = bb
+                    chosen_pos = pos
+                    break
+                if chosen_pos is None:
+                    rel_texts[i].set_position(tuple(to_data(a_px)))
+                    chosen_bb = rel_texts[i].get_window_extent(renderer=renderer).expanded(1.05, 1.1)
+                placed_bbs.append(chosen_bb)
+
+        _greedy_place()
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
+
+        def _clamp_to_anchor(idx: int, pos_data: Tuple[float, float]) -> Tuple[float, float]:
+            p = np.array(to_px(pos_data))
+            delta = p - anchor_px[idx]
+            dist = np.linalg.norm(delta)
+            if dist <= max_dist_px:
+                return pos_data
+            if dist < 1e-6:
+                return pos_data
+            p_clamped = anchor_px[idx] + delta / dist * max_dist_px
+            return tuple(to_data(p_clamped))
 
         for _ in range(max_iter):
             moved = False
@@ -1591,6 +1725,7 @@ class Visualizer:
             
             # Get bounding boxes for fixed texts (object labels)
             fixed_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in fixed_texts]
+            arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
 
             # Resolve overlaps between relation labels
             for i in range(len(rel_bbs)):
@@ -1600,34 +1735,43 @@ class Visualizer:
                         cj = np.array([(rel_bbs[j].x0 + rel_bbs[j].x1) / 2, (rel_bbs[j].y0 + rel_bbs[j].y1) / 2])
                         sep = cj - ci
                         dist = max(np.linalg.norm(sep), 1e-6)
-                        sep = sep / dist * push_strength
+                        sep_dir = sep / dist
 
-                        # clamp: don't exceed max_dist_px
-                        if dist > max_dist_px:
-                            continue
+                        n_i = normals_px[i]
+                        n_j = normals_px[j]
+                        sign_i = 1.0 if np.dot(sep_dir, n_i) >= 0 else -1.0
+                        sign_j = 1.0 if np.dot(-sep_dir, n_j) >= 0 else -1.0
+                        sep_i = n_i * sign_i * push_strength
+                        sep_j = n_j * sign_j * push_strength
 
-                        dx_i, dy_i = self._pixels_to_data(ax, -sep[0] * 0.5, -sep[1] * 0.5)
-                        dx_j, dy_j = self._pixels_to_data(ax, sep[0] * 0.5, sep[1] * 0.5)
+                        dx_i, dy_i = self._pixels_to_data(ax, -sep_i[0], -sep_i[1])
+                        dx_j, dy_j = self._pixels_to_data(ax, -sep_j[0], -sep_j[1])
 
                         pos_i = rel_texts[i].get_position()
                         pos_j = rel_texts[j].get_position()
-                        rel_texts[i].set_position((pos_i[0] + dx_i, pos_i[1] + dy_i))
-                        rel_texts[j].set_position((pos_j[0] + dx_j, pos_j[1] + dy_j))
+                        new_i = (pos_i[0] + dx_i, pos_i[1] + dy_i)
+                        new_j = (pos_j[0] + dx_j, pos_j[1] + dy_j)
+                        rel_texts[i].set_position(_clamp_to_anchor(i, new_i))
+                        rel_texts[j].set_position(_clamp_to_anchor(j, new_j))
                         moved = True
             
-            # Also push relation labels away from object labels
+            # Also push relation labels away from object labels and arrows
             for i, rel_bb in enumerate(rel_bbs):
-                for fixed_bb in fixed_bbs:
+                for fixed_bb in fixed_bbs + arrow_bbs:
                     if rel_bb.overlaps(fixed_bb):
                         ci = np.array([(rel_bb.x0 + rel_bb.x1) / 2, (rel_bb.y0 + rel_bb.y1) / 2])
                         cf = np.array([(fixed_bb.x0 + fixed_bb.x1) / 2, (fixed_bb.y0 + fixed_bb.y1) / 2])
-                        sep = ci - cf  # Push relation label away from object label
+                        sep = ci - cf  # Push relation label away from fixed box
                         dist = max(np.linalg.norm(sep), 1e-6)
-                        sep = sep / dist * push_strength
-                        
+                        sep_dir = sep / dist
+                        n = normals_px[i]
+                        sign = 1.0 if np.dot(sep_dir, n) >= 0 else -1.0
+                        sep = n * sign * push_strength
+
                         dx, dy = self._pixels_to_data(ax, sep[0], sep[1])
                         pos = rel_texts[i].get_position()
-                        rel_texts[i].set_position((pos[0] + dx, pos[1] + dy))
+                        new_pos = (pos[0] + dx, pos[1] + dy)
+                        rel_texts[i].set_position(_clamp_to_anchor(i, new_pos))
                         moved = True
 
             if not moved:

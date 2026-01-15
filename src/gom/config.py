@@ -167,10 +167,16 @@ except Exception as _exc:
         relations_per_src_clip_pairs: int = 50  # Per-source limit on CLIP-scored candidates
 
         # Non-Maximum Suppression and fusion parameters
-        label_nms_threshold: float = 0.60  # IoU threshold for per-label NMS
-        seg_iou_threshold: float = 0.70  # IoU threshold for segmentation mask merging
-        wbf_iou_threshold: float = 0.55  # IoU threshold for Weighted Boxes Fusion
+        label_nms_threshold: float = 0.25  # IoU threshold for per-label NMS
+        seg_iou_threshold: float = 0.50  # IoU threshold for segmentation mask merging
+        wbf_iou_threshold: float = 0.10  # IoU threshold for Weighted Boxes Fusion
         skip_box_threshold: float = 0.10  # Skip boxes below this confidence in fusion
+        
+        # Advanced deduplication parameters
+        cross_class_suppression: bool = True  # Remove overlaps between different classes
+        cross_class_iou_threshold: float = 0.65  # IoU threshold for cross-class suppression
+        same_class_iou_threshold: float = 0.30  # IoU threshold for same-class deduplication
+        cross_class_score_diff_threshold: float = 0.80  # Score difference ratio for cross-class dedup
         
         # Advanced deduplication and merging options
         cross_class_suppression: bool = False  # Enable cross-class NMS

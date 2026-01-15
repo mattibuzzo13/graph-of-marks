@@ -307,6 +307,7 @@ import numpy as np
 import logging
 import warnings
 from gom.utils.colors import canonical_label, base_label
+from scipy import ndimage
 
 # Detection modules
 from gom.detectors.base import Detector
@@ -464,11 +465,13 @@ class PreprocessorConfig:
     clip_cache_max_age_days: Optional[float] = 30.0  # Disk cache TTL in days
 
     # NMS and fusion parameters (aggressive settings to reduce overlap)
-    label_nms_threshold: float = 0.45  # Label-wise NMS IoU threshold (was 0.60)
+    label_nms_threshold: float = 0.25  # Label-wise NMS IoU threshold (was 0.60)
     seg_iou_threshold: float = 0.50    # Segmentation IoU for duplicate removal (was 0.70)
-    wbf_iou_threshold: float = 0.40    # Weighted Boxes Fusion IoU threshold
+    wbf_iou_threshold: float = 0.10    # Weighted Boxes Fusion IoU threshold
     cross_class_suppression: bool = True  # Remove overlaps between different classes
     cross_class_iou_threshold: float = 0.65  # IoU threshold for cross-class suppression
+    same_class_iou_threshold: float = 0.30  # IoU threshold for same-class deduplication (lower = more aggressive)
+    cross_class_score_diff_threshold: float = 0.80  # Score difference ratio threshold for cross-class dedup (1.0 = disable)
     enable_group_merge: bool = True    # Merge highly overlapping detections
     merge_mask_iou_threshold: float = 0.50  # Mask IoU for merging (was 0.6)
     merge_box_iou_threshold: float = 0.75   # Box IoU for merging (was 0.9)
@@ -1095,8 +1098,10 @@ class ImageGraphPreprocessor:
                 # Balanced parameters for speed + accuracy on small objects
                 # Lower IoU prevents merging nearby small objects (cups, glasses)
                 # Lower skip threshold keeps low-confidence detections
-                wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.45)
+                wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.25)
+                self.logger.info(f"[DEBUG WBF PARAM] wbf_iou_threshold={wbf_iou}") 
                 skip_thr = getattr(self.cfg, 'skip_box_threshold', 0.10)
+                self.logger.info(f"[DEBUG WBF] Passing to detect_ensemble: iou_thr={wbf_iou}")
                 det_lists = self.detector_manager.detect_ensemble(
                     [det_img], 
                     iou_thr=wbf_iou,
@@ -1250,7 +1255,7 @@ class ImageGraphPreprocessor:
         if getattr(self, 'detector_manager', None) is not None:
             try:
                 # 🚀 Parametri bilanciati: velocità + accuratezza su piccoli oggetti
-                wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.45)
+                wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.25)
                 skip_thr = getattr(self.cfg, 'skip_box_threshold', 0.10)
                 det_lists = self.detector_manager.detect_ensemble(
                     det_imgs,
@@ -1412,10 +1417,11 @@ class ImageGraphPreprocessor:
             detections_obj.append(det_obj)
 
         # Apply WBF with sensible defaults; returns fused boxes in pixels
+        wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.25)
         fused_detections = weighted_boxes_fusion(
             detections_obj,
             image_size=(W, H),
-            iou_thr=0.55,
+            iou_thr=wbf_iou,
             skip_box_thr=0.0,
             weights_by_source={"owlvit": 2.0, "yolov8": 1.5, "yolo": 1.5, "detectron2": 1.0},
             default_weight=1.0,
@@ -1903,6 +1909,152 @@ class ImageGraphPreprocessor:
         
         return valid_relations
 
+    def _filter_low_quality_masks(
+        self,
+        boxes: List[List[float]],
+        labels: List[str],
+        scores: List[float],
+        masks: List[Dict],
+        det2_for_mask: Optional[List] = None
+    ) -> tuple:
+        """
+        Filter out masks with poor segmentation quality.
+        
+        Removes:
+        - Fragmented segmentations (low connectivity)
+        - Very small masks relative to bbox
+        - Very large masks (likely background)
+        - Low stability_score from SAM
+        - Low predicted_iou from SAM
+        - Background classes (house, building, wall, etc.)
+        
+        Args:
+            boxes: Bounding boxes [x1, y1, x2, y2]
+            labels: Object class labels
+            scores: Detection confidence scores
+            masks: List of mask dicts with 'segmentation' key
+            det2_for_mask: Detectron2 metadata (optional)
+        
+        Returns:
+            Filtered boxes, labels, scores, masks, det2_for_mask
+        """
+        import cv2
+        from scipy import ndimage
+        
+        if not masks:
+            return boxes, labels, scores, masks, det2_for_mask
+        
+        # Configuration thresholds
+        min_pred_iou = getattr(self.cfg, 'pred_iou_thresh', 0.88)
+        min_stability_score = getattr(self.cfg, 'stability_score_thresh', 0.95)
+        min_mask_area_ratio = 0.05  # At least 5% of bbox area
+        max_mask_area_ratio = 0.95  # At most 95% of bbox area (too large = background)
+        max_fragmentation = 0.4  # Max ratio of disconnected components
+        
+        # Background classes to filter out
+        background_classes = {
+            'house', 'building', 'wall', 'sky', 'ground', 'outdoor', 'background',
+            'grass', 'tree', 'tree trunk', 'foliage', 'cloud', 'mountain',
+            'landscape', 'scenery', 'horizon', 'floor', 'carpet', 'tile',
+            'wood', 'concrete', 'pavement', 'road', 'street'
+        }
+        
+        valid_indices = []
+        removed_count = 0
+        removal_reasons = {}
+        
+        for i, (box, label, score, mask) in enumerate(zip(boxes, labels, scores, masks)):
+            if mask is None or 'segmentation' not in mask:
+                removed_count += 1
+                removal_reasons[i] = "no_segmentation"
+                continue
+            
+            # Check background classes
+            if label.lower() in background_classes:
+                removed_count += 1
+                removal_reasons[i] = f"background_class({label})"
+                self.logger.debug(f"   🗑️  Filtering {label} (background class)")
+                continue
+            
+            # Extract segmentation
+            seg = np.asarray(mask['segmentation'], dtype=np.uint8)
+            if seg.size == 0:
+                removed_count += 1
+                removal_reasons[i] = "empty_segmentation"
+                continue
+            
+            # Check SAM quality scores
+            pred_iou = mask.get('predicted_iou', 1.0)
+            stability_score = mask.get('stability_score', 1.0)
+            
+            if pred_iou < min_pred_iou:
+                removed_count += 1
+                removal_reasons[i] = f"low_pred_iou({pred_iou:.2f}<{min_pred_iou})"
+                continue
+            
+            if stability_score < min_stability_score:
+                removed_count += 1
+                removal_reasons[i] = f"low_stability({stability_score:.2f}<{min_stability_score})"
+                continue
+            
+            # Calculate mask and bbox areas
+            mask_area = np.count_nonzero(seg)
+            bbox_area = (box[2] - box[0]) * (box[3] - box[1])
+            
+            if bbox_area == 0:
+                removed_count += 1
+                removal_reasons[i] = "zero_bbox_area"
+                continue
+            
+            mask_ratio = mask_area / max(bbox_area, 1)
+            
+            # Check mask area ratio
+            if mask_ratio < min_mask_area_ratio:
+                removed_count += 1
+                removal_reasons[i] = f"tiny_mask({mask_ratio:.2f}<{min_mask_area_ratio})"
+                continue
+            
+            if mask_ratio > max_mask_area_ratio:
+                removed_count += 1
+                removal_reasons[i] = f"too_large({mask_ratio:.2f}>{max_mask_area_ratio})"
+                continue
+            
+            # Check fragmentation (number of disconnected components)
+            labeled_array, num_components = ndimage.label(seg)
+            
+            if num_components > 5:  # More than 5 disconnected pieces
+                fragmentation_ratio = num_components / max(mask_area / 1000, 1)  # Normalize by area
+                if fragmentation_ratio > max_fragmentation:
+                    removed_count += 1
+                    removal_reasons[i] = f"fragmented({num_components}_components)"
+                    self.logger.debug(f"   🗑️  Filtering {label} ({num_components} disconnected parts, ratio={fragmentation_ratio:.2f})")
+                    continue
+            
+            # All checks passed, keep this mask
+            valid_indices.append(i)
+        
+        # Log filtering summary
+        if removed_count > 0:
+            self.logger.info(f"   🎯 Filtered {removed_count} low-quality masks")
+            if getattr(self.cfg, "verbose", False):
+                for idx, reason in removal_reasons.items():
+                    label_str = labels[idx] if idx < len(labels) else "?"
+                    self.logger.debug(f"      Removed {label_str}: {reason}")
+        
+        # Filter all arrays by valid indices
+        if valid_indices:
+            boxes = [boxes[i] for i in valid_indices]
+            labels = [labels[i] for i in valid_indices]
+            scores = [scores[i] for i in valid_indices]
+            masks = [masks[i] for i in valid_indices]
+            if det2_for_mask:
+                det2_for_mask = [det2_for_mask[i] for i in valid_indices]
+        else:
+            # No valid masks, return empty
+            boxes, labels, scores, masks, det2_for_mask = [], [], [], [], []
+        
+        return boxes, labels, scores, masks, det2_for_mask
+
     def _remove_overlapping_objects(
         self,
         boxes: List[List[float]],
@@ -1912,6 +2064,7 @@ class ImageGraphPreprocessor:
         depths: Optional[List] = None,
         iou_threshold: float = 0.7,
         mask_iou_threshold: float = 0.6,
+        cross_class_score_diff_threshold: float = 0.80,
         target_indices: Optional[Set[int]] = None,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
         """
@@ -2002,6 +2155,9 @@ class ImageGraphPreprocessor:
                 # 🎯 SINGLETON MODE PROTECTION: Never remove target objects
                 i_is_target = target_indices is not None and i in target_indices
                 j_is_target = target_indices is not None and j in target_indices
+
+                if same_class:
+                    print(f"  [DEBUG] Same-class pair: {labels[i]} ({scores[i]:.3f}) vs {labels[j]} ({scores[j]:.3f}), IoU={box_iou:.3f}, threshold={iou_threshold:.3f}, remove? {box_iou >= iou_threshold}")
                 
                 if same_class and box_iou >= iou_threshold:
                     # Same class with high overlap -> keep higher score
@@ -2121,7 +2277,7 @@ class ImageGraphPreprocessor:
                             # No targets: i has higher score -> remove contained object j
                             remove_idx = j
                             reason = f"j {overlap_j*100:.1f}% contained in i (IoU={box_iou:.3f})"
-                    elif box_iou >= 0.10 and score_ratio >= 0.30:
+                    elif box_iou >= 0.10 and score_ratio >= cross_class_score_diff_threshold:
                         # Even low overlap: if one object has much lower score, it's likely wrong
                         # 🎯 SINGLETON MODE: Prefer target over non-target
                         should_remove = True
@@ -3069,6 +3225,8 @@ class ImageGraphPreprocessor:
         # 2) QUESTION FILTER (objects)
         self.logger.info(f"\n🔎 [2/7] Question-Based Filtering")
         obj_terms, rel_terms = self._parse_question(custom_question or self.cfg.question)
+        question_obj_indices: Set[int] = set()
+        mentioned_object_types: Set[str] = set()
 
         # Preserve originals in case aggressive pruning is too strong.
         original_boxes = list(cached["boxes"])
@@ -3089,8 +3247,6 @@ class ImageGraphPreprocessor:
         
         if obj_terms and self.cfg.apply_question_filter:
             # Find which object types in detections match the question terms
-            mentioned_object_types = set()
-            
             # More precise matching: term must match the base object type
             for term in obj_terms:
                 term_lower = term.lower().strip()
@@ -3118,10 +3274,13 @@ class ImageGraphPreprocessor:
                 target_indices = [i for i, label in enumerate(labels)
                                 if canonical_label(label).lower() == target_obj_label]
                 
+                # Keep all instances of the target label (no dedup in singleton mode)
+                
                 if target_indices:
                     # ✅ ACTIVATE SINGLETON MODE
                     self._target_object_indices = set(target_indices)
                     self._singleton_mode_enabled = True
+                    self._singleton_target_label = target_obj_label
                     
                     print(f"\n🎯 [SINGLETON MODE ACTIVATED]")
                     print(f"   Target object: '{target_obj_label}'")
@@ -3206,17 +3365,49 @@ class ImageGraphPreprocessor:
         # 🚀 Pass question terms + CLIP scores for semantic-aware pruning
         self.logger.info(f"\n✂️  [3/7] Pruning & NMS")
         initial_count = len(boxes)
+        # Preserve all singleton target instances across pruning
+        preserved_targets = []
+        if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
+            target_label = str(self._singleton_target_label).lower()
+            for i, lb in enumerate(labels):
+                if canonical_label(lb).lower() == target_label:
+                    preserved_targets.append(
+                        (boxes[i], labels[i], scores[i], det2_for_mask[i] if det2_for_mask else None)
+                    )
         boxes, labels, scores = self._limit_detections_advanced(
             boxes, labels, scores, 
             question_terms=obj_terms,
             clip_scores=clip_semantic_scores
         )
         self.logger.info(f"   ✅ {initial_count} → {len(boxes)} objects (removed {initial_count - len(boxes)} duplicates/low-score)")
+        if preserved_targets:
+            existing = {(canonical_label(lb).lower(), tuple(map(float, bx))) for bx, lb in zip(boxes, labels)}
+            for bx, lb, sc, d2 in preserved_targets:
+                key = (canonical_label(lb).lower(), tuple(map(float, bx)))
+                if key in existing:
+                    continue
+                boxes.append(list(bx))
+                labels.append(lb)
+                scores.append(sc)
+                if det2_for_mask is not None:
+                    det2_for_mask.append(d2)
+            self.logger.info(
+                f"   🎯 Restored {len(preserved_targets)} target objects after pruning"
+            )
         # Sync det2_for_mask with possibly reduced boxes
         if len(det2_for_mask) != len(boxes):
             # Approximate alignment by score order
             idx_sorted = sorted(range(len(scores)), key=lambda i: -float(scores[i]))
             det2_for_mask = [det2_for_mask[i] for i in idx_sorted[: len(boxes)]] if det2_for_mask else [None] * len(boxes)
+        # 🎯 CRITICAL: Recompute singleton target indices after pruning
+        if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
+            target_label = str(self._singleton_target_label).lower()
+            new_target_indices = {
+                idx for idx, lb in enumerate(labels)
+                if canonical_label(lb).lower() == target_label
+            }
+            if new_target_indices:
+                self._target_object_indices = new_target_indices
 
         # 5) SEGMENTATION (SAM) + optional union with Detectron2 masks — only if needed
         masks = None
@@ -3252,6 +3443,10 @@ class ImageGraphPreprocessor:
                     masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
             self.logger.info(f"   ✅ Generated {len(masks)} segmentation masks")
             
+            # 🎯 MASK QUALITY FILTER: Remove poor quality or fragmented segmentations
+            boxes, labels, scores, masks, det2_for_mask = self._filter_low_quality_masks(
+                boxes, labels, scores, masks, det2_for_mask
+            )
             # Post-segmentation deduplication: remove highly overlapping objects
             print(f"\n🧹 [4.5/7] Post-Segmentation Deduplication")
             print(f"   Checking for overlapping objects...")
@@ -3262,8 +3457,9 @@ class ImageGraphPreprocessor:
             
             boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
                 boxes, labels, scores, masks, depths=None,
-                iou_threshold=0.70,  # Same-class overlap threshold (lowered from 0.75)
+                iou_threshold=getattr(self.cfg, 'same_class_iou_threshold', 0.30),  # Same-class overlap threshold
                 mask_iou_threshold=0.60,  # Cross-class mask overlap threshold (lowered from 0.65)
+                cross_class_score_diff_threshold=getattr(self.cfg, 'cross_class_score_diff_threshold', 0.80),
                 target_indices=current_target_indices  # 🎯 Protect targets in singleton mode
             )
             if len(boxes) < initial_count:
@@ -3300,12 +3496,14 @@ class ImageGraphPreprocessor:
         # 6) DEPTH (at box centers) — only if needed
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         depths = None
+        depth_map = None
         if need_depth and boxes:
             self.logger.info(f"\n📏 [5/7] Depth Estimation")
             self.logger.info(f"   ⚙️  Computing depth for {len(boxes)} objects...")
             if hasattr(self.depth_est, "depth_map"):
                 try:
                     dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
+                    depth_map = dmap
                     depths = [float(dmap[int(cy), int(cx)]) for (cx, cy) in centers]
                 except Exception:
                     depths = self.depth_est.relative_depth_at(image_pil, centers)
@@ -3333,6 +3531,10 @@ class ImageGraphPreprocessor:
                 max_distance=self.cfg.max_distance,
                 max_clip_pairs=getattr(self.cfg, "relations_max_clip_pairs", 500),
                 per_src_clip_pairs=getattr(self.cfg, "relations_per_src_clip_pairs", 20),
+                min_relation_distance=getattr(self.cfg, "min_relation_distance", 5.0),
+                max_relation_distance=getattr(self.cfg, "max_relation_distance", 20000.0),
+                too_close_gap_px=getattr(self.cfg, "too_close_gap_px", 3.0),
+                too_close_gap_scale=getattr(self.cfg, "too_close_gap_scale", 0.02),
             )
 
             # === Optimization: limit number of objects sent to relation inference ===
@@ -3377,6 +3579,10 @@ class ImageGraphPreprocessor:
                 max_distance=self.cfg.max_distance,
                 max_clip_pairs=local_rel_pairs,
                 per_src_clip_pairs=local_per_src_pairs,
+                min_relation_distance=getattr(self.cfg, "min_relation_distance", 5.0),
+                max_relation_distance=getattr(self.cfg, "max_relation_distance", 20000.0),
+                too_close_gap_px=getattr(self.cfg, "too_close_gap_px", 3.0),
+                too_close_gap_scale=getattr(self.cfg, "too_close_gap_scale", 0.02),
             )
 
             # Temporarily update inferencer config for this call
@@ -3388,9 +3594,11 @@ class ImageGraphPreprocessor:
                 labels=labels_rel,
                 masks=masks_rel,
                 depths=depths_rel,
+                depth_map=depth_map,
                 use_geometry=True,
                 use_clip=True,
                 clip_threshold=getattr(self.cfg, "clip_pruning_threshold", 0.23),
+                question_rel_terms=rel_terms if rel_terms else None,
             )
             mark("relations_infer")
             
@@ -3432,11 +3640,34 @@ class ImageGraphPreprocessor:
         
         # 6a) Relation filtering by question terms (optional).
         if self.cfg.filter_relations_by_question and rel_terms:
+            # Recompute question object indices after pruning/NMS/dedup (indices may shift).
+            question_obj_indices = {
+                i for i, label in enumerate(labels)
+                if canonical_label(label).lower() in mentioned_object_types
+            }
             rels_all = self.relations_inferencer.filter_by_question(
                 rels_all,
                 question_terms=rel_terms,
+                question_subject_idxs=(
+                    getattr(self, "_target_object_indices", None) or question_obj_indices or None
+                ),
                 threshold=self.cfg.threshold_relation_similarity
             )
+        # 6a.1) Drop too-close/too-far relations unless justified or requested
+        rels_all = self.relations_inferencer.filter_relations_by_proximity(
+            rels_all,
+            boxes,
+            question_rel_terms=rel_terms if rel_terms else None,
+        )
+        # 🎯 CRITICAL: Recompute singleton target indices after relations filtering
+        if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
+            target_label = str(self._singleton_target_label).lower()
+            new_target_indices = {
+                idx for idx, lb in enumerate(labels)
+                if canonical_label(lb).lower() == target_label
+            }
+            if new_target_indices:
+                self._target_object_indices = new_target_indices
         # 6b) Per-object limits and inverse-duplicate removal.
         rels_all = self.relations_inferencer.limit_relationships_per_object(
             rels_all,
@@ -3444,8 +3675,16 @@ class ImageGraphPreprocessor:
             max_relations_per_object=self.cfg.max_relations_per_object,
             min_relations_per_object=self.cfg.min_relations_per_object,
             question_rel_terms=rel_terms if rel_terms else None,
+            masks=masks,
+            depths=depths,
+            depth_map=depth_map,
         )
-        rels_all = self.relations_inferencer.drop_inverse_duplicates(rels_all)
+        rels_all = self.relations_inferencer.drop_inverse_duplicates(
+            rels_all,
+            question_rel_terms=rel_terms if rel_terms else None,
+            max_relations_per_object=self.cfg.max_relations_per_object,
+            total_objects=len(boxes),
+        )
 
         # 6c) Apply singleton filtering AFTER limiting relations per object
         # This ensures we only consider the most important relations when finding connected objects

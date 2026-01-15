@@ -117,7 +117,7 @@ See Also:
 
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import math
 import numpy as np
@@ -145,11 +145,78 @@ def center(b: Sequence[float]) -> Tuple[float, float]:
     return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
-def center_distance(b1: Sequence[float], b2: Sequence[float]) -> float:
-    """Euclidean distance between box centers."""
-    cx1, cy1 = center(b1)
-    cx2, cy2 = center(b2)
-    return float(math.hypot(cx2 - cx1, cy2 - cy1))
+def mask_center(mask: Optional[dict]) -> Optional[Tuple[float, float]]:
+    """
+    Compute mask centroid (center of mass).
+    
+    Args:
+        mask: Dict with 'segmentation' key (numpy array or RLE)
+              OR numpy array directly
+    
+    Returns:
+        (cx, cy) tuple or None if mask is invalid
+    """
+    if mask is None:
+        return None
+    
+    try:
+        # Extract segmentation if mask is a dict
+        if isinstance(mask, dict):
+            seg = mask.get("segmentation")
+        else:
+            seg = mask
+        
+        if seg is None:
+            return None
+        
+        # Convert to numpy if needed
+        if not isinstance(seg, np.ndarray):
+            # Try to convert (handles lists, tensors, etc.)
+            try:
+                seg = np.asarray(seg, dtype=bool)
+            except:
+                return None
+        
+        # Ensure binary mask
+        seg = np.asarray(seg, dtype=bool)
+        
+        if seg.size == 0 or not seg.any():
+            return None
+        
+        # Calculate centroid
+        coords = np.where(seg)
+        cy = float(np.mean(coords[0]))  # y coordinate (rows)
+        cx = float(np.mean(coords[1]))  # x coordinate (columns)
+        
+        return (cx, cy)
+    except Exception as e:
+        # Silent fail - fall back to box center
+        return None
+
+
+def center_distance(
+    b1: Sequence[float],
+    b2: Sequence[float],
+    mask1: Optional[dict] = None,
+    mask2: Optional[dict] = None,
+) -> float:
+    """
+    Euclidean distance between object centers.
+    
+    Prefers mask centroid if available, falls back to box center.
+    
+    Args:
+        b1, b2: Bounding boxes in xyxy format
+        mask1, mask2: Optional segmentation masks (dict with 'segmentation' or array)
+    
+    Returns:
+        Euclidean distance between centers
+    """
+    # Try mask centroids first
+    c1 = mask_center(mask1) or center(b1)
+    c2 = mask_center(mask2) or center(b2)
+    
+    return float(math.hypot(c2[0] - c1[0], c2[1] - c1[1]))
 
 
 # ------------------------ IoU variants ------------------------

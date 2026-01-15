@@ -97,7 +97,12 @@ def _parse_args() -> argparse.Namespace:
                     help="Confidence threshold for YOLOv8 detector")
     ap.add_argument("--detectron_threshold", type=float, default=0.80,
                     help="Confidence threshold for Detectron2 detector")
-
+    ap.add_argument("--wbf_iou_threshold", type=float, default=0.25,
+                    help="IoU threshold for Weighted Boxes Fusion (WBF)")
+    ap.add_argument("--same_class_iou_threshold", type=float, default=0.30,
+                    help="IoU threshold for same-class object deduplication")
+    ap.add_argument("--cross_class_score_diff_threshold", type=float, default=0.80,
+                    help="Score difference ratio threshold for cross-class deduplication")
     # SAM segmentation backend configuration
     ap.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1",
                     help="SAM model version (1=original, 2=SAM2, hq=SAM-HQ)")
@@ -274,8 +279,11 @@ def main() -> int:
         'max_distance': args.max_distance if args.max_distance != 20000 else None,
         'label_nms_threshold': args.label_nms_threshold if args.label_nms_threshold != 0.50 else None,
         'seg_iou_threshold': args.seg_iou_threshold if args.seg_iou_threshold != 0.70 else None,
-    'relations_max_clip_pairs': args.relations_max_clip_pairs if args.relations_max_clip_pairs != 500 else None,
-    'relations_per_src_clip_pairs': args.relations_per_src_clip_pairs if args.relations_per_src_clip_pairs != 20 else None,
+        'wbf_iou_threshold': args.wbf_iou_threshold if args.wbf_iou_threshold != 0.25 else None,
+        'same_class_iou_threshold': args.same_class_iou_threshold if args.same_class_iou_threshold != 0.30 else None,
+        'cross_class_score_diff_threshold': args.cross_class_score_diff_threshold if args.cross_class_score_diff_threshold != 0.80 else None,
+        'relations_max_clip_pairs': args.relations_max_clip_pairs if args.relations_max_clip_pairs != 500 else None,
+        'relations_per_src_clip_pairs': args.relations_per_src_clip_pairs if args.relations_per_src_clip_pairs != 20 else None,
         'label_mode': args.label_mode if args.label_mode != "original" else None,
         'display_labels': bool(args.display_labels),
         'display_relationships': bool(args.display_relationships),

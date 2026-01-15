@@ -152,11 +152,12 @@ See Also:
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import math
 
 from .core import as_xyxy, iou, edge_gap
+from .masks import depth_stats_from_map
 from .predicates import orientation_label
 
 
@@ -166,6 +167,10 @@ def build_precise_nearest_relation(
     boxes: Sequence[Sequence[float]],
     *,
     margin_px: int = 20,
+    depth_map: Optional["np.ndarray"] = None,
+    depths: Optional[Sequence[float]] = None,
+    masks: Optional[Sequence[dict]] = None,
+    depth_touching_threshold: float = 0.08,
 ) -> dict:
     """
     Build a nearest-neighbor relation with informative label:
@@ -187,7 +192,25 @@ def build_precise_nearest_relation(
     # size-aware thresholds
     avg_size = max(1.0, (x2 - x1 + y2 - y1 + X2 - X1 + Y2 - Y1) / 4.0)
 
-    if iou_val > 0.15 or gap <= 2.0:
+    touching_raw = iou_val > 0.15 or gap <= 2.0
+    if touching_raw and (depth_map is not None or depths is not None):
+        depth_diff = None
+        if depths is not None and i < len(depths) and j < len(depths):
+            da = depths[i]
+            db = depths[j]
+            if da is not None and db is not None:
+                depth_diff = abs(float(da) - float(db))
+        if depth_diff is None and depth_map is not None:
+            mask_a = masks[i]["segmentation"] if masks else None
+            mask_b = masks[j]["segmentation"] if masks else None
+            da = depth_stats_from_map(mask_a, depth_map, box=a)
+            db = depth_stats_from_map(mask_b, depth_map, box=b)
+            if da is not None and db is not None:
+                depth_diff = abs(da - db)
+        if depth_diff is not None and depth_diff > depth_touching_threshold:
+            touching_raw = False
+
+    if touching_raw:
         prox = "touching"
     elif gap <= max(3.0, avg_size * 0.02) and dist_px / avg_size < 0.08:
         prox = "very_close"
