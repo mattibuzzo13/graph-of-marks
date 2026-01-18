@@ -1,14 +1,15 @@
 """
-High-level API for Graph of Marks
+Graph of Marks - High-level API
 
-Provides a simplified interface with support for custom functions
-for detection, segmentation, depth estimation, and relationship extraction.
+Simple interface for visual scene understanding. Accepts optional custom functions
+for detection, segmentation, and depth estimation. When not provided, uses defaults.
 """
 from __future__ import annotations
 
-import logging
+import json
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
@@ -16,439 +17,384 @@ from PIL import Image
 from .config import PreprocessorConfig
 from .pipeline.preprocessor import ImageGraphPreprocessor
 from .types import Detection, Relationship
+from .viz.visualizer import Visualizer, VisualizerConfig
 
-logger = logging.getLogger(__name__)
 
-
-class GraphOfMarks:
+class Gom:
     """
-    High-level interface for the Graph of Marks visual scene understanding pipeline.
+    Graph of Marks pipeline.
 
-    This class provides a simplified API with support for custom functions for key
-    components (detection, segmentation, depth estimation, relationship extraction).
+    Processes images to extract objects, masks, depth, and relationships.
+    Optionally accepts custom functions for each processing step.
 
-    Args:
-        detectors: List of detector names to use (e.g., ["yolov8", "owlvit"])
-        sam_version: SAM version to use ("sam1", "sam2", "hq", "fast")
-        use_depth: Whether to use depth estimation
-        use_clip_relations: Whether to use CLIP for semantic relationships
-        output_folder: Output directory for results
-        custom_detector: Custom detection function (optional)
-        custom_segmenter: Custom segmentation function (optional)
-        custom_depth_estimator: Custom depth estimation function (optional)
-        custom_relation_extractor: Custom relationship extraction function (optional)
-        **config_kwargs: Additional configuration options passed to PreprocessorConfig
+    Custom function signatures:
+        detect_fn(image: Image.Image) -> Tuple[List[List[float]], List[str], List[float]]
+            Returns (boxes, labels, scores) where boxes are [x1, y1, x2, y2]
 
-    Custom Function Signatures:
-        custom_detector(image: np.ndarray, **kwargs) -> List[Detection]
-        custom_segmenter(image: np.ndarray, boxes: List[Box], **kwargs) -> Dict[str, Any]
-        custom_depth_estimator(image: np.ndarray, **kwargs) -> np.ndarray
-        custom_relation_extractor(detections: List[Detection], image: np.ndarray, **kwargs) -> List[Relationship]
+        segment_fn(image: Image.Image, boxes: List[List[float]]) -> List[np.ndarray]
+            Returns list of binary masks (H, W) for each box
 
-    Examples:
-        Basic usage:
-            >>> gom = GraphOfMarks()
-            >>> result = gom.process_image("scene.jpg")
+        depth_fn(image: Image.Image) -> np.ndarray
+            Returns normalized depth map (H, W) in [0, 1], higher = closer
 
-        With configuration:
-            >>> gom = GraphOfMarks(
-            ...     detectors=["yolov8", "owlvit"],
-            ...     sam_version="sam2",
-            ...     use_depth=True
-            ... )
-            >>> result = gom.process_image("scene.jpg", question="What is in the room?")
+    Example:
+        # Default models
+        gom = Gom()
+        result = gom.process("scene.jpg")
 
-        With custom segmentation:
-            >>> def my_segmenter(image, boxes, **kwargs):
-            ...     # Your segmentation logic
-            ...     masks = []
-            ...     for box in boxes:
-            ...         mask = segment_box(image, box)
-            ...         masks.append(mask)
-            ...     return {'masks': masks}
-            >>>
-            >>> gom = GraphOfMarks(custom_segmenter=my_segmenter)
-            >>> result = gom.process_image("scene.jpg")
+        # With custom detection
+        def my_detector(image):
+            boxes, labels, scores = run_yolo(image)
+            return boxes, labels, scores
 
-        With custom depth estimation:
-            >>> def my_depth_estimator(image, **kwargs):
-            ...     # Your depth estimation logic
-            ...     depth_map = estimate_depth(image)
-            ...     # Normalize to [0, 1]
-            ...     depth_map = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min())
-            ...     return depth_map
-            >>>
-            >>> gom = GraphOfMarks(
-            ...     custom_depth_estimator=my_depth_estimator,
-            ...     use_depth=True
-            ... )
-            >>> result = gom.process_image("scene.jpg")
+        gom = Gom(detect_fn=my_detector)
+        result = gom.process("scene.jpg")
     """
 
     def __init__(
         self,
-        detectors: Optional[List[str]] = None,
-        sam_version: str = "sam1",
-        use_depth: bool = False,
-        use_clip_relations: bool = True,
-        output_folder: str = "output_images",
-        # GoM-specific visualization settings
-        label_mode: str = "original",  # "original", "numeric" (numbers), or "alphabetic" (letters)
-        show_masks: bool = True,
-        show_relationships: bool = True,
-        # Custom functions
-        custom_detector: Optional[Callable] = None,
-        custom_segmenter: Optional[Callable] = None,
-        custom_depth_estimator: Optional[Callable] = None,
-        custom_relation_extractor: Optional[Callable] = None,
-        **config_kwargs: Any,
+        detect_fn: Optional[Callable[[Image.Image], Tuple[List, List, List]]] = None,
+        segment_fn: Optional[Callable[[Image.Image, List], List[np.ndarray]]] = None,
+        depth_fn: Optional[Callable[[Image.Image], np.ndarray]] = None,
+        output_dir: str = "output",
+        device: Optional[str] = None,
+        **config_overrides,
     ):
         """
-        Initialize the Graph of Marks pipeline with optional custom functions.
+        Initialize the pipeline.
 
         Args:
-            detectors: List of detector names (["yolov8", "owlvit", "detectron2", "grounding_dino"])
-            sam_version: Segmentation model ("sam1", "sam2", "hq", "fast")
-            use_depth: Enable depth estimation for 3D-aware relationships
-            use_clip_relations: Enable CLIP-based semantic relationships
-            output_folder: Output directory for results
-            label_mode: Label display mode:
-                - "original": Show class names (e.g., "person", "car")
-                - "numeric": Show numbers only (e.g., "1", "2", "3") - Set-of-Mark style
-                - "alphabetic": Show letters (e.g., "A", "B", "C")
-            show_masks: Display segmentation masks
-            show_relationships: Display relationship arrows between objects
-            custom_detector: Custom detection function (optional)
-            custom_segmenter: Custom segmentation function (optional)
-            custom_depth_estimator: Custom depth estimation function (optional)
-            custom_relation_extractor: Custom relationship extraction function (optional)
-            **config_kwargs: Additional configuration options
+            detect_fn: Custom detection function. If None, uses default detectors.
+            segment_fn: Custom segmentation function. If None, uses SAM-HQ.
+            depth_fn: Custom depth function. If None, uses Depth Anything V2.
+            output_dir: Directory for output files.
+            device: Compute device ("cuda", "mps", "cpu"). Auto-detected if None.
+            **config_overrides: Additional PreprocessorConfig overrides.
         """
-        # Store custom functions
-        self.custom_detector = custom_detector
-        self.custom_segmenter = custom_segmenter
-        self.custom_depth_estimator = custom_depth_estimator
-        self.custom_relation_extractor = custom_relation_extractor
+        self.detect_fn = detect_fn
+        self.segment_fn = segment_fn
+        self.depth_fn = depth_fn
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build configuration
-        config_dict = {
-            "output_folder": output_folder,
-            "sam_version": sam_version,
-            "enable_spatial_3d": use_depth,  # Map use_depth to enable_spatial_3d
-            # Visualization settings
-            "show_segmentation": show_masks,
-            "display_relationships": show_relationships,
+        # Build config with defaults matching run_pipeline_with_intermediates.py
+        cfg_dict = {
+            "output_folder": str(self.output_dir),
+            "output_format": "png",
+            # Detection
+            "detectors_to_use": ("yolov8",) if detect_fn is None else (),
+            "threshold_yolo": 0.5,
+            "threshold_owl": 0.5,
+            "threshold_detectron": 0.5,
+            "max_detections_total": 200,
+            "detection_resize": True,
+            "detection_max_side": 1200,
+            "enable_detection_cache": True,
+            # Segmentation
+            "sam_version": "hq",
+            "sam_hq_model_type": "vit_h",
+            "points_per_side": 64,
+            "pred_iou_thresh": 0.90,
+            "stability_score_thresh": 0.95,
+            # Fusion
+            "wbf_iou_threshold": 0.55,
+            "label_nms_threshold": 0.60,
+            "seg_iou_threshold": 0.60,
+            "enable_group_merge": True,
+            "merge_mask_iou_threshold": 0.55,
+            "merge_box_iou_threshold": 0.75,
+            "enable_semantic_dedup": True,
+            "semantic_dedup_iou_threshold": 0.40,
+            # Visualization
+            "display_labels": True,
+            "display_relationships": True,
+            "display_relation_labels": True,
+            "show_segmentation": True,
+            "fill_segmentation": True,
+            "seg_fill_alpha": 0.25,
+            "display_legend": False,
+            "resolve_overlaps": True,
+            "show_bboxes": True,
+            "bbox_linewidth": 2.0,
+            "color_sat_boost": 1.1,
+            "color_val_boost": 1.1,
+            # System
+            "verbose": False,
+            "skip_graph": False,
+            "skip_visualization": False,
         }
 
-        if detectors is not None:
-            config_dict["detectors_to_use"] = tuple(detectors)
+        if device:
+            cfg_dict["preproc_device"] = device
 
-        # Merge with additional config kwargs
-        config_dict.update(config_kwargs)
+        cfg_dict.update(config_overrides)
+        self.config = PreprocessorConfig(**cfg_dict)
 
-        # Create config object
-        self.config = PreprocessorConfig(**config_dict)
+        # Always initialize preprocessor for relationships and fallback defaults
+        self._preprocessor = ImageGraphPreprocessor(self.config)
 
-        # Set label mode in visualizer config
-        if hasattr(self.config, 'visualizer_config') and self.config.visualizer_config:
-            self.config.visualizer_config.label_mode = label_mode
+        # Initialize visualizer with correct defaults
+        self._viz_config = VisualizerConfig(
+            display_labels=True,
+            display_relationships=True,
+            display_relation_labels=True,
+            display_legend=False,
+            show_segmentation=True,
+            fill_segmentation=True,
+            show_bboxes=True,
+            seg_fill_alpha=0.25,
+            bbox_linewidth=2.0,
+            color_sat_boost=1.1,
+            color_val_boost=1.1,
+        )
+        self._visualizer = Visualizer(self._viz_config)
 
-        # Store label mode for later use
-        self._label_mode = label_mode
-
-        # Initialize preprocessor
-        self.preprocessor = ImageGraphPreprocessor(self.config)
-
-        # Apply label mode to visualizer if it exists
-        if hasattr(self.preprocessor, 'visualizer') and self.preprocessor.visualizer:
-            self.preprocessor.visualizer.cfg.label_mode = label_mode
-
-        # Monkey-patch custom functions if provided
-        self._patch_custom_functions()
-
-        logger.info(f"Initialized Graph of Marks with config: {self.config}")
-
-    def _patch_custom_functions(self):
-        """Patch the preprocessor with custom functions if provided."""
-        if self.custom_segmenter is not None:
-            logger.info("Using custom segmentation function")
-            self.preprocessor._custom_segmenter = self.custom_segmenter
-
-        if self.custom_detector is not None:
-            logger.info("Using custom detection function")
-            self.preprocessor._custom_detector = self.custom_detector
-
-        if self.custom_depth_estimator is not None:
-            logger.info("Using custom depth estimation function")
-            self.preprocessor._custom_depth_estimator = self.custom_depth_estimator
-
-        if self.custom_relation_extractor is not None:
-            logger.info("Using custom relationship extraction function")
-            self.preprocessor._custom_relation_extractor = self.custom_relation_extractor
-
-    def process_image(
+    def process(
         self,
-        image_path: Union[str, Path],
+        image: Union[str, Path, Image.Image],
         question: Optional[str] = None,
-        save_visualization: bool = True,
-        **kwargs: Any,
+        save: bool = True,
     ) -> Dict[str, Any]:
         """
-        Process a single image through the full pipeline.
+        Process an image through the pipeline.
 
         Args:
-            image_path: Path to the image file
-            question: Optional question for VQA-aware filtering
-            save_visualization: Whether to save annotated visualization
-            **kwargs: Additional options passed to the pipeline
+            image: Image path or PIL Image.
+            question: Optional question for VQA-aware filtering.
+            save: Whether to save outputs to disk.
 
         Returns:
-            Dictionary containing:
-                - detections: List of Detection objects
-                - relations: List of Relationship objects
-                - scene_graph: NetworkX graph object
-                - scene_graph_json: JSON serialization of scene graph
-                - output_path: Path to annotated visualization (if saved)
-                - depth_map: Depth map (if use_depth=True)
-                - processing_time: Total processing time in seconds
-
-        Example:
-            >>> gom = GraphOfMarks()
-            >>> result = gom.process_image("scene.jpg", question="What is on the table?")
-            >>> print(f"Found {len(result['detections'])} objects")
-            >>> print(f"Found {len(result['relations'])} relationships")
+            Dictionary with keys:
+                - boxes: List of [x1, y1, x2, y2]
+                - labels: List of class labels
+                - scores: List of confidence scores
+                - masks: List of binary masks (H, W)
+                - depth: Depth map (H, W) in [0, 1]
+                - relationships: List of relationship dicts
+                - output_path: Path to visualization (if saved)
         """
-        import time
-        import json
-        from PIL import Image
-        import networkx as nx
-
-        image_path = Path(image_path)
-
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        # Update config with question if provided
-        if question is not None:
-            self.config.question = question
-
-        # Update config for visualization if needed
-        if save_visualization is not None:
-            original_skip_viz = self.config.skip_visualization
-            self.config.skip_visualization = not save_visualization
-
-        # Load image and process
         t0 = time.time()
-        image_pil = Image.open(image_path)
-        image_name = image_path.stem
 
-        # Process through pipeline (returns None, saves to disk)
-        self.preprocessor.process_single_image(
-            image_pil,
-            image_name,
-            custom_question=question
-        )
+        # Load image
+        if isinstance(image, (str, Path)):
+            image_path = Path(image)
+            image_pil = Image.open(image_path).convert("RGB")
+            image_name = image_path.stem
+        else:
+            image_pil = image.convert("RGB")
+            image_name = f"image_{int(time.time())}"
 
-        processing_time = time.time() - t0
+        W, H = image_pil.size
 
-        # Restore original visualization setting
-        if save_visualization is not None:
-            self.config.skip_visualization = original_skip_viz
+        # Detection
+        if self.detect_fn is not None:
+            boxes, labels, scores = self.detect_fn(image_pil)
+            boxes = [list(b) for b in boxes]
+        else:
+            det_result = self._preprocessor._run_detectors(image_pil)
+            boxes = det_result.get("boxes", [])
+            labels = det_result.get("labels", [])
+            scores = det_result.get("scores", [])
 
-        # Build result dictionary from saved files
+        # Segmentation
+        masks = []
+        if boxes:
+            if self.segment_fn is not None:
+                masks = self.segment_fn(image_pil, boxes)
+            elif self._preprocessor.segmenter:
+                seg_results = self._preprocessor.segmenter.segment(image_pil, boxes)
+                masks = [r.get("segmentation") if isinstance(r, dict) else r for r in seg_results]
+
+        # Depth
+        depth = None
+        if self.depth_fn is not None:
+            depth = self.depth_fn(image_pil)
+        elif self._preprocessor.depth_est:
+            depth = self._preprocessor.depth_est.infer_map(image_pil)
+
+        # Relationships
+        relationships = []
+        if boxes:
+            depths_at_centers = None
+            if depth is not None:
+                centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
+                depths_at_centers = []
+                for cx, cy in centers:
+                    x = int(np.clip(round(cx), 0, W - 1))
+                    y = int(np.clip(round(cy), 0, H - 1))
+                    depths_at_centers.append(float(depth[y, x]))
+
+            relationships = self._preprocessor.relations_inferencer.infer(
+                image_pil=image_pil,
+                boxes=boxes,
+                labels=labels,
+                masks=[{"segmentation": m} for m in masks] if masks else None,
+                depths=depths_at_centers,
+                use_geometry=True,
+                use_clip=False,
+            )
+            # Apply per-object limits and remove inverse duplicates
+            relationships = self._preprocessor.relations_inferencer.limit_relationships_per_object(
+                relationships,
+                boxes,
+                max_relations_per_object=3,
+                min_relations_per_object=0,
+            )
+            relationships = self._preprocessor.relations_inferencer.drop_inverse_duplicates(relationships)
+
         result = {
-            'detections': [],
-            'relations': [],
-            'scene_graph': None,
-            'scene_graph_json': None,
-            'output_path': None,
-            'depth_map': None,
-            'processing_time': processing_time,
+            "boxes": boxes,
+            "labels": labels,
+            "scores": scores,
+            "masks": masks,
+            "depth": depth,
+            "relationships": relationships,
+            "processing_time": time.time() - t0,
         }
 
-        # Load scene graph if it exists
-        graph_json_path = self.config.output_folder / f"{image_name}_graph.json"
-        if graph_json_path.exists():
-            with open(graph_json_path, 'r') as f:
-                result['scene_graph_json'] = json.load(f)
-
-            # Reconstruct scene graph from JSON
-            try:
-                from gom.types import Detection, Relation
-
-                # Extract detections
-                if 'nodes' in result['scene_graph_json']:
-                    for node_id, node_data in result['scene_graph_json']['nodes'].items():
-                        if node_data.get('label') != 'scene':  # Skip scene node
-                            det = Detection(
-                                box=node_data.get('bbox', [0, 0, 0, 0]),
-                                label=node_data.get('label', ''),
-                                score=node_data.get('score', 0.0),
-                                source=node_data.get('source', 'unknown')
-                            )
-                            result['detections'].append(det)
-
-                # Extract relations
-                if 'edges' in result['scene_graph_json']:
-                    for edge in result['scene_graph_json']['edges']:
-                        src_idx = edge.get('source', 0)
-                        tgt_idx = edge.get('target', 0)
-                        relation = edge.get('relation', 'unknown')
-
-                        rel = Relation(
-                            src_idx=src_idx,
-                            tgt_idx=tgt_idx,
-                            relation=relation
-                        )
-                        result['relations'].append(rel)
-            except Exception as e:
-                # If reconstruction fails, just pass the JSON
-                pass
-
-        # Add path to visualization if it was created
-        output_format = getattr(self.config, 'output_format', 'jpg')
-        if output_format not in ['jpg', 'png', 'svg']:
-            output_format = 'jpg'
-        viz_path = self.config.output_folder / f"{image_name}_output.{output_format}"
-        if viz_path.exists():
-            result['output_path'] = str(viz_path)
+        # Save outputs
+        if save:
+            self._save_outputs(image_pil, image_name, result, question)
+            result["output_path"] = str(self.output_dir / f"{image_name}_04_output.png")
 
         return result
 
-    def process_batch(
+    def _save_outputs(
         self,
-        image_paths: List[Union[str, Path]],
-        questions: Optional[List[str]] = None,
-        save_visualizations: bool = True,
-        **kwargs: Any,
-    ) -> List[Dict[str, Any]]:
-        """
-        Process a batch of images through the pipeline.
+        image: Image.Image,
+        name: str,
+        result: Dict[str, Any],
+        question: Optional[str] = None,
+    ):
+        """Save all intermediate and final visualizations."""
+        boxes = result["boxes"]
+        labels = result["labels"]
+        scores = result["scores"]
+        masks = result["masks"]
+        relationships = result["relationships"]
+        depth = result.get("depth")
 
-        Args:
-            image_paths: List of paths to image files
-            questions: Optional list of questions (one per image)
-            save_visualizations: Whether to save annotated visualizations
-            **kwargs: Additional options passed to the pipeline
+        W, H = image.size
 
-        Returns:
-            List of result dictionaries (one per image)
-
-        Example:
-            >>> gom = GraphOfMarks()
-            >>> images = ["scene1.jpg", "scene2.jpg", "scene3.jpg"]
-            >>> results = gom.process_batch(images)
-            >>> for i, result in enumerate(results):
-            ...     print(f"Image {i}: {len(result['detections'])} objects")
-        """
-        results = []
-
-        if questions is None:
-            questions = [None] * len(image_paths)
-
-        if len(questions) != len(image_paths):
-            raise ValueError(
-                f"Number of questions ({len(questions)}) must match "
-                f"number of images ({len(image_paths)})"
+        # 1. Detections only (no masks, no relations)
+        if boxes:
+            det_viz = Visualizer(VisualizerConfig(
+                display_labels=True,
+                display_relationships=False,
+                display_relation_labels=False,
+                show_segmentation=False,
+                show_bboxes=True,
+                display_legend=False,
+                seg_fill_alpha=0.25,
+                color_sat_boost=1.1,
+                color_val_boost=1.1,
+            ))
+            det_viz.draw(
+                image=image,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=[],
+                masks=None,
+                save_path=str(self.output_dir / f"{name}_01_detections.png"),
+                draw_background=True,
             )
 
-        for image_path, question in zip(image_paths, questions):
-            try:
-                result = self.process_image(
-                    image_path,
-                    question=question,
-                    save_visualization=save_visualizations,
-                    **kwargs
-                )
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Error processing {image_path}: {e}")
-                results.append({"error": str(e), "image_path": str(image_path)})
+        # 2. Segmentation only (masks + boxes, no relations)
+        if boxes and masks:
+            seg_viz = Visualizer(VisualizerConfig(
+                display_labels=True,
+                display_relationships=False,
+                display_relation_labels=False,
+                show_segmentation=True,
+                fill_segmentation=True,
+                show_bboxes=True,
+                display_legend=False,
+                seg_fill_alpha=0.25,
+                color_sat_boost=1.1,
+                color_val_boost=1.1,
+            ))
+            mask_dicts = [{"segmentation": m} for m in masks]
+            seg_viz.draw(
+                image=image,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=[],
+                masks=mask_dicts,
+                save_path=str(self.output_dir / f"{name}_02_segmentation.png"),
+                draw_background=True,
+            )
 
-        return results
+        # 3. Depth map
+        if depth is not None:
+            depth_img = (np.clip(depth, 0.0, 1.0) * 255.0).astype(np.uint8)
+            depth_pil = Image.fromarray(depth_img, mode="L")
+            depth_pil.save(self.output_dir / f"{name}_03_depth.png")
 
-    def process_directory(
-        self,
-        directory: Union[str, Path],
-        pattern: str = "*.jpg",
-        recursive: bool = False,
-        **kwargs: Any,
-    ) -> List[Dict[str, Any]]:
-        """
-        Process all images in a directory.
+        # 4. Final output (masks + relations + labels)
+        if boxes:
+            mask_dicts = [{"segmentation": m} for m in masks] if masks else None
+            self._visualizer.draw(
+                image=image,
+                boxes=boxes,
+                labels=labels,
+                scores=scores,
+                relationships=relationships,
+                masks=mask_dicts,
+                save_path=str(self.output_dir / f"{name}_04_output.png"),
+                draw_background=True,
+            )
 
-        Args:
-            directory: Directory containing images
-            pattern: Glob pattern for image files (default: "*.jpg")
-            recursive: Whether to search recursively
-            **kwargs: Additional options passed to process_batch
+        # 5. Scene graph JSON
+        graph_data = {
+            "image_size": {"width": W, "height": H},
+            "question": question or "",
+            "nodes": {},
+            "edges": [],
+        }
 
-        Returns:
-            List of result dictionaries (one per image)
+        for i, (box, label, score) in enumerate(zip(boxes, labels, scores)):
+            node_id = f"obj_{i}"
+            graph_data["nodes"][node_id] = {
+                "id": i,
+                "label": label,
+                "bbox": box,
+                "bbox_norm": [box[0] / W, box[1] / H, box[2] / W, box[3] / H],
+                "score": score,
+            }
 
-        Example:
-            >>> gom = GraphOfMarks()
-            >>> results = gom.process_directory("images/", pattern="*.png")
-            >>> print(f"Processed {len(results)} images")
-        """
-        directory = Path(directory)
+        for rel in relationships:
+            graph_data["edges"].append({
+                "source": rel.get("src_idx"),
+                "target": rel.get("tgt_idx"),
+                "relation": rel.get("relation"),
+            })
 
-        if not directory.exists():
-            raise FileNotFoundError(f"Directory not found: {directory}")
+        with open(self.output_dir / f"{name}_05_graph.json", "w") as f:
+            json.dump(graph_data, f, indent=2)
 
-        # Find all matching images
-        if recursive:
-            image_paths = list(directory.rglob(pattern))
-        else:
-            image_paths = list(directory.glob(pattern))
 
-        logger.info(f"Found {len(image_paths)} images in {directory}")
-
-        return self.process_batch(image_paths, **kwargs)
-
-    def get_config(self) -> PreprocessorConfig:
-        """Get the current configuration object."""
-        return self.config
-
-    def update_config(self, **kwargs: Any) -> None:
-        """
-        Update configuration parameters.
-
-        Args:
-            **kwargs: Configuration parameters to update
-
-        Example:
-            >>> gom = GraphOfMarks()
-            >>> gom.update_config(use_depth=True, sam_version="sam2")
-        """
-        for key, value in kwargs.items():
-            if hasattr(self.config, key):
-                setattr(self.config, key, value)
-            else:
-                logger.warning(f"Unknown config parameter: {key}")
-
-        # Re-patch custom functions after config update
-        self._patch_custom_functions()
+# Alias for backward compatibility
+GraphOfMarks = Gom
 
 
 def create_pipeline(
-    detectors: Optional[List[str]] = None,
-    sam_version: str = "sam1",
-    **kwargs: Any,
-) -> GraphOfMarks:
+    detect_fn: Optional[Callable] = None,
+    segment_fn: Optional[Callable] = None,
+    depth_fn: Optional[Callable] = None,
+    **kwargs,
+) -> Gom:
     """
-    Factory function to create a Graph of Marks pipeline.
-
-    Args:
-        detectors: List of detector names
-        sam_version: SAM version to use
-        **kwargs: Additional configuration options
-
-    Returns:
-        GraphOfMarks instance
+    Factory function to create a Gom pipeline.
 
     Example:
-        >>> gom = create_pipeline(detectors=["yolov8"], sam_version="sam2")
-        >>> result = gom.process_image("scene.jpg")
+        gom = create_pipeline()
+        result = gom.process("scene.jpg")
     """
-    return GraphOfMarks(detectors=detectors, sam_version=sam_version, **kwargs)
+    return Gom(
+        detect_fn=detect_fn,
+        segment_fn=segment_fn,
+        depth_fn=depth_fn,
+        **kwargs
+    )

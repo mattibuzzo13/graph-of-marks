@@ -2,6 +2,8 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![PyPI version](https://badge.fury.io/py/graph-of-marks.svg)](https://badge.fury.io/py/graph-of-marks)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Overview
 
@@ -9,7 +11,27 @@
 
 ## Installation
 
-### Quick Install
+### From PyPI (Recommended)
+
+```bash
+pip install graph-of-marks
+```
+
+With optional dependencies:
+```bash
+# Install with all features (detection, segmentation, VQA)
+pip install "graph-of-marks[all]"
+
+# Or install specific extras
+pip install "graph-of-marks[detection,segmentation,vqa]"
+```
+
+> **Note:** For Detectron2 support, install separately:
+> ```bash
+> pip install git+https://github.com/facebookresearch/detectron2.git
+> ```
+
+### From Source
 
 ```bash
 # Clone repository
@@ -20,7 +42,7 @@ cd graph-of-marks
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 # Install dependencies
-pip install -r build/requirements.txt
+pip install -e ".[all]"
 
 # Download pretrained models
 bash download_ckpt.sh

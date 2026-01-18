@@ -1,76 +1,5 @@
-# image_preprocessor.py
-"""
-Image Graph Preprocessor - CLI Entry Point
-
-Command-line interface for the Image Graph Preprocessing pipeline. Orchestrates
-multi-detector object detection, instance segmentation, relationship extraction,
-and scene graph generation from images.
-
-This script provides a comprehensive CLI that exposes all pipeline configuration
-options through command-line arguments, supporting both single-image and batch
-processing workflows.
-
-Features:
-    - Single image or batch processing (directory, JSON, HuggingFace dataset)
-    - Multi-detector fusion (OWL-ViT, YOLOv8, Detectron2, GroundingDINO)
-    - Question-aware filtering for VQA applications
-    - Customizable detection/fusion/relation thresholds
-    - Visualization with extensive rendering options
-    - Caching for performance optimization
-    - Progress tracking for batch jobs
-
-Usage:
-    # Single image
-    python image_preprocessor.py --input_path image.jpg --output_folder results/
-    
-    # With question filtering
-    python image_preprocessor.py --input_path image.jpg --question "What color is the car?"
-    
-    # Batch from directory
-    python image_preprocessor.py --input_path images/ --output_folder results/
-    
-    # HuggingFace dataset
-    python image_preprocessor.py --dataset "nlphuji/flickr30k" --split validation
-    
-    # Custom detector configuration
-    python image_preprocessor.py --input_path img.jpg --detectors yolov8,owlvit \\
-        --yolo_threshold 0.5 --owl_threshold 0.3
-
-Main Arguments:
-    --input_path: Image file or directory
-    --output_folder: Output directory for results
-    --question: Question for VQA-aware filtering
-    --detectors: Comma-separated detector names
-    --dataset: HuggingFace dataset name
-    --json_file: Batch JSON file
-
-Configuration Categories:
-    I/O:
-        --input_path, --output_folder, --json_file, --dataset
-    
-    Filtering:
-        --question, --aggressive_pruning, --clip_pruning_threshold
-    
-    Detectors:
-        --detectors, --owl_threshold, --yolo_threshold, --detectron_threshold
-    
-    Fusion:
-        --wbf_iou_threshold, --label_nms_threshold, --cross_class_iou_threshold
-    
-    Relations:
-        --max_relations_per_object, --margin, --min_distance
-    
-    Visualization:
-        --show_boxes, --show_labels, --show_masks, --font_size
-    
-    Performance:
-        --use_cache, --batch_size, --num_workers
-
-See Also:
-    - gom.pipeline.preprocessor: Core pipeline implementation
-    - gom.config: Configuration dataclasses
-    - README.md: Detailed usage examples
-"""
+#!/usr/bin/env python3
+"""Image Graph Preprocessor CLI."""
 from __future__ import annotations
 
 import argparse
@@ -79,135 +8,84 @@ import logging
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 from gom.config import default_config, PreprocessorConfig
 from gom.pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
 
 
 def _parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments for Image Graph Preprocessor.
-    
-    Exposes all pipeline configuration options as CLI flags, organized
-    into logical groups (I/O, detectors, fusion, relations, visualization).
-    
-    Returns:
-        argparse.Namespace with parsed arguments
-    
-    Argument Groups:
-        1. I/O and Dataset:
-           - input_path, json_file, output_folder
-           - dataset, split, image_column, num_instances
-        
-        2. Question Filtering:
-           - question, disable_question_filter, aggressive_pruning
-           - threshold_object_similarity, threshold_relation_similarity
-        
-        3. Detectors:
-           - detectors (comma-separated list)
-           - owl_threshold, yolo_threshold, detectron_threshold
-           - grounding_dino_threshold, grounding_dino_text_threshold
-        
-        4. Relationships:
-           - max_relations_per_object, min_relations_per_object
-           - margin, min_distance, max_distance
-        
-        5. Fusion/NMS:
-           - label_nms_threshold, seg_iou_threshold
-           - wbf_iou_threshold, skip_box_threshold
-           - cross_class_iou_threshold, cascade_conf_threshold
-    """
-    # Parse CLI arguments per l'Image Graph Preprocessor.
-    # La CLI espone tutte le leve della pipeline (I/O, detector, segmentazione, viz, caching).
     p = argparse.ArgumentParser(
-        description="Image Graph Preprocessor (CLI orchestrator)",
+        description="Image Graph Preprocessor",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # I/O e dataset
-    p.add_argument("--input_path", type=str, default=None, help="Percorso a immagine o cartella")
-    p.add_argument("--json_file", type=str, default="", help="Batch JSON (override input_path/dataset)")
+    # I/O
+    p.add_argument("--input_path", type=str, default=None)
+    p.add_argument("--json_file", type=str, default="")
     p.add_argument("--output_folder", type=str, default="output_images")
     p.add_argument("--dataset", type=str, default=None)
     p.add_argument("--split", type=str, default="train")
     p.add_argument("--image_column", type=str, default="image")
-    p.add_argument("--num_instances", type=int, default=-1, help="Se >0, elabora solo le prime N istanze")
+    p.add_argument("--num_instances", type=int, default=-1)
 
-    # Domanda (testo) per filtrare oggetti/relazioni
-    p.add_argument("--question", type=str, default="", help="Domanda per filtrare oggetti/relazioni")
-    p.add_argument("--disable_question_filter", action="store_true", help="Disattiva i filtri basati sulla domanda")
-    p.add_argument("--aggressive_pruning", action="store_true",
-                   help="Tieni solo oggetti citati e relazioni richieste (pruning più duro)")
-    p.add_argument("--no_filter_relations_by_question", action="store_true",
-                   help="Non filtrare relazioni in base alla domanda")
+    # Question filtering
+    p.add_argument("--question", type=str, default="")
+    p.add_argument("--disable_question_filter", action="store_true")
+    p.add_argument("--aggressive_pruning", action="store_true")
+    p.add_argument("--no_filter_relations_by_question", action="store_true")
     p.add_argument("--threshold_object_similarity", type=float, default=0.50)
     p.add_argument("--threshold_relation_similarity", type=float, default=0.50)
-    p.add_argument("--clip_pruning_threshold", type=float, default=0.25, 
-                   help="Soglia minima CLIP similarity per pruning")
-    p.add_argument("--semantic_boost_weight", type=float, default=0.4,
-                   help="Peso per rilevanza semantica vs confidenza detection")
-    p.add_argument("--context_expansion_radius", type=float, default=2.0,
-                   help="Moltiplicatore per area espansione contesto")
-    p.add_argument("--context_min_iou", type=float, default=0.1,
-                   help="IoU minimo per oggetti contestuali")
+    p.add_argument("--clip_pruning_threshold", type=float, default=0.25)
+    p.add_argument("--semantic_boost_weight", type=float, default=0.4)
+    p.add_argument("--context_expansion_radius", type=float, default=2.0)
+    p.add_argument("--context_min_iou", type=float, default=0.1)
 
-    # Detector e soglie
-    p.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2",
-                   help="Elenco detector separati da virgola")
+    # Detectors
+    p.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2")
     p.add_argument("--owl_threshold", type=float, default=0.40)
     p.add_argument("--yolo_threshold", type=float, default=0.80)
     p.add_argument("--detectron_threshold", type=float, default=0.80)
     p.add_argument("--grounding_dino_threshold", type=float, default=0.30)
-    p.add_argument("--grounding_dino_text_threshold", type=float, default=0.25,
-                   help="Soglia text per GroundingDINO")
+    p.add_argument("--grounding_dino_text_threshold", type=float, default=0.25)
 
-    # Vincoli relazioni (geometria e limiti per oggetto)
+    # Relations
     p.add_argument("--max_relations_per_object", type=int, default=3)
     p.add_argument("--min_relations_per_object", type=int, default=1)
-    p.add_argument("--margin", type=int, default=20, help="Margine (px) per orientamento geometrico")
-    p.add_argument("--min_distance", type=float, default=10, help="Distanza minima tra centri (ridotta per più relazioni)")
+    p.add_argument("--margin", type=int, default=20)
+    p.add_argument("--min_distance", type=float, default=10)
     p.add_argument("--max_distance", type=float, default=20000)
 
-    # NMS per label e IoU per segmentazione
+    # NMS / fusion
     p.add_argument("--label_nms_threshold", type=float, default=0.50)
     p.add_argument("--seg_iou_threshold", type=float, default=0.70)
-    p.add_argument("--wbf_iou_threshold", type=float, default=0.55,
-                   help="Soglia IoU per WBF fusion")
-    p.add_argument("--skip_box_threshold", type=float, default=0.10,
-                   help="Soglia per saltare box a bassa confidenza")
-    p.add_argument("--cross_class_iou_threshold", type=float, default=0.75,
-                   help="Soglia IoU per cross-class suppression")
-    p.add_argument("--cascade_conf_threshold", type=float, default=0.40,
-                   help="Soglia confidenza per cascade detector")
-    p.add_argument("--detection_mask_merge_iou_thr", type=float, default=0.60,
-                   help="Soglia IoU per merge maschere detection")
-    p.add_argument("--clip_cache_max_age_days", type=float, default=30.0,
-                   help="TTL cache CLIP in giorni")
-    p.add_argument("--keep_non_competing_low_scores", action="store_true",
-                   help="Mantieni detection a basso score se non ci sono competitori nella regione")
-    p.add_argument("--non_competing_iou_threshold", type=float, default=0.30,
-                   help="Soglia IoU per determinare se oggetti competono")
-    p.add_argument("--non_competing_min_score", type=float, default=0.05,
-                   help="Score minimo per recovery detection non competitive")
+    p.add_argument("--wbf_iou_threshold", type=float, default=0.55)
+    p.add_argument("--skip_box_threshold", type=float, default=0.10)
+    p.add_argument("--cross_class_iou_threshold", type=float, default=0.75)
+    p.add_argument("--cascade_conf_threshold", type=float, default=0.40)
+    p.add_argument("--detection_mask_merge_iou_thr", type=float, default=0.60)
+    p.add_argument("--clip_cache_max_age_days", type=float, default=30.0)
+    p.add_argument("--keep_non_competing_low_scores", action="store_true")
+    p.add_argument("--non_competing_iou_threshold", type=float, default=0.30)
+    p.add_argument("--non_competing_min_score", type=float, default=0.05)
 
-    # Backend SAM
+    # SAM
     p.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
     p.add_argument("--sam_hq_model_type", type=str, choices=["vit_b", "vit_l", "vit_h"], default="vit_h")
     p.add_argument("--points_per_side", type=int, default=32)
     p.add_argument("--pred_iou_thresh", type=float, default=0.90)
     p.add_argument("--stability_score_thresh", type=float, default=0.92)
     p.add_argument("--min_mask_region_area", type=int, default=100)
-    p.add_argument("--preproc_device", type=str, default=None, help="Forza device (cpu/cuda)")
+    p.add_argument("--preproc_device", type=str, default=None)
 
-    # Visualizzazione
+    # Visualization
     p.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
-    p.add_argument("--display_labels", action="store_true", help="Mostra etichette oggetti")
-    p.add_argument("--display_relationships", action="store_true", help="Mostra frecce relazioni")
-    p.add_argument("--display_relation_labels", action="store_true", help="Mostra testo relazioni")
-    p.add_argument("--show_segmentation", action="store_true", help="Disegna maschere SAM")
-    p.add_argument("--fill_segmentation", action="store_true", help="Riempie le maschere disegnate")
-    p.add_argument("--no_legend", action="store_true", help="Disabilita legenda colori")
+    p.add_argument("--display_labels", action="store_true")
+    p.add_argument("--display_relationships", action="store_true")
+    p.add_argument("--display_relation_labels", action="store_true")
+    p.add_argument("--show_segmentation", action="store_true")
+    p.add_argument("--fill_segmentation", action="store_true")
+    p.add_argument("--no_legend", action="store_true")
     p.add_argument("--seg_fill_alpha", type=float, default=0.6)
     p.add_argument("--bbox_linewidth", type=float, default=1.0)
     p.add_argument("--obj_fontsize_inside", type=int, default=10)
@@ -216,195 +94,82 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--legend_fontsize", type=int, default=6)
     p.add_argument("--rel_arrow_linewidth", type=float, default=1.5)
     p.add_argument("--rel_arrow_mutation_scale", type=float, default=22.0)
-    p.add_argument("--resolve_overlaps", action="store_true", help="Evita sovrapposizioni label/frecce")
-    p.add_argument("--no_bboxes", action="store_true", help="Non disegnare bounding box")
-    p.add_argument("--no_masks", action="store_true", help="Non disegnare maschere")
-    p.add_argument("--no_instances", action="store_true", help="Nasconde sia bbox che maschere (override)")
-    p.add_argument("--show_confidence", action="store_true", help="Aggiunge la confidenza nelle etichette")
-    
+    p.add_argument("--resolve_overlaps", action="store_true")
+    p.add_argument("--no_bboxes", action="store_true")
+    p.add_argument("--no_masks", action="store_true")
+    p.add_argument("--no_instances", action="store_true")
+    p.add_argument("--show_confidence", action="store_true")
+
     # Output format
-    p.add_argument("--output_format", type=str, choices=["jpg", "png", "svg"], default="jpg",
-                   help="Formato output (jpg, png, svg)")
-    p.add_argument("--save_without_background", action="store_true",
-                   help="Salva solo le overlays senza l'immagine originale di fondo")
+    p.add_argument("--output_format", type=str, choices=["jpg", "png", "svg"], default="jpg")
+    p.add_argument("--save_without_background", action="store_true")
 
-
-    # Colori overlay
+    # Colors
     p.add_argument("--color_sat_boost", type=float, default=1.30)
     p.add_argument("--color_val_boost", type=float, default=1.15)
 
-    # Post-process maschere
-    p.add_argument("--close_holes", action="store_true", help="Chiudi buchi interni nelle maschere SAM")
+    # Mask post-processing
+    p.add_argument("--close_holes", action="store_true")
     p.add_argument("--hole_kernel", type=int, default=7)
     p.add_argument("--min_hole_area", type=int, default=100)
 
-    # Output
-    p.add_argument("--save_image_only", action="store_true", help="Salva solo immagine elaborata")
-    p.add_argument("--skip_graph", action="store_true", help="Non salvare i file di grafo")
-    p.add_argument("--skip_prompt", action="store_true", help="Non salvare il file Triples/Prompt")
-    p.add_argument("--skip_visualization", action="store_true", help="Non salvare la visualizzazione")
-    p.add_argument("--export_preproc_only", action="store_true",
-                   help="Esporta anche overlay trasparente (solo preproc)")
+    # Output options
+    p.add_argument("--save_image_only", action="store_true")
+    p.add_argument("--skip_graph", action="store_true")
+    p.add_argument("--skip_prompt", action="store_true")
+    p.add_argument("--skip_visualization", action="store_true")
+    p.add_argument("--export_preproc_only", action="store_true")
 
-    # Cache detection
-    p.add_argument("--enable_detection_cache", action="store_true", help="Abilita cache detection")
+    # Cache
+    p.add_argument("--enable_detection_cache", action="store_true")
     p.add_argument("--max_cache_size", type=int, default=100)
-    p.add_argument("--clear_cache", action="store_true", help="Pulisce le cache e termina se non c'è altro da fare")
+    p.add_argument("--clear_cache", action="store_true")
 
-    # Qualità della vita (opzionali, safe: applicati solo se presenti nel config)
-    p.add_argument("--config", type=str, default="", help="Carica config da JSON/YAML e sovrascrive i valori di default")
-    p.add_argument("--save_config", type=str, default="", help="Salva la config effettiva in JSON (o YAML se .yml/.yaml)")
-    p.add_argument("--dry_run", action="store_true", help="Mostra la config ed esce senza eseguire la pipeline")
-    p.add_argument("--verbose", action="count", default=0, help="Aumenta il livello di log (-v, -vv)")
-    p.add_argument("--seed", type=int, default=None, help="Seed per riproducibilità (se supportato)")
-    p.add_argument("--workers", type=int, default=None, help="Numero di worker (se supportato)")
-    p.add_argument("--no_progress", action="store_true", help="Disabilita le barre di avanzamento (se supportato)")
-    p.add_argument("--version", action="store_true", help="Stampa la versione del preprocessor e termina")
+    # Misc
+    p.add_argument("--config", type=str, default="")
+    p.add_argument("--save_config", type=str, default="")
+    p.add_argument("--dry_run", action="store_true")
+    p.add_argument("--verbose", action="count", default=0)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--workers", type=int, default=None)
+    p.add_argument("--no_progress", action="store_true")
+    p.add_argument("--version", action="store_true")
 
     return p.parse_args()
 
 
 def _merge_cfg_from_dict(cfg: PreprocessorConfig, data: Dict[str, Any]) -> None:
-    """
-    Merge dictionary values into PreprocessorConfig.
-    
-    Updates config dataclass fields from a dictionary, ignoring unknown keys.
-    Useful for applying config file overrides while maintaining defaults.
-    
-    Args:
-        cfg: Configuration object to update (modified in-place)
-        data: Dictionary with field names as keys
-    
-    Example:
-        >>> cfg = default_config()
-        >>> overrides = {"threshold_yolo": 0.7, "display_labels": True}
-        >>> _merge_cfg_from_dict(cfg, overrides)
-        >>> cfg.threshold_yolo
-        0.7
-    
-    Notes:
-        - Only updates fields that exist in cfg
-        - Unknown keys are silently ignored (for forward compatibility)
-        - No type validation (caller should ensure correct types)
-    """
     for k, v in (data or {}).items():
         if hasattr(cfg, k):
             setattr(cfg, k, v)
 
 
 def _load_config_file(path: str) -> Dict[str, Any]:
-    """
-    Load configuration from JSON or YAML file.
-    
-    Detects format by file extension (.json, .yml, .yaml) and parses
-    accordingly. Returns empty dict for empty files.
-    
-    Args:
-        path: Path to config file
-    
-    Returns:
-        Dictionary with configuration key-value pairs
-    
-    Raises:
-        FileNotFoundError: If config file doesn't exist
-        RuntimeError: If YAML format requested but PyYAML not installed
-        json.JSONDecodeError: If JSON parsing fails
-    
-    Example:
-        >>> config_data = _load_config_file("experiments/config.yaml")
-        >>> config_data["threshold_yolo"]
-        0.75
-    
-    Notes:
-        - YAML support requires optional `pyyaml` package
-        - JSON is default if extension unrecognized
-        - Files encoded as UTF-8
-    """
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"Config non trovata: {p}")
+        raise FileNotFoundError(f"Config not found: {p}")
     if p.suffix.lower() in {".yml", ".yaml"}:
-        try:
-            import yaml  # type: ignore
-        except Exception as e:
-            raise RuntimeError("PyYAML non installato, impossibile leggere YAML") from e
+        import yaml
         with open(p, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
-    # default JSON
     with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def _dump_config_file(cfg: PreprocessorConfig, path: str) -> None:
-    """
-    Save PreprocessorConfig to JSON or YAML file.
-    
-    Serializes dataclass to dictionary and writes to file. Format determined
-    by extension. Creates parent directories if needed.
-    
-    Args:
-        cfg: Configuration object to save
-        path: Output file path (.json/.yml/.yaml)
-    
-    Raises:
-        RuntimeError: If YAML format requested but PyYAML not installed
-    
-    Example:
-        >>> cfg = default_config()
-        >>> cfg.threshold_yolo = 0.9
-        >>> _dump_config_file(cfg, "experiments/high_precision.json")
-    
-    Notes:
-        - YAML output preserves insertion order (no sorting)
-        - JSON indented with 2 spaces for readability
-        - Non-ASCII characters preserved in JSON (ensure_ascii=False)
-        - Parent directories created automatically
-    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     data = asdict(cfg) if is_dataclass(cfg) else dict(vars(cfg))
     if p.suffix.lower() in {".yml", ".yaml"}:
-        try:
-            import yaml  # type: ignore
-        except Exception as e:
-            raise RuntimeError("PyYAML non installato, impossibile scrivere YAML") from e
+        import yaml
         with open(p, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False)  # type: ignore[name-defined]
+            yaml.safe_dump(data, f, sort_keys=False)
     else:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _apply_optional_flags(cfg: PreprocessorConfig, args: argparse.Namespace) -> None:
-    """
-    Apply optional CLI flags to config (if fields exist).
-    
-    Updates config with quality-of-life flags (seed, workers, verbosity)
-    only if the config object has corresponding attributes. Enables
-    forward compatibility with older config schemas.
-    
-    Args:
-        cfg: Configuration object to update (modified in-place)
-        args: Parsed command-line arguments
-    
-    Optional Flags:
-        - seed: Random seed for reproducibility
-        - num_workers: Parallel processing workers
-        - no_progress: Disable progress bars
-        - verbose: Logging verbosity (0=WARN, 1=INFO, 2=DEBUG)
-    
-    Example:
-        >>> args = _parse_args()  # --seed 42 --workers 4 -vv
-        >>> cfg = default_config()
-        >>> _apply_optional_flags(cfg, args)
-        >>> cfg.seed  # if field exists
-        42
-    
-    Notes:
-        - Safe for configs without these fields (no AttributeError)
-        - None values are skipped
-        - Used for experimental/debugging features
-    """
     opt_map = {
         "seed": args.seed,
         "num_workers": args.workers,
@@ -417,51 +182,9 @@ def _apply_optional_flags(cfg: PreprocessorConfig, args: argparse.Namespace) -> 
 
 
 def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
-    """
-    Build PreprocessorConfig from command-line arguments.
-    
-    Performs 1:1 mapping of CLI flags to config dataclass fields,
-    converting types and handling composite flags (e.g., --no_instances).
-    
-    Args:
-        args: Parsed CLI arguments from _parse_args()
-    
-    Returns:
-        Fully populated PreprocessorConfig ready for pipeline
-    
-    Configuration Mapping:
-        I/O: input_path, output_folder, dataset, split, etc.
-        Question Filtering: question, aggressive_pruning, thresholds
-        Detectors: detectors_to_use, threshold_owl/yolo/detectron
-        Relations: max_relations_per_object, margin, distances
-        Fusion: wbf_iou_threshold, nms thresholds, cascade settings
-        SAM: sam_version, points_per_side, stability thresholds
-        Visualization: label_mode, display_* flags, fonts, colors
-        Output: save_image_only, skip_graph/prompt/visualization
-        Cache: enable_detection_cache, max_cache_size
-    
-    Example:
-        >>> args = _parse_args()  # --detectors yolov8 --yolo_threshold 0.9
-        >>> cfg = _build_config(args)
-        >>> cfg.detectors_to_use
-        ('yolov8',)
-        >>> cfg.threshold_yolo
-        0.9
-    
-    Notes:
-        - Starts from default_config() then applies overrides
-        - --no_instances disables both boxes and masks
-        - Detector list parsed as comma-separated string → tuple
-        - Boolean flags converted explicitly for clarity
-        - Optional flags applied via _apply_optional_flags()
-    
-    See Also:
-        - gom.config.PreprocessorConfig: Full config schema
-        - _parse_args(): CLI argument definitions
-    """
     cfg = default_config()
 
-    # I/O & dataset
+    # I/O
     cfg.input_path = args.input_path
     cfg.json_file = args.json_file
     cfg.output_folder = args.output_folder
@@ -470,7 +193,7 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.image_column = args.image_column
     cfg.num_instances = args.num_instances
 
-    # NLP / question
+    # Question filtering
     cfg.question = args.question
     cfg.apply_question_filter = not args.disable_question_filter
     cfg.aggressive_pruning = bool(args.aggressive_pruning)
@@ -482,7 +205,7 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.context_expansion_radius = float(args.context_expansion_radius)
     cfg.context_min_iou = float(args.context_min_iou)
 
-    # Detector e soglie
+    # Detectors
     cfg.detectors_to_use = tuple(d.strip() for d in args.detectors.split(",") if d.strip())
     cfg.threshold_owl = float(args.owl_threshold)
     cfg.threshold_yolo = float(args.yolo_threshold)
@@ -490,14 +213,14 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.threshold_grounding_dino = float(args.grounding_dino_threshold)
     cfg.grounding_dino_text_threshold = float(args.grounding_dino_text_threshold)
 
-    # Vincoli relazioni
+    # Relations
     cfg.max_relations_per_object = int(args.max_relations_per_object)
     cfg.min_relations_per_object = int(args.min_relations_per_object)
     cfg.margin = int(args.margin)
     cfg.min_distance = float(args.min_distance)
     cfg.max_distance = float(args.max_distance)
 
-    # NMS / segmentazione
+    # NMS / fusion
     cfg.label_nms_threshold = float(args.label_nms_threshold)
     cfg.seg_iou_threshold = float(args.seg_iou_threshold)
     cfg.wbf_iou_threshold = float(args.wbf_iou_threshold)
@@ -510,7 +233,7 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.non_competing_iou_threshold = float(args.non_competing_iou_threshold)
     cfg.non_competing_min_score = float(args.non_competing_min_score)
 
-    # Backend SAM
+    # SAM
     cfg.sam_version = args.sam_version
     cfg.sam_hq_model_type = args.sam_hq_model_type
     cfg.points_per_side = int(args.points_per_side)
@@ -519,13 +242,12 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.min_mask_region_area = int(args.min_mask_region_area)
     cfg.preproc_device = args.preproc_device
 
-    # Visualizzazione
+    # Visualization
     cfg.label_mode = args.label_mode
     cfg.display_labels = bool(args.display_labels)
     cfg.display_relationships = bool(args.display_relationships)
     cfg.display_relation_labels = bool(args.display_relation_labels)
 
-    # Toggle globale per nascondere sia maschere che box
     if args.no_instances:
         cfg.show_segmentation = False
         cfg.show_bboxes = False
@@ -533,7 +255,6 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
         cfg.show_segmentation = bool(args.show_segmentation) and not args.no_masks
         cfg.show_bboxes = not args.no_bboxes
 
-    # Stile/typography
     cfg.fill_segmentation = bool(args.fill_segmentation)
     cfg.display_legend = not args.no_legend
     cfg.seg_fill_alpha = float(args.seg_fill_alpha)
@@ -547,11 +268,11 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.resolve_overlaps = bool(args.resolve_overlaps)
     cfg.show_confidence = bool(args.show_confidence)
 
-    # Colori
+    # Colors
     cfg.color_sat_boost = float(args.color_sat_boost)
     cfg.color_val_boost = float(args.color_val_boost)
 
-    # Post-process maschere
+    # Mask post-processing
     cfg.close_holes = bool(args.close_holes)
     cfg.hole_kernel = int(args.hole_kernel)
     cfg.min_hole_area = int(args.min_hole_area)
@@ -569,36 +290,11 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.enable_detection_cache = bool(args.enable_detection_cache)
     cfg.max_cache_size = int(args.max_cache_size)
 
-    # Flag opzionali (solo se supportati dalla config)
     _apply_optional_flags(cfg, args)
-
     return cfg
 
 
 def _setup_logging(verbosity: int) -> None:
-    """
-    Configure logging level based on verbosity flag.
-    
-    Maps CLI verbosity count to Python logging levels:
-    0 → WARNING, 1 → INFO, 2+ → DEBUG.
-    
-    Args:
-        verbosity: Count from --verbose flags (0, 1, 2+)
-    
-    Levels:
-        0 (default): WARNING - Only errors/warnings
-        1 (-v): INFO - Progress and high-level operations
-        2+ (-vv): DEBUG - Detailed internal operations
-    
-    Example:
-        >>> _setup_logging(0)  # WARNING level
-        >>> _setup_logging(2)  # DEBUG level
-    
-    Notes:
-        - Format: "HH:MM:SS | LEVEL | message"
-        - Applies globally to root logger
-        - Call before any logging operations
-    """
     level = logging.WARNING
     if verbosity == 1:
         level = logging.INFO
@@ -611,173 +307,61 @@ def _setup_logging(verbosity: int) -> None:
     )
 
 
-def _print_version_and_exit() -> int:
-    """
-    Print version information and return exit code.
-    
-    Returns:
-        Exit code 0 (success)
-    
-    Example:
-        >>> _print_version_and_exit()
-        Image Graph Preprocessor - CLI
-        0
-    
-    Notes:
-        - Minimal implementation (no __version__ dependency)
-        - Extend to include version number from package metadata
-    """
-    print("Image Graph Preprocessor - CLI")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
-    """
-    Main entry point for Image Graph Preprocessor CLI.
-    
-    Orchestrates the full pipeline workflow:
-    1. Parse command-line arguments
-    2. Setup logging
-    3. Load/merge configurations (file + CLI)
-    4. Validate inputs
-    5. Initialize and run preprocessor
-    
-    Args:
-        argv: Command-line arguments (defaults to sys.argv[1:])
-    
-    Returns:
-        Exit code:
-            0: Success
-            1: Pipeline error
-            2: Configuration/validation error
-            130: Interrupted by user (Ctrl+C)
-    
-    Workflow:
-        1. Parse CLI args → Namespace
-        2. Load base config → default_config()
-        3. Apply file overrides → _merge_cfg_from_dict()
-        4. Apply CLI overrides → _build_config()
-        5. Save config (optional) → _dump_config_file()
-        6. Dry-run check → print config and exit
-        7. Validate inputs → input_path/json_file/dataset
-        8. Clear caches (optional) → preproc.clear_caches()
-        9. Run pipeline → Preprocessor.run()
-    
-    Example:
-        >>> # Single image with custom config
-        >>> sys.exit(main(["--input_path", "img.jpg", "--config", "cfg.json"]))
-        
-        >>> # Batch processing with question filter
-        >>> sys.exit(main([
-        ...     "--json_file", "batch.json",
-        ...     "--question", "What color is the car?",
-        ...     "--aggressive_pruning"
-        ... ]))
-        
-        >>> # Dry-run to inspect config
-        >>> sys.exit(main(["--input_path", "img.jpg", "--dry_run"]))
-    
-    Error Handling:
-        - Config file errors → log error, exit 2
-        - Missing inputs → log error, exit 2
-        - Pipeline exceptions → log traceback, exit 1
-        - KeyboardInterrupt → warning message, exit 130
-    
-    CLI Flags:
-        --version: Print version and exit (code 0)
-        --dry_run: Print effective config as JSON, exit 0
-        --config FILE: Load config overrides from JSON/YAML
-        --save_config FILE: Save effective config to file
-        --clear_cache: Clear detection/CLIP caches
-        --verbose, -v, -vv: Increase logging verbosity
-    
-    Notes:
-        - CLI args override file config
-        - File config overrides defaults
-        - Priority: CLI > file > defaults
-        - Cache clearing doesn't require input if no processing
-        - Interrupted runs exit cleanly with code 130
-    
-    See Also:
-        - _parse_args(): CLI argument definitions
-        - _build_config(): Config construction logic
-        - gom.pipeline.preprocessor.ImageGraphPreprocessor: Main pipeline
-    """
     args = _parse_args()
     _setup_logging(int(args.verbose or 0))
 
     if args.version:
-        return _print_version_and_exit()
+        print("Image Graph Preprocessor")
+        return 0
 
-    # Costruisce config di base
     cfg = default_config()
 
-    # Carica override da file config (se fornito)
     if args.config:
         try:
             overrides = _load_config_file(args.config)
             _merge_cfg_from_dict(cfg, overrides)
         except Exception as e:
-            logging.error(f"Errore nel caricamento della config da file: {e}")
+            logging.error(f"Failed to load config: {e}")
             return 2
 
-    # Applica i flag CLI (hanno precedenza sul file)
     cfg = _build_config(args)
 
-    # Salvataggio config effettiva (opzionale)
     if args.save_config:
         try:
             _dump_config_file(cfg, args.save_config)
-            logging.info(f"Config salvata in: {args.save_config}")
+            logging.info(f"Config saved to: {args.save_config}")
         except Exception as e:
-            logging.error(f"Impossibile salvare la config: {e}")
+            logging.error(f"Failed to save config: {e}")
             return 2
 
-    # Se dry-run, stampa la config e termina
     if args.dry_run:
         data = asdict(cfg) if is_dataclass(cfg) else dict(vars(cfg))
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
 
-    # Validazione input minima
     if not (args.input_path or args.json_file or args.dataset):
-        logging.error("Specificare almeno uno tra --input_path, --json_file o --dataset.")
+        logging.error("Specify at least one of --input_path, --json_file, or --dataset")
         return 2
 
-    # Manutenzione cache opzionale
     if args.clear_cache:
         pre = Preprocessor(cfg)
-        try:
-            pre.clear_caches()
-            print("[INFO] Cache cleared.")
-        finally:
-            if not (args.input_path or args.json_file or args.dataset):
-                print("[INFO] No processing requested. Exiting.")
-                return 0
+        pre.clear_caches()
+        if not (args.input_path or args.json_file or args.dataset):
+            return 0
 
-    # Esecuzione pipeline
     try:
         preproc = Preprocessor(cfg)
         preproc.run()
     except KeyboardInterrupt:
-        logging.warning("Interrotto dall'utente.")
+        logging.warning("Interrupted")
         return 130
     except Exception as e:
-        logging.exception(f"Errore durante l'esecuzione della pipeline: {e}")
+        logging.exception(f"Pipeline error: {e}")
         return 1
 
     return 0
 
 
 if __name__ == "__main__":
-    """
-    CLI execution guard.
-    
-    Standard Python idiom for script entry points. Calls main() with
-    command-line arguments and exits with returned code.
-    
-    Example:
-        $ python image_preprocessor.py --input_path img.jpg --detectors yolov8
-        $ echo $?  # prints exit code (0 = success)
-    """
     raise SystemExit(main(sys.argv[1:]))

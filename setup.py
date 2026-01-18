@@ -12,8 +12,8 @@ long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 
 # Core dependencies that should always be installed
 core_deps = [
-    "torch>=2.6.0",
-    "torchvision>=0.21.0",
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
     "pillow>=9.5.0",  # Support Python 3.9+, was >=10.2.0
     "numpy>=1.24.0,<=2.2.0",  # Notebook uses 2.1.1
     "opencv-python>=4.11.0",
@@ -31,7 +31,7 @@ core_deps = [
     "scipy>=1.11.4",
     "pyyaml",
     "fvcore>=0.1.5",
-    "iopath>=0.1.10",
+    "iopath>=0.1.7",
     "hydra-core>=1.3.2",
     "einops",
     "timm==0.9.12",
@@ -52,13 +52,12 @@ extras_require = {
     ],
     "detection": [
         "ultralytics==8.3.99",
+        # detectron2 requires separate install: pip install git+https://github.com/facebookresearch/detectron2.git
     ],
     "vqa": [
         "accelerate==1.4.0",
-        "vllm>=0.8.0",  # Notebook has 0.8.2 in requirements.txt
-        "qwen-vl-utils>=0.0.10",
         "peft>=0.9.0",
-        "ollama>=0.1.0",
+        # vllm and ollama removed - users should install their preferred VLM library
     ],
     "dev": [
         "pytest>=7.0.0",
@@ -78,6 +77,15 @@ extras_require = {
 
 # All optional dependencies combined
 extras_require["all"] = list(set(sum(extras_require.values(), [])))
+
+# All optional dependencies combined (MPS/CPU friendly - no vllm)
+all_mps = []
+for k, v in extras_require.items():
+    if k == "all": continue
+    for dep in v:
+        if not dep.startswith("vllm"):
+            all_mps.append(dep)
+extras_require["all-mps"] = list(set(all_mps))
 
 setup(
     name="graph-of-marks",
@@ -100,7 +108,6 @@ setup(
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Image Recognition",
-        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",

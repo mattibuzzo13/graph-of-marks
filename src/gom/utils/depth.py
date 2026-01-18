@@ -365,3 +365,38 @@ class DepthEstimator:
         if vals.size == 0:
             return None
         return float(np.median(vals))
+
+
+def save_depth_map(
+    depth_estimator: DepthEstimator,
+    image: Image.Image,
+    save_path: str,
+) -> None:
+    """
+    Compute and save a full-image depth map in grayscale [0..255].
+
+    Uses DepthEstimator.infer_map(image) which returns a normalized depth map
+    in [0,1] where higher = closer to the camera.
+    
+    Args:
+        depth_estimator: Initialized DepthEstimator instance
+        image: Input PIL Image
+        save_path: Path to save the output image
+    """
+    from pathlib import Path
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    if not hasattr(depth_estimator, "infer_map"):
+        raise RuntimeError("Depth estimator does not expose 'infer_map(image)'.")
+
+    depth = depth_estimator.infer_map(image)  # H x W float array in [0,1] (or None)
+    if depth is None:
+        # Fallback: uniform mid-depth
+        depth = np.full((image.height, image.width), 0.5, dtype=np.float32)
+    else:
+        depth = np.array(depth, dtype=np.float32)
+
+    # Map [0,1] → [0,255] uint8
+    depth_img = (np.clip(depth, 0.0, 1.0) * 255.0).astype(np.uint8)
+    depth_pil = Image.fromarray(depth_img, mode="L")
+    depth_pil.save(save_path)

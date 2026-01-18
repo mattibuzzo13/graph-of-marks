@@ -45,7 +45,10 @@ class SamHQSegmenter(Segmenter):
         self.model_type = model_type
 
         try:
-            from segment_anything_hq import sam_model_registry, SamPredictor  # type: ignore
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="Overwriting tiny_vit")
+                from segment_anything_hq import sam_model_registry, SamPredictor  # type: ignore
         except Exception as e:
             raise ImportError(
                 "segment_anything_hq non è installato. Installa da:\n"
@@ -54,7 +57,20 @@ class SamHQSegmenter(Segmenter):
 
         ckpt_path = self._resolve_checkpoint(checkpoint, model_type, auto_download)
         self._SamPredictor = SamPredictor
-        self._sam_model = sam_model_registry[model_type](checkpoint=str(ckpt_path)).to(self.device).eval()
+        
+        # Monkeypatch torch.load to handle CUDA checkpoints on CPU/MPS
+        original_load = torch.load
+        def safe_load(*args, **kwargs):
+            if not torch.cuda.is_available() and "map_location" not in kwargs:
+                kwargs["map_location"] = "cpu"
+            return original_load(*args, **kwargs)
+            
+        try:
+            torch.load = safe_load
+            self._sam_model = sam_model_registry[model_type](checkpoint=str(ckpt_path)).to(self.device).eval()
+        finally:
+            torch.load = original_load
+            
         self._predictor = SamPredictor(self._sam_model)
 
         # autocast preferito su CUDA

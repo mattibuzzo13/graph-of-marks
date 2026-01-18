@@ -42,3 +42,13 @@ PYPI_PUBLISHING_GUIDE.md
 FINAL_SUMMARY.md
 GOM_FEATURES_SUMMARY.md
 INSTALLATION.md
+
+
+build/lib/
+verification_output/
+gom_intermediate_outputs/
+dist/
+demo_output/
+external_libs/
+tests/
+scripts_test/
