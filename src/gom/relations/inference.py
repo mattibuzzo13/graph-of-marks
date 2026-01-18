@@ -1242,6 +1242,7 @@ class RelationInferencer:
         semantic_relations = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
         spatial_specific = {"touching", "adjacent", "near", "close"}
         spatial_directional = {"left_of", "right_of", "above", "below"}
+        spatial_depth = {"in_front_of", "behind"}
         
         def _is_question_rel(rel: dict) -> bool:
             return self._relation_matches_question(rel, question_rel_terms=question_rel_terms)
@@ -1282,6 +1283,21 @@ class RelationInferencer:
                     best_specificity = specificity
                     continue
                 if abs(confidence - best_confidence) <= conf_eps:
+                    rel_name = str(rel.get("relation", "")).lower()
+                    best_name = str(best_rel.get("relation", "")).lower()
+                    rel_is_depth = rel_name in spatial_depth
+                    best_is_depth = best_name in spatial_depth
+                    rel_is_directional = rel_name in spatial_directional
+                    best_is_directional = best_name in spatial_directional
+                    # Prefer depth relations over directional ones when confidence is tied.
+                    if rel_is_depth and best_is_directional:
+                        best_rel = rel
+                        best_priority = priority
+                        best_confidence = confidence
+                        best_specificity = specificity
+                        continue
+                    if best_is_depth and rel_is_directional:
+                        continue
                     if specificity > best_specificity or (
                         specificity == best_specificity and confidence > best_confidence
                     ):

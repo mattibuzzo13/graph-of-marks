@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.transforms import Bbox
 from PIL import Image
 
 # Optional dependencies for advanced features
@@ -607,6 +608,7 @@ class Visualizer:
 
         # Sort objects by depth for proper rendering order (back to front)
         ordered = []
+
         for i, box in enumerate(boxes):
             depth_idx = self._extract_depth_index(labels[i], i)
             ordered.append((i, box, depth_idx))
@@ -832,6 +834,24 @@ class Visualizer:
                 readable = self._humanize_relation(relation_name)
                 # Compute initial position at arc midpoint
                 pos = self._get_optimal_relation_label_position(ax, arrow, readable)
+                # Offset labels along the arrow normal to reduce collisions.
+                count = arrow_counts[(src, tgt)] - 1
+                if cfg.relation_label_offset_px and count > 0:
+                    try:
+                        to_px = ax.transData.transform
+                        to_data = ax.transData.inverted().transform
+                        p0_px = np.array(to_px(p0))
+                        p1_px = np.array(to_px(p1))
+                        v_px = p1_px - p0_px
+                        v_norm = np.hypot(v_px[0], v_px[1])
+                        if v_norm > 1e-6:
+                            n_px = np.array([-v_px[1], v_px[0]]) / v_norm
+                            sign = 1.0 if (count % 2 == 1) else -1.0
+                            mag = float(cfg.relation_label_offset_px) * (1 + (count // 2))
+                            pos_px = np.array(to_px(pos)) + n_px * mag * sign
+                            pos = tuple(to_data(pos_px))
+                    except Exception:
+                        pass
                 t = ax.text(
                     pos[0],
                     pos[1],
@@ -850,6 +870,15 @@ class Visualizer:
                     ),
                     zorder=5,
                 )
+                try:
+                    arrow_len_px = self._get_arrow_length_px(ax, arrow)
+                    max_dist = min(
+                        float(cfg.relation_label_max_dist_px),
+                        max(12.0, arrow_len_px * 0.4),
+                    )
+                    t._gom_max_dist_px = max_dist
+                except Exception:
+                    pass
                 rel_texts.append(t)
                 rel_label_anchors.append(pos)
                 rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
@@ -869,6 +898,66 @@ class Visualizer:
                 fixed_texts=object_texts,
                 avoid_objects=avoid_objects,
             )
+            # Second pass: adjustText + clamp to keep labels near arrows.
+            self._resolve_overlaps(
+                ax,
+                movable_texts=rel_texts,
+                movable_anchors=rel_label_anchors,
+                fixed_texts=object_texts,
+                arrows=arrow_patches,
+            )
+            if cfg.relation_label_max_dist_px and cfg.relation_label_max_dist_px > 0:
+                to_px = ax.transData.transform
+                to_data = ax.transData.inverted().transform
+                default_max = float(cfg.relation_label_max_dist_px)
+                for i, t in enumerate(rel_texts):
+                    if i >= len(rel_label_anchors):
+                        continue
+                    max_dist = float(getattr(t, "_gom_max_dist_px", default_max))
+                    anchor_px = np.array(to_px(rel_label_anchors[i]))
+                    pos_px = np.array(to_px(t.get_position()))
+                    delta = pos_px - anchor_px
+                    dist = np.linalg.norm(delta)
+                    if dist > max_dist and dist > 1e-6:
+                        pos_px = anchor_px + (delta / dist) * max_dist
+                        t.set_position(tuple(to_data(pos_px)))
+            # If relation labels still overlap object labels, nudge outside labels away.
+            movable_obj_texts = [t for t in object_texts if not getattr(t, "_gom_inside_label", False)]
+            fixed_obj_texts = [t for t in object_texts if getattr(t, "_gom_inside_label", False)]
+            if movable_obj_texts:
+                anchors = [t.get_position() for t in movable_obj_texts]
+                self._resolve_overlaps(
+                    ax,
+                    movable_texts=movable_obj_texts,
+                    movable_anchors=anchors,
+                    fixed_texts=list(rel_texts) + fixed_obj_texts,
+                    arrows=arrow_patches,
+                )
+                if cfg.obj_label_max_dist_px and cfg.obj_label_max_dist_px > 0:
+                    to_px = ax.transData.transform
+                    to_data = ax.transData.inverted().transform
+                    max_dist = float(cfg.obj_label_max_dist_px)
+                    for i, t in enumerate(movable_obj_texts):
+                        if i >= len(anchors):
+                            continue
+                        anchor_px = np.array(to_px(anchors[i]))
+                        pos_px = np.array(to_px(t.get_position()))
+                        delta = pos_px - anchor_px
+                        dist = np.linalg.norm(delta)
+                        if dist > max_dist and dist > 1e-6:
+                            pos_px = anchor_px + (delta / dist) * max_dist
+                            t.set_position(tuple(to_data(pos_px)))
+                # Re-run relation resolution after object labels moved.
+                self._resolve_relation_vs_relation_overlaps(
+                    ax,
+                    rel_texts,
+                    arrow_patches,
+                    cfg.relation_label_max_dist_px,
+                    anchors=rel_label_anchors,
+                    arrow_dirs=rel_label_dirs,
+                    fixed_texts=object_texts,
+                    avoid_objects=avoid_objects,
+                )
 
     # ===========================================================
     # OBJECT LABEL PLACEMENT
@@ -928,9 +1017,66 @@ class Visualizer:
 
         # Optionally collect outside labels for batch rendering
         batch_renderer = None
-        batch_out_specs = []  # list of (border_x, border_y)
+        batch_out_specs = []  # list of (border_x, border_y, max_dist_px)
         if cfg.use_batch_text_renderer and RENDERING_OPT_AVAILABLE:
             batch_renderer = BatchTextRenderer()
+
+        fig = ax.figure
+        renderer = None
+        if cfg.resolve_overlaps:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+
+        placed_bbs: List[Any] = []
+        avoid_bbs: List[Any] = []
+        if renderer is not None and avoid_patches:
+            avoid_bbs = [o.get_window_extent(renderer=renderer).expanded(1.02, 1.06) for o in avoid_patches]
+
+        def _bbox_for_label(
+            center_xy: Tuple[float, float],
+            w_txt: float,
+            h_txt: float,
+            *,
+            ha: str,
+            va: str,
+            padding: float,
+        ):
+            to_px = ax.transData.transform
+            cx, cy = to_px(center_xy)
+            w = w_txt + 2 * padding
+            h = h_txt + 2 * padding
+            if ha == "center":
+                x0 = cx - w / 2.0
+                x1 = cx + w / 2.0
+            elif ha == "left":
+                x0 = cx
+                x1 = cx + w
+            else:  # right
+                x0 = cx - w
+                x1 = cx
+            if va == "center":
+                y0 = cy - h / 2.0
+                y1 = cy + h / 2.0
+            elif va == "bottom":
+                y0 = cy
+                y1 = cy + h
+            else:  # top
+                y0 = cy - h
+                y1 = cy
+            return Bbox.from_extents(x0, y0, x1, y1)
+
+        def _overlap_cost(bb) -> Tuple[int, float]:
+            hits = 0
+            area = 0.0
+            for obb in avoid_bbs + placed_bbs:
+                if bb.overlaps(obb):
+                    hits += 1
+                    ix0 = max(bb.x0, obb.x0)
+                    iy0 = max(bb.y0, obb.y0)
+                    ix1 = min(bb.x1, obb.x1)
+                    iy1 = min(bb.y1, obb.y1)
+                    area += max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+            return hits, area
 
         for i, box in enumerate(boxes):
             color = colors[i]
@@ -974,6 +1120,7 @@ class Visualizer:
                     ),
                     zorder=7,
                 )
+                t._gom_inside_label = True
                 placed_texts.append(t)
                 inside_texts.append(t)
                 continue
@@ -988,21 +1135,49 @@ class Visualizer:
             label_padding = 8
             label_h = h_txt + 2 * label_padding
             gap_px = max(3, int(label_h * 0.15))
-            place_above = (y1 - (label_h + gap_px)) >= 0
-            if place_above:
-                border_y = y1
+            can_above = (y1 - (label_h + gap_px)) >= 0
+            can_below = (y2 + (label_h + gap_px)) <= H
+            cand = []
+            if can_above:
                 dx_data, dy_data = self._pixels_to_data(ax, 0, -gap_px)
-                border_pos = (border_x + dx_data, border_y + dy_data)
-                va = "bottom"
-            else:
-                border_y = y2
+                pos = (border_x + dx_data, y1 + dy_data)
+                bb = _bbox_for_label(pos, w_txt, h_txt, ha="center", va="bottom", padding=8)
+                cand.append((pos, "bottom", bb, "above"))
+            if can_below:
                 dx_data, dy_data = self._pixels_to_data(ax, 0, gap_px)
-                border_pos = (border_x + dx_data, border_y + dy_data)
-                va = "top"
+                pos = (border_x + dx_data, y2 + dy_data)
+                bb = _bbox_for_label(pos, w_txt, h_txt, ha="center", va="top", padding=8)
+                cand.append((pos, "top", bb, "below"))
+
+            if cand:
+                scored = []
+                for pos, va, bb, side in cand:
+                    hits, area = _overlap_cost(bb)
+                    scored.append((hits, area, 0 if side == "below" else 1, pos, va, bb))
+                scored.sort(key=lambda x: (x[0], x[1], x[2]))
+                _, _, _, border_pos, va, bb = scored[0]
+            else:
+                # Fallback to original logic if no space available
+                if can_above:
+                    dx_data, dy_data = self._pixels_to_data(ax, 0, -gap_px)
+                    border_pos = (border_x + dx_data, y1 + dy_data)
+                    va = "bottom"
+                    bb = _bbox_for_label(border_pos, w_txt, h_txt, ha="center", va=va, padding=8)
+                else:
+                    dx_data, dy_data = self._pixels_to_data(ax, 0, gap_px)
+                    border_pos = (border_x + dx_data, y2 + dy_data)
+                    va = "top"
+                    bb = _bbox_for_label(border_pos, w_txt, h_txt, ha="center", va=va, padding=8)
 
             font_col = text_color_for_bg(color)
             if batch_renderer is not None:
                 # Defer rendering; store spec for connector annotation later
+                try:
+                    base_max = float(cfg.obj_label_max_dist_px)
+                    small_scale = min(1.0, max(0.25, min(w, h) / 120.0))
+                    max_dist_px = base_max * small_scale
+                except Exception:
+                    max_dist_px = None
                 batch_renderer.add_text(
                     border_pos[0],
                     border_pos[1],
@@ -1015,7 +1190,7 @@ class Visualizer:
                     va=va,
                     zorder=7,
                 )
-                batch_out_specs.append((border_x, border_y))
+                batch_out_specs.append((border_x, border_pos[1], max_dist_px))
             else:
                 t = ax.text(
                     border_pos[0],
@@ -1035,9 +1210,18 @@ class Visualizer:
                     ),
                     zorder=7,
                 )
+                t._gom_inside_label = False
+                try:
+                    base_max = float(cfg.obj_label_max_dist_px)
+                    small_scale = min(1.0, max(0.25, min(w, h) / 120.0))
+                    t._gom_max_dist_px = base_max * small_scale
+                except Exception:
+                    pass
                 placed_texts.append(t)
                 outside_texts.append(t)
                 outside_anchors.append((border_x, border_y))
+                if bb is not None:
+                    placed_bbs.append(bb)
 
                 # connector dall’anchor (bordo) alla label
                 ax.annotate(
@@ -1061,10 +1245,15 @@ class Visualizer:
         if batch_renderer is not None:
             created = batch_renderer.render_all(ax)
             # Created texts align with batch_out_specs order
-            for t, (bx, by) in zip(created, batch_out_specs):
+            for t, (bx, by, max_dist_px) in zip(created, batch_out_specs):
+                t._gom_inside_label = False
+                if max_dist_px is not None:
+                    t._gom_max_dist_px = max_dist_px
                 placed_texts.append(t)
                 outside_texts.append(t)
                 outside_anchors.append((bx, by))
+                if renderer is not None:
+                    placed_bbs.append(t.get_window_extent(renderer=renderer).expanded(1.02, 1.06))
                 # Draw connector line from anchor to label
                 ax.annotate("", xy=(bx, by), xytext=t.get_position(), arrowprops=dict(arrowstyle="-", color="gray", alpha=0.45, shrinkA=4, shrinkB=4, linewidth=1, linestyle="-"), zorder=6)
 
@@ -1678,10 +1867,11 @@ class Visualizer:
         if self.cfg.obj_label_max_dist_px and self.cfg.obj_label_max_dist_px > 0:
             to_px = ax.transData.transform
             to_data = ax.transData.inverted().transform
-            max_dist = float(self.cfg.obj_label_max_dist_px)
+            default_max = float(self.cfg.obj_label_max_dist_px)
             for i, t in enumerate(obj_texts):
                 if i >= len(obj_anchors):
                     continue
+                max_dist = float(getattr(t, "_gom_max_dist_px", default_max))
                 anchor_px = np.array(to_px(obj_anchors[i]))
                 pos_px = np.array(to_px(t.get_position()))
                 delta = pos_px - anchor_px
@@ -1689,6 +1879,71 @@ class Visualizer:
                 if dist > max_dist and dist > 1e-6:
                     pos_px = anchor_px + (delta / dist) * max_dist
                     t.set_position(tuple(to_data(pos_px)))
+
+        # Final greedy pass to reduce any remaining overlaps for object labels.
+        try:
+            fig = ax.figure
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            to_px = ax.transData.transform
+            to_data = ax.transData.inverted().transform
+            default_max = float(self.cfg.obj_label_max_dist_px) if self.cfg.obj_label_max_dist_px > 0 else 60.0
+
+            fixed_bbs = [t.get_window_extent(renderer=renderer).expanded(1.03, 1.08) for t in fixed_texts]
+            if avoid_objects:
+                fixed_bbs.extend(
+                    [o.get_window_extent(renderer=renderer).expanded(1.02, 1.06) for o in avoid_objects]
+                )
+
+            def _bb_area(bb):
+                return float(bb.width * bb.height)
+
+            bbs = [t.get_window_extent(renderer=renderer) for t in obj_texts]
+            order = sorted(range(len(obj_texts)), key=lambda i: -_bb_area(bbs[i]))
+            placed_bbs = []
+            directions = [
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (-1.0, 0.0),
+                (0.0, 1.0),
+                (0.0, -1.0),
+                (1.0, 1.0),
+                (1.0, -1.0),
+                (-1.0, 1.0),
+                (-1.0, -1.0),
+            ]
+
+            for i in order:
+                if i >= len(obj_texts):
+                    continue
+                max_dist = float(getattr(obj_texts[i], "_gom_max_dist_px", default_max))
+                anchor = obj_anchors[i] if i < len(obj_anchors) else obj_texts[i].get_position()
+                anchor_px = np.array(to_px(anchor))
+                bb0 = bbs[i]
+                step = max(6.0, min(bb0.width, bb0.height) * 0.6)
+                max_steps = int(max_dist / step) + 1
+                chosen_bb = None
+                for k in range(max_steps + 1):
+                    for dx, dy in directions:
+                        if k == 0 and (dx != 0.0 or dy != 0.0):
+                            continue
+                        pos_px = anchor_px + np.array([dx, dy]) * step * k
+                        pos = tuple(to_data(pos_px))
+                        obj_texts[i].set_position(pos)
+                        bb = obj_texts[i].get_window_extent(renderer=renderer).expanded(1.03, 1.08)
+                        if any(bb.overlaps(b) for b in fixed_bbs):
+                            continue
+                        if any(bb.overlaps(b) for b in placed_bbs):
+                            continue
+                        chosen_bb = bb
+                        break
+                    if chosen_bb is not None:
+                        break
+                if chosen_bb is None:
+                    chosen_bb = obj_texts[i].get_window_extent(renderer=renderer).expanded(1.03, 1.08)
+                placed_bbs.append(chosen_bb)
+        except Exception:
+            pass
 
     def _resolve_relation_vs_relation_overlaps(
         self,
@@ -1769,6 +2024,12 @@ class Visualizer:
 
         rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
 
+        def _rel_max_dist(idx: int) -> float:
+            t = rel_texts[idx] if idx < len(rel_texts) else None
+            if t is None:
+                return float(max_dist_px)
+            return float(getattr(t, "_gom_max_dist_px", max_dist_px))
+
         def _greedy_place():
             placed_bbs = []
             fixed_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in fixed_texts]
@@ -1786,7 +2047,7 @@ class Visualizer:
                 n = normals_px[i]
                 # Step based on text height for stable spacing
                 h = max(6.0, rel_bbs[i].height * 0.75)
-                max_steps = int(max_dist_px / h) + 1
+                max_steps = int(_rel_max_dist(i) / h) + 1
                 offsets = [0.0]
                 for k in range(1, max_steps + 1):
                     offsets.append(k * h)
@@ -1821,11 +2082,11 @@ class Visualizer:
             p = np.array(to_px(pos_data))
             delta = p - anchor_px[idx]
             dist = np.linalg.norm(delta)
-            if dist <= max_dist_px:
+            if dist <= _rel_max_dist(idx):
                 return pos_data
             if dist < 1e-6:
                 return pos_data
-            p_clamped = anchor_px[idx] + delta / dist * max_dist_px
+            p_clamped = anchor_px[idx] + delta / dist * _rel_max_dist(idx)
             return tuple(to_data(p_clamped))
 
         for _ in range(max_iter):
@@ -1890,6 +2151,70 @@ class Visualizer:
             if not moved:
                 break
             fig.canvas.draw_idle()
+
+        # Final greedy pass: try to re-seat remaining overlaps with wider search.
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            rel_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in rel_texts]
+            fixed_bbs = [t.get_window_extent(renderer=renderer).expanded(1.05, 1.1) for t in fixed_texts]
+            if avoid_objects:
+                fixed_bbs.extend(
+                    [o.get_window_extent(renderer=renderer).expanded(1.02, 1.06) for o in avoid_objects]
+                )
+            arrow_bbs = self._arrow_bboxes_px(arrows, renderer)
+
+            def _bb_area(bb):
+                return float(bb.width * bb.height)
+
+            order = sorted(range(len(rel_texts)), key=lambda i: -_bb_area(rel_bbs[i]))
+            placed_bbs = []
+            for i in order:
+                a_px = anchor_px[i]
+                n = normals_px[i]
+                v = np.array(arrow_dirs[i], dtype=float)
+                v_norm = np.hypot(v[0], v[1])
+                if v_norm < 1e-6:
+                    tdir = np.array([1.0, 0.0])
+                else:
+                    tdir = v / v_norm
+                directions = [
+                    n,
+                    -n,
+                    tdir,
+                    -tdir,
+                    n + tdir,
+                    n - tdir,
+                    -n + tdir,
+                    -n - tdir,
+                ]
+                h = max(6.0, rel_bbs[i].height * 0.75)
+                max_steps = int(_rel_max_dist(i) / h) + 1
+                chosen_bb = None
+                for k in range(max_steps + 1):
+                    for d in directions:
+                        if k == 0 and np.linalg.norm(d) > 1e-6:
+                            continue
+                        dn = d / (np.linalg.norm(d) + 1e-6)
+                        p = a_px + dn * (k * h)
+                        pos = tuple(to_data(p))
+                        rel_texts[i].set_position(pos)
+                        bb = rel_texts[i].get_window_extent(renderer=renderer).expanded(1.05, 1.1)
+                        if any(bb.overlaps(b) for b in fixed_bbs):
+                            continue
+                        if any(bb.overlaps(b) for b in arrow_bbs):
+                            continue
+                        if any(bb.overlaps(b) for b in placed_bbs):
+                            continue
+                        chosen_bb = bb
+                        break
+                    if chosen_bb is not None:
+                        break
+                if chosen_bb is None:
+                    chosen_bb = rel_texts[i].get_window_extent(renderer=renderer).expanded(1.05, 1.1)
+                placed_bbs.append(chosen_bb)
+        except Exception:
+            pass
 
 
     def _resolve_overlaps(
