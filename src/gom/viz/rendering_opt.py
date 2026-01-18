@@ -199,6 +199,7 @@ class BatchTextRenderer:
         fontsize: int,
         color: str,
         bbox_params: Optional[dict] = None,
+        fontfamily: Optional[str] = None,
         ha: str = "center",
         va: str = "center",
         zorder: int = 5
@@ -242,6 +243,7 @@ class BatchTextRenderer:
             "fontsize": fontsize,
             "color": color,
             "bbox": bbox_params,
+            "fontfamily": fontfamily,
             "ha": ha,
             "va": va,
             "zorder": zorder,
@@ -284,6 +286,7 @@ class BatchTextRenderer:
                 fontsize=item["fontsize"],
                 color=item["color"],
                 bbox=item["bbox"],
+                fontfamily=item.get("fontfamily") or None,
                 zorder=item["zorder"],
             )
             artists.append(t)

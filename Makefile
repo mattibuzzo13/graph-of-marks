@@ -24,6 +24,12 @@ OWL_THRESHOLD           ?= 0.5
 YOLO_THRESHOLD          ?= 0.5
 DETECTRON_THRESHOLD     ?= 0.5
 
+# Fusion and deduplication thresholds
+WBF_IOU_THRESHOLD              ?= 0.15
+LABEL_NMS_THRESHOLD            ?= 0.15
+SAME_CLASS_IOU_THRESHOLD       ?= 0.15
+CROSS_CLASS_SCORE_DIFF_THRESH  ?= 0.80
+
 # SAM parameters
 SAM_VERSION             ?= hq
 
@@ -149,6 +155,10 @@ else
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
+		--wbf_iou_threshold $(WBF_IOU_THRESHOLD) \
+		--label_nms_threshold $(LABEL_NMS_THRESHOLD) \
+		--same_class_iou_threshold $(SAME_CLASS_IOU_THRESHOLD) \
+		--cross_class_score_diff_threshold $(CROSS_CLASS_SCORE_DIFF_THRESH) \
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
 		--max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \
@@ -236,6 +246,10 @@ run_vqa: check_vqa_input
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \
 	    --detectron_threshold $(DETECTRON_THRESHOLD) \
+		--wbf_iou_threshold $(WBF_IOU_THRESHOLD) \
+		--label_nms_threshold $(LABEL_NMS_THRESHOLD) \
+		--same_class_iou_threshold $(SAME_CLASS_IOU_THRESHOLD) \
+		--cross_class_score_diff_threshold $(CROSS_CLASS_SCORE_DIFF_THRESH) \
 	    --sam_version $(SAM_VERSION) \
 		--label_mode $(LABEL_MODE) \
 		--max_relations_per_object $(MAX_RELATIONS_PER_OBJECT) \

@@ -226,6 +226,8 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.wbf_iou_threshold = float(args.wbf_iou_threshold)
     cfg.skip_box_threshold = float(args.skip_box_threshold)
     cfg.cross_class_iou_threshold = float(args.cross_class_iou_threshold)
+    cfg.same_class_iou_threshold = float(args.same_class_iou_threshold)
+    cfg.cross_class_score_diff_threshold = float(args.cross_class_score_diff_threshold)
     cfg.cascade_conf_threshold = float(args.cascade_conf_threshold)
     cfg.detection_mask_merge_iou_thr = float(args.detection_mask_merge_iou_thr)
     cfg.clip_cache_max_age_days = float(args.clip_cache_max_age_days)

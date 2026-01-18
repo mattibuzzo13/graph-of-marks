@@ -158,6 +158,13 @@ except Exception as _exc:
         threshold_detectron: float = 0.50  # Detectron2 confidence threshold
         threshold_grounding_dino: float = 0.30  # GroundingDINO confidence threshold
         grounding_dino_text_threshold: float = 0.25  # GroundingDINO text similarity threshold
+        auto_detector_thresholds: bool = True
+        auto_threshold_min_default: float = 0.25
+        auto_threshold_min_owl: float = 0.25
+        auto_threshold_min_yolo: float = 0.25
+        auto_threshold_min_detectron: float = 0.25
+        auto_threshold_min_grounding_dino: float = 0.15
+        auto_threshold_max_per_detector: Optional[int] = None
 
         # Relationship inference constraints
         max_relations_per_object: int = 3  # Maximum relationships per object
@@ -167,10 +174,16 @@ except Exception as _exc:
         relations_per_src_clip_pairs: int = 50  # Per-source limit on CLIP-scored candidates
 
         # Non-Maximum Suppression and fusion parameters
-        label_nms_threshold: float = 0.60  # IoU threshold for per-label NMS
-        seg_iou_threshold: float = 0.70  # IoU threshold for segmentation mask merging
-        wbf_iou_threshold: float = 0.55  # IoU threshold for Weighted Boxes Fusion
+        label_nms_threshold: float = 0.25  # IoU threshold for per-label NMS
+        seg_iou_threshold: float = 0.50  # IoU threshold for segmentation mask merging
+        wbf_iou_threshold: float = 0.10  # IoU threshold for Weighted Boxes Fusion
         skip_box_threshold: float = 0.10  # Skip boxes below this confidence in fusion
+        
+        # Advanced deduplication parameters
+        cross_class_suppression: bool = True  # Remove overlaps between different classes
+        cross_class_iou_threshold: float = 0.65  # IoU threshold for cross-class suppression
+        same_class_iou_threshold: float = 0.30  # IoU threshold for same-class deduplication
+        cross_class_score_diff_threshold: float = 0.80  # Score difference ratio for cross-class dedup
         
         # Advanced deduplication and merging options
         cross_class_suppression: bool = False  # Enable cross-class NMS
@@ -178,6 +191,7 @@ except Exception as _exc:
         enable_group_merge: bool = False  # Enable semantic grouping and merging
         merge_mask_iou_threshold: float = 0.80  # IoU threshold for mask-based merging
         merge_box_iou_threshold: float = 0.90  # IoU threshold for box-based merging
+        mask_union_max_expand_ratio: float = 1.25
         enable_semantic_dedup: bool = False  # Enable CLIP-based semantic deduplication
         semantic_dedup_iou_threshold: float = 0.70  # IoU threshold for semantic dedup
         enable_containment_removal: bool = False  # Remove fully contained detections
@@ -231,9 +245,11 @@ except Exception as _exc:
         show_confidence: bool = False
 
         # mask post-processing
-        close_holes: bool = False
+        close_holes: bool = True
         hole_kernel: int = 7
         min_hole_area: int = 100
+        remove_small_components: bool = True
+        min_component_area: int = 150
 
         # exports
         save_image_only: bool = False

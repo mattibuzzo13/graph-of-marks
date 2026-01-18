@@ -90,6 +90,8 @@ from .geometry import (
     as_xyxy,
     build_precise_nearest_relation,
     center_distance,
+    depth_stats_from_map,
+    edge_gap,
     iou,
     is_below_of,
     is_on_top_of,
@@ -150,6 +152,7 @@ class RelationsConfig:
         enabled: Whether to perform relation inference (bool, default True)
         max_relations: Maximum total relationships to extract (int, default 10)
         max_relations_per_object: Max edges per source node (int, default 3)
+        auto_adjust_relation_cap: Auto-scale per-object cap to avoid overcrowding (bool, default True)
         min_relations_per_object: Min edges per source node (int, default 1)
         relationship_types: Enabled relation categories (tuple, default ("spatial", "semantic", "action"))
         confidence_threshold: Minimum confidence for keeping relation (float, default 0.5)
@@ -159,6 +162,12 @@ class RelationsConfig:
             margin_px: Pixel margin for proximity tests (int, default 20)
             min_distance: Minimum distance threshold (float, default 5.0)
             max_distance: Maximum distance threshold (float, default 20000.0)
+            depth_front_threshold: Depth delta for in_front_of (float, default 0.05)
+            depth_touching_threshold: Max depth diff for "touching" (float, default 0.08)
+            min_relation_distance: Minimum center distance to keep relation (float, default 5.0)
+            max_relation_distance: Maximum center distance to keep relation (float, default 20000.0)
+            too_close_gap_px: Edge-gap threshold for "too close" (float, default 3.0)
+            too_close_gap_scale: Edge-gap threshold scale vs size (float, default 0.02)
         
         CLIP Parameters:
             use_clip_relations: Enable CLIP-based scoring (bool, default True)
@@ -215,6 +224,7 @@ class RelationsConfig:
     enabled: bool = True
     max_relations: int = 10
     max_relations_per_object: int = 3
+    auto_adjust_relation_cap: bool = True
     min_relations_per_object: int = 1
     relationship_types: tuple = ("spatial", "semantic", "action")
     confidence_threshold: float = 0.5
@@ -225,9 +235,16 @@ class RelationsConfig:
     margin_px: int = 20
     min_distance: float = 5.0
     max_distance: float = 20000.0
+    depth_front_threshold: float = 0.05
+    depth_touching_threshold: float = 0.08
+    min_relation_distance: float = 5.0
+    max_relation_distance: float = 20000.0
+    too_close_gap_px: float = 3.0
+    too_close_gap_scale: float = 0.02
     filter_redundant: bool = True
     filter_relations_by_question: bool = True
     threshold_relation_similarity: float = 0.50
+    relation_confidence_tie_eps: float = 0.05
     # Limits for CLIP-based pair scoring to avoid O(n^2) explosion
     max_clip_pairs: int = 500
     per_src_clip_pairs: int = 20
@@ -385,7 +402,7 @@ class RelationInferencer:
         avg_size = (w_i + h_i + w_j + h_j) / 4.0
         
         # Scale-aware margin
-        margin = max(self.margin_px, avg_size * 0.15)
+        margin = max(self.margin_px, avg_size * 0.08)
         
         # Check for significant overlap
         iou_val = iou(box_i, box_j)
@@ -397,13 +414,21 @@ class RelationInferencer:
             # Relazione verticale
             relation = "above" if cy1 < cy2 else "below"  # i sopra j se y1 < y2
             v_overlap = vertical_overlap(box_i, box_j)
-            if v_overlap > max(h_i, h_j) * 0.5:
+            if v_overlap > max(h_i, h_j) * 0.7:
                 return rels  # Troppa sovrapposizione verticale
+            h_ref = min(h_i, h_j)
+            contact_tol = max(2.0, 0.02 * h_ref)
+            if relation == "above":
+                gap = box_j[1] - box_i[3]
+            else:
+                gap = box_i[1] - box_j[3]
+            if gap <= contact_tol:
+                return rels
         elif abs(dx) > margin:
             # Relazione orizzontale
             relation = "left_of" if cx1 < cx2 else "right_of"  # i a sinistra di j se x1 < x2
             h_overlap = horizontal_overlap(box_i, box_j)
-            if h_overlap > max(w_i, w_j) * 0.5:
+            if h_overlap > max(w_i, w_j) * 0.7:
                 return rels  # Troppa sovrapposizione orizzontale
         else:
             return rels
@@ -441,6 +466,7 @@ class RelationInferencer:
         use_clip: bool = True,
         clip_threshold: float = 0.23,
         filter_redundant: bool = True,
+        question_rel_terms: Optional[Set[str]] = None,
     ) -> List[dict]:
         """
         Compute candidate relations (geometry + CLIP).
@@ -470,7 +496,11 @@ class RelationInferencer:
                         depth_map=depth_map,
                     )
                     if ok:
-                        dist_ij = center_distance(boxes[i], boxes[j])
+                        dist_ij = center_distance(
+                            boxes[i], boxes[j],
+                            mask1=(masks[i] if masks else None),
+                            mask2=(masks[j] if masks else None),
+                        )
                         rels.append(
                             {"src_idx": i, "tgt_idx": j, "relation": "on_top_of", "distance": dist_ij}
                         )
@@ -484,23 +514,44 @@ class RelationInferencer:
                 for j in range(n):
                     if i == j:
                         continue
+                    mask_a = masks[i]["segmentation"] if masks else None
+                    mask_b = masks[j]["segmentation"] if masks else None
+                    da = None
+                    db = None
+                    if depth_map is not None:
+                        da = depth_stats_from_map(mask_a, depth_map, box=boxes[i])
+                        db = depth_stats_from_map(mask_b, depth_map, box=boxes[j])
+                    elif depths is not None and i < len(depths) and j < len(depths):
+                        da = depths[i]
+                        db = depths[j]
                     ok = is_in_front_of(
                         boxes[i],
                         boxes[j],
-                        mask_a=(masks[i]["segmentation"] if masks else None),
-                        mask_b=(masks[j]["segmentation"] if masks else None),
-                        depth_a=(depths[i] if depths else None),
-                        depth_b=(depths[j] if depths else None),
+                        mask_a=mask_a,
+                        mask_b=mask_b,
+                        depth_a=da,
+                        depth_b=db,
                         depth_map=depth_map,
+                        delta=float(getattr(self.config, "depth_front_threshold", 0.05)),
                     )
                     if ok:
-                        dist_ij = center_distance(boxes[i], boxes[j])
-                        rels.append(
-                            {"src_idx": i, "tgt_idx": j, "relation": "in_front_of", "distance": dist_ij}
+                        dist_ij = center_distance(
+                            boxes[i], boxes[j],
+                            mask1=(masks[i] if masks else None),
+                            mask2=(masks[j] if masks else None),
                         )
-                        rels.append(
-                            {"src_idx": j, "tgt_idx": i, "relation": "behind", "distance": dist_ij}
-                        )
+                        confidence = None
+                        if da is not None and db is not None:
+                            depth_diff = abs(float(da) - float(db))
+                            denom = max(1e-6, float(getattr(self.config, "depth_front_threshold", 0.05)) * 2.0)
+                            confidence = min(0.95, max(0.5, depth_diff / denom))
+                        rel = {"src_idx": i, "tgt_idx": j, "relation": "in_front_of", "distance": dist_ij}
+                        rel_inv = {"src_idx": j, "tgt_idx": i, "relation": "behind", "distance": dist_ij}
+                        if confidence is not None:
+                            rel["confidence"] = confidence
+                            rel_inv["confidence"] = confidence
+                        rels.append(rel)
+                        rels.append(rel_inv)
 
         # ---------- 3) Geometry: above/below/left/right with improved criteria ----------
         if use_geometry:
@@ -528,7 +579,7 @@ class RelationInferencer:
                 w = (x2 - x1)
                 h = (y2 - y1)
                 avg_size = (w[:, None] + h[:, None] + w[None, :] + h[None, :]) / 4.0
-                margin = np.maximum(self.margin_px, avg_size * 0.15)
+                margin = np.maximum(self.margin_px, avg_size * 0.08)
 
                 # pairwise intersection dims
                 inter_w = np.minimum(x2[:, None], x2[None, :]) - np.maximum(x1[:, None], x1[None, :])
@@ -552,12 +603,12 @@ class RelationInferencer:
                 # vertical candidate: |dy| >= |dx| and |dy| > margin
                 vertical_mask = (abs_dy >= abs_dx) & (abs_dy > margin) & mask
                 # exclude if vertical overlap too large (relaxed from 0.5 to 0.7)
-                vertical_mask &= (inter_h <= (np.maximum(h[:, None], h[None, :]) * 0.7))
+                vertical_mask &= (inter_h <= (np.maximum(h[:, None], h[None, :]) * 0.85))
 
                 # horizontal candidate: |dx| > margin
                 horizontal_mask = (abs_dx > margin) & mask
                 # exclude if horizontal overlap too large (relaxed from 0.5 to 0.7)
-                horizontal_mask &= (inter_w <= (np.maximum(w[:, None], w[None, :]) * 0.7))
+                horizontal_mask &= (inter_w <= (np.maximum(w[:, None], w[None, :]) * 0.85))
 
                 # iterate only over i < j to add primary+inverse relations (same semantics as before)
                 n_idx = boxes_np.shape[0]
@@ -569,6 +620,16 @@ class RelationInferencer:
                             else:
                                 relation = "left_of" if cx[i] < cx[j] else "right_of"
                             dist_ij = float(dist[i, j])
+
+                            if relation in {"above", "below"}:
+                                h_ref = min(h[i], h[j])
+                                contact_tol = max(2.0, 0.02 * h_ref)
+                                if relation == "above":
+                                    gap = y1[j] - y2[i]
+                                else:
+                                    gap = y1[i] - y2[j]
+                                if gap <= contact_tol:
+                                    continue
                             
                             # Calibrate confidence based on distance and overlap
                             # Closer objects with less overlap = higher confidence
@@ -712,7 +773,11 @@ class RelationInferencer:
                     image_pil=image_pil, boxes=boxes, labels=labels, pairs=clip_pairs
                 ):
                     if score > clip_threshold:
-                        dist = center_distance(boxes[i], boxes[j])
+                        dist = center_distance(
+                            boxes[i], boxes[j],
+                            mask1=(masks[i] if masks else None),
+                            mask2=(masks[j] if masks else None),
+                        )
                         rels.append(
                             {
                                 "src_idx": i,
@@ -736,7 +801,11 @@ class RelationInferencer:
                         except Exception:
                             continue
                         if score > clip_threshold:
-                            dist = center_distance(boxes[i], boxes[j])
+                            dist = center_distance(
+                                boxes[i], boxes[j],
+                                mask1=(masks[i] if masks else None),
+                                mask2=(masks[j] if masks else None),
+                            )
                             rels.append(
                                 {
                                     "src_idx": i,
@@ -789,6 +858,15 @@ class RelationInferencer:
         except Exception as e:
             print(f"[RelationInferencer] Warning: consistency check failed: {e}")
 
+        # Depth-aware validation: keep "touching" only when depths agree
+        if depths is not None or depth_map is not None:
+            try:
+                rels = self._filter_touching_by_depth(
+                    rels, boxes, depths=depths, depth_map=depth_map, masks=masks
+                )
+            except Exception as e:
+                print(f"[RelationInferencer] Warning: touching depth filter failed: {e}")
+
         # Optional physics-based filtering/scoring (post semantic-filter)
         if self.physics is not None:
             try:
@@ -807,13 +885,166 @@ class RelationInferencer:
                 print(f"[RelationInferencer] Warning: physics filter failed: {e}")
 
         if filter_redundant:
-            rels = self._filter_redundant_relations(rels)
+            rels = self._filter_redundant_relations(rels, question_rel_terms=question_rel_terms)
             
         return rels
 
     # ---------------------------------------------------------------------
     # Post-processing / utilities
     # ---------------------------------------------------------------------
+
+    def _touching_depth_consistent(
+        self,
+        i: int,
+        j: int,
+        boxes: Sequence[Sequence[float]],
+        *,
+        depths: Optional[Sequence[float]] = None,
+        depth_map: Optional[np.ndarray] = None,
+        masks: Optional[Sequence[dict]] = None,
+    ) -> bool:
+        """Return True if depth evidence supports contact between i and j."""
+        if (depths is None and depth_map is None) or i >= len(boxes) or j >= len(boxes):
+            return True
+        threshold = float(getattr(self.config, "depth_touching_threshold", 0.08))
+        depth_diff = None
+        if depth_map is not None:
+            mask_a = masks[i]["segmentation"] if masks else None
+            mask_b = masks[j]["segmentation"] if masks else None
+            da = depth_stats_from_map(mask_a, depth_map, box=boxes[i])
+            db = depth_stats_from_map(mask_b, depth_map, box=boxes[j])
+            if da is not None and db is not None:
+                depth_diff = abs(da - db)
+        if depth_diff is None and depths is not None and i < len(depths) and j < len(depths):
+            da = depths[i]
+            db = depths[j]
+            if da is not None and db is not None:
+                depth_diff = abs(float(da) - float(db))
+        if depth_diff is None:
+            return True
+        return depth_diff <= threshold
+
+    def _filter_touching_by_depth(
+        self,
+        relationships: List[dict],
+        boxes: Sequence[Sequence[float]],
+        *,
+        depths: Optional[Sequence[float]] = None,
+        depth_map: Optional[np.ndarray] = None,
+        masks: Optional[Sequence[dict]] = None,
+    ) -> List[dict]:
+        """Remove touching relations that are inconsistent with depth."""
+        if not relationships:
+            return relationships
+        filtered = []
+        for rel in relationships:
+            rel_name = str(rel.get("relation", "")).lower()
+            if "touching" in rel_name:
+                i = rel.get("src_idx")
+                j = rel.get("tgt_idx")
+                if i is None or j is None:
+                    filtered.append(rel)
+                    continue
+                if not self._touching_depth_consistent(
+                    int(i),
+                    int(j),
+                    boxes,
+                    depths=depths,
+                    depth_map=depth_map,
+                    masks=masks,
+                ):
+                    continue
+            filtered.append(rel)
+        return filtered
+
+    def filter_relations_by_proximity(
+        self,
+        relationships: List[dict],
+        boxes: Sequence[Sequence[float]],
+        *,
+        question_rel_terms: Optional[Set[str]] = None,
+    ) -> List[dict]:
+        """
+        Drop relations that are too close (unless justified) or too far.
+        Question-requested relations are always kept.
+        """
+        if not relationships:
+            return relationships
+
+        min_rel_dist = float(getattr(self.config, "min_relation_distance", self.min_distance))
+        max_rel_dist = float(getattr(self.config, "max_relation_distance", self.max_distance))
+        gap_px = float(getattr(self.config, "too_close_gap_px", 3.0))
+        gap_scale = float(getattr(self.config, "too_close_gap_scale", 0.02))
+
+        allowed_close = {
+            "on_top_of",
+            "under",
+            "below",
+            "inside",
+            "contained_in",
+            "overlaps",
+            "overlapping",
+            "touching",
+            "adjacent",
+            "supported_by",
+            "supports",
+            "resting_on",
+            "sitting_on",
+            "leaning_on",
+            "in_front_of",
+            "behind",
+            "holding",
+            "wearing",
+            "carrying",
+            "riding",
+        }
+
+        def _matches_question(rel_name: str) -> bool:
+            if not question_rel_terms:
+                return False
+            label = rel_name.lower().replace("_", " ")
+            return any(t.lower().replace("_", " ") in label for t in question_rel_terms)
+
+        out: List[dict] = []
+        for r in relationships:
+            if r.get("forced"):
+                out.append(r)
+                continue
+            rel_name = str(r.get("relation", "")).lower()
+            if _matches_question(rel_name):
+                out.append(r)
+                continue
+
+            i = r.get("src_idx")
+            j = r.get("tgt_idx")
+            dist = r.get("distance", None)
+            if dist is None and i is not None and j is not None and i < len(boxes) and j < len(boxes):
+                dist = center_distance(boxes[int(i)], boxes[int(j)])
+
+            # Too far: drop any relation (unless question requested above)
+            if dist is not None and dist > max_rel_dist:
+                continue
+
+            # Too close: drop if relation not justified by contact/functional semantics
+            if i is not None and j is not None and i < len(boxes) and j < len(boxes):
+                a = boxes[int(i)]
+                b = boxes[int(j)]
+                x1, y1, x2, y2 = as_xyxy(a)
+                X1, Y1, X2, Y2 = as_xyxy(b)
+                avg_size = max(1.0, (x2 - x1 + y2 - y1 + X2 - X1 + Y2 - Y1) / 4.0)
+                gap_thresh = max(gap_px, gap_scale * avg_size)
+                if edge_gap(a, b) <= gap_thresh:
+                    if not any(tok in rel_name for tok in allowed_close):
+                        continue
+
+            # Too near by center distance: suppress weak spatial cues
+            if dist is not None and dist < min_rel_dist:
+                if not any(tok in rel_name for tok in allowed_close):
+                    continue
+
+            out.append(r)
+
+        return out
 
     def limit_relationships_per_object(
         self,
@@ -823,6 +1054,10 @@ class RelationInferencer:
         max_relations_per_object: int = 3,
         min_relations_per_object: int = 1,
         question_rel_terms: Optional[Set[str]] = None,
+        question_subject_idxs: Optional[Set[int]] = None,
+        masks: Optional[Sequence[dict]] = None,
+        depths: Optional[Sequence[float]] = None,
+        depth_map: Optional[np.ndarray] = None,
     ) -> List[dict]:
         """
         Ensure at least `min_relations_per_object` per node (via nearest),
@@ -835,8 +1070,16 @@ class RelationInferencer:
         for r in relationships:
             rels_by_src[r["src_idx"]].append(r)
 
-        # Guarantee a minimum per object
         n = len(boxes)
+        max_relations_per_object = self._compute_effective_max_relations_per_object(
+            relationships=relationships,
+            num_objects=n,
+            max_relations_per_object=max_relations_per_object,
+            question_rel_terms=question_rel_terms,
+        )
+        question_subject_idxs = question_subject_idxs or set()
+
+        # Guarantee a minimum per object
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         for i in range(n):
             if len(rels_by_src[i]) >= min_relations_per_object:
@@ -851,37 +1094,110 @@ class RelationInferencer:
                     best_j, best_d = j, d
             if best_j is not None:
                 rels_by_src[i].append(
-                    build_precise_nearest_relation(i, best_j, boxes, margin_px=self.margin_px)
+                    build_precise_nearest_relation(
+                        i,
+                        best_j,
+                        boxes,
+                        margin_px=self.margin_px,
+                        depth_map=depth_map,
+                        depths=depths,
+                        masks=masks,
+                        depth_touching_threshold=float(
+                            getattr(self.config, "depth_touching_threshold", 0.08)
+                        ),
+                    )
                 )
 
         # Cap per-object; prioritize relations mentioned in the question
-        def _is_question_rel(rel_label: str) -> bool:
-            if not question_rel_terms:
-                return False
-            r = rel_label.lower()
-            return any(t in r for t in question_rel_terms)
+        def _is_question_rel(rel_label: str, rel: Optional[dict] = None) -> bool:
+            return self._relation_matches_question(
+                rel,
+                question_rel_terms=question_rel_terms,
+                question_subject_idxs=question_subject_idxs,
+            )
+
+        # Compute area-based caps to avoid overcrowding small objects.
+        areas = []
+        for b in boxes:
+            x1, y1, x2, y2 = as_xyxy(b)
+            areas.append(max(1.0, float(x2 - x1)) * max(1.0, float(y2 - y1)))
+        max_area = max(areas) if areas else 1.0
 
         final: List[dict] = []
         for i, rlist in rels_by_src.items():
+            # Shrink cap for small objects to reduce label clutter.
+            rel_cap = max_relations_per_object
+            if i < len(areas):
+                area_ratio = float(areas[i] / max_area) if max_area > 0 else 1.0
+                rel_cap = min(rel_cap, 2)
+            # Allow more relations for question target objects.
+            if i in question_subject_idxs:
+                rel_cap = max(rel_cap, 3)
+
             # Ordina per confidenza/score se presente, altrimenti per distanza
             def rel_sort_key(r):
                 # Priorità: question term, poi score/confidenza, poi distanza
-                q_priority = 0 if _is_question_rel(r.get("relation", "")) else 1
+                q_priority = 0 if _is_question_rel(r.get("relation", ""), r) else 1
+                rel_priority = self._get_relation_priority(r.get("relation", ""))
+                rel_conf = self._get_relation_confidence(r)
                 # Usa clip_sim, score, o distance
                 score = r.get("clip_sim", None)
                 if score is None:
                     score = r.get("score", None)
                 if score is not None:
                     # Score negativo per ordinare decrescente
-                    return (q_priority, -score, r.get("distance", 1e9))
+                    return (q_priority, -rel_priority, -score, r.get("distance", 1e9))
                 else:
-                    return (q_priority, r.get("distance", 1e9))
-            rlist_sorted = sorted(rlist, key=rel_sort_key)
-            # Mantieni solo le top-N relazioni per oggetto
-            final.extend(rlist_sorted[:max_relations_per_object])
+                    return (q_priority, -rel_priority, -rel_conf, r.get("distance", 1e9))
+            question_rels = [r for r in rlist if _is_question_rel(r.get("relation", ""), r)]
+            other_rels = [r for r in rlist if not _is_question_rel(r.get("relation", ""), r)]
+            q_sorted = sorted(question_rels, key=rel_sort_key)
+            other_sorted = sorted(other_rels, key=rel_sort_key)
+            if rel_cap > 0:
+                remaining = rel_cap - len(q_sorted)
+                if remaining < 0:
+                    remaining = 0
+            else:
+                remaining = len(other_sorted)
+            final.extend(q_sorted + other_sorted[:remaining])
         return final
 
-    def _filter_redundant_relations(self, relationships: List[dict]) -> List[dict]:
+    def _compute_effective_max_relations_per_object(
+        self,
+        *,
+        relationships: Sequence[dict],
+        num_objects: int,
+        max_relations_per_object: int,
+        question_rel_terms: Optional[Set[str]] = None,
+    ) -> int:
+        """
+        Auto-scale per-object relation cap to avoid overcrowding while
+        preserving question-requested relations.
+        """
+        if not getattr(self.config, "auto_adjust_relation_cap", False):
+            return max_relations_per_object
+
+        n = max(1, int(num_objects))
+        rel_count = len(relationships)
+        if rel_count <= 0:
+            return max(1, max_relations_per_object)
+
+        base_target = max(2, int(math.ceil(n * 0.7)))
+        if question_rel_terms:
+            base_target = max(base_target, int(math.ceil(n * 1.0)))
+        target_total = min(self.config.max_relations, base_target, rel_count)
+        cap = max(1, int(math.ceil(target_total / n)))
+
+        if max_relations_per_object and max_relations_per_object > 0:
+            cap = min(cap, max_relations_per_object)
+        return cap
+
+    def _filter_redundant_relations(
+        self,
+        relationships: List[dict],
+        *,
+        question_rel_terms: Optional[Set[str]] = None,
+    ) -> List[dict]:
         """
         For each unordered pair of objects, keep only the most informative relation.
         When multiple relations exist (e.g., "left_of" + "touching_left"),
@@ -907,12 +1223,17 @@ class RelationInferencer:
             if len(rels) == 1:
                 filtered_relations.append(rels[0])
             else:
-                best_rel = self._choose_best_relation(rels)
+                best_rel = self._choose_best_relation(rels, question_rel_terms=question_rel_terms)
                 filtered_relations.append(best_rel)
         
         return filtered_relations
 
-    def _choose_best_relation(self, relations: List[dict]) -> dict:
+    def _choose_best_relation(
+        self,
+        relations: List[dict],
+        *,
+        question_rel_terms: Optional[Set[str]] = None,
+    ) -> dict:
         """
         Pick the most informative relation among candidates for the same pair.
         Priority: semantic > specific spatial (contact/adjacency) > generic spatial > directional.
@@ -920,24 +1241,97 @@ class RelationInferencer:
         # Priority tiers for relation types
         semantic_relations = {"on_top_of", "under", "holding", "wearing", "riding", "sitting_on", "carrying"}
         spatial_specific = {"touching", "adjacent", "near", "close"}
-        spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
+        spatial_directional = {"left_of", "right_of", "above", "below"}
         
+        def _is_question_rel(rel: dict) -> bool:
+            return self._relation_matches_question(rel, question_rel_terms=question_rel_terms)
+
         best_rel = relations[0]
         best_priority = self._get_relation_priority(best_rel["relation"])
         best_confidence = self._get_relation_confidence(best_rel)
+        best_specificity = self._get_relation_specificity(best_rel["relation"])
+        conf_eps = float(getattr(self.config, "relation_confidence_tie_eps", 0.05))
         
         for rel in relations[1:]:
+            # Priority 0: question-requested relations
+            if _is_question_rel(rel) and not _is_question_rel(best_rel):
+                best_rel = rel
+                best_priority = self._get_relation_priority(best_rel["relation"])
+                best_confidence = self._get_relation_confidence(best_rel)
+                best_specificity = self._get_relation_specificity(best_rel["relation"])
+                continue
+            if _is_question_rel(best_rel) and not _is_question_rel(rel):
+                continue
+
             priority = self._get_relation_priority(rel["relation"])
             confidence = self._get_relation_confidence(rel)
+            specificity = self._get_relation_specificity(rel["relation"])
             
             # Compare by priority first, then by confidence
-            if (priority > best_priority or 
-                (priority == best_priority and confidence > best_confidence)):
+            if priority > best_priority:
                 best_rel = rel
                 best_priority = priority
                 best_confidence = confidence
+                best_specificity = specificity
+                continue
+            if priority == best_priority:
+                if confidence > (best_confidence + conf_eps):
+                    best_rel = rel
+                    best_priority = priority
+                    best_confidence = confidence
+                    best_specificity = specificity
+                    continue
+                if abs(confidence - best_confidence) <= conf_eps:
+                    if specificity > best_specificity or (
+                        specificity == best_specificity and confidence > best_confidence
+                    ):
+                        best_rel = rel
+                        best_priority = priority
+                        best_confidence = confidence
+                        best_specificity = specificity
         
         return best_rel
+
+    def _relation_matches_question(
+        self,
+        rel: Optional[dict],
+        *,
+        question_rel_terms: Optional[Set[str]] = None,
+        question_subject_idxs: Optional[Set[int]] = None,
+    ) -> bool:
+        """Return True if a relation matches the question direction/context."""
+        if rel is None:
+            return False
+        if rel.get("forced"):
+            return True
+        if not question_rel_terms:
+            return False
+
+        rel_terms = {str(t).lower().replace(" ", "_") for t in question_rel_terms}
+        label = str(rel.get("relation", "")).lower().replace(" ", "_")
+        inverse_map = {
+            "above": "below",
+            "below": "above",
+            "left_of": "right_of",
+            "right_of": "left_of",
+            "in_front_of": "behind",
+            "behind": "in_front_of",
+        }
+        directional = set(inverse_map.keys())
+        src_idx = rel.get("src_idx")
+        tgt_idx = rel.get("tgt_idx")
+
+        if label in rel_terms:
+            if question_subject_idxs and label in directional:
+                return tgt_idx in question_subject_idxs
+            return True
+
+        if label in inverse_map and inverse_map[label] in rel_terms:
+            if question_subject_idxs:
+                return src_idx in question_subject_idxs
+            return False
+
+        return False
 
     def _get_relation_priority(self, relation: str) -> int:
         """Assign a numeric priority to a relation."""
@@ -952,18 +1346,51 @@ class RelationInferencer:
         spatial_contact = {"touching", "adjacent"}
         if any(contact in rel_name for contact in spatial_contact):
             return 3
-            
+
         # 2: generic proximity
         spatial_generic = {"near", "close"}
         if any(gen in rel_name for gen in spatial_generic):
             return 2
             
-        # 1: directional spatial cues
-        spatial_directional = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
-        if any(dir_rel in rel_name for dir_rel in spatial_directional):
-            return 1
+        # 2: directional + depth relations (same priority)
+        spatial_directional = {"left_of", "right_of", "above", "below"}
+        spatial_depth = {"in_front_of", "behind"}
+        if any(dir_rel in rel_name for dir_rel in spatial_directional | spatial_depth):
+            return 2
             
         # 0: others
+        return 0
+
+    def _get_relation_specificity(self, relation: str) -> int:
+        """Assign a specificity score for tie-breaking within same priority."""
+        rel_name = str(relation).lower()
+        specific_high = {
+            "on_top_of",
+            "under",
+            "inside",
+            "contained_in",
+            "overlaps",
+            "overlapping",
+            "touching",
+            "adjacent",
+            "supported_by",
+            "supports",
+            "resting_on",
+            "sitting_on",
+            "leaning_on",
+            "holding",
+            "wearing",
+            "carrying",
+            "riding",
+        }
+        if any(tok in rel_name for tok in specific_high):
+            return 2
+        specific_mid = {"left_of", "right_of", "above", "below", "in_front_of", "behind"}
+        if any(tok in rel_name for tok in specific_mid):
+            return 1
+        specific_low = {"near", "close"}
+        if any(tok in rel_name for tok in specific_low):
+            return 0
         return 0
 
     def _get_relation_confidence(self, relation: dict) -> float:
@@ -1132,8 +1559,10 @@ class RelationInferencer:
         relationships: List[dict],
         *,
         question_subject_idxs: Optional[Set[int]] = None,
+        question_rel_terms: Optional[Set[str]] = None,
         max_relations_per_object: int = 3,
         min_relations_per_object: int = 1,
+        total_objects: Optional[int] = None,
     ) -> List[dict]:
         """
         ✅ FIXED: Remove inverse duplicate relations correctly.
@@ -1149,6 +1578,13 @@ class RelationInferencer:
         count_per_src = {}  # src_idx -> count
         
         subj = question_subject_idxs or set()
+
+        def _is_question_rel(rel: dict) -> bool:
+            return self._relation_matches_question(
+                rel,
+                question_rel_terms=question_rel_terms,
+                question_subject_idxs=question_subject_idxs,
+            )
         
         for rel in relationships:
             i, j = rel["src_idx"], rel["tgt_idx"]
@@ -1162,7 +1598,7 @@ class RelationInferencer:
             if pair_key in seen_pairs:
                 # We have a duplicate (potentially inverse)
                 existing = seen_pairs[pair_key]
-                
+
                 # Priority 1: Question subjects as SOURCE (stronger signal)
                 r_src_is_subj = i in subj
                 e_src_is_subj = existing["src_idx"] in subj
@@ -1176,6 +1612,17 @@ class RelationInferencer:
                     # Existing has subject as source, new doesn't: keep existing
                     continue
                 else:
+                    # Priority 1.5: Question-requested relations
+                    r_is_qrel = _is_question_rel(rel)
+                    e_is_qrel = _is_question_rel(existing)
+                    if r_is_qrel and not e_is_qrel:
+                        count_per_src[existing["src_idx"]] = count_per_src.get(existing["src_idx"], 1) - 1
+                        seen_pairs[pair_key] = rel
+                        count_per_src[i] = count_per_src.get(i, 0) + 1
+                        continue
+                    if e_is_qrel and not r_is_qrel:
+                        continue
+
                     # Both or neither have subject as source
                     # Priority 1b: Any involvement of question subjects
                     r_hits = (i in subj) or (j in subj)
@@ -1227,6 +1674,7 @@ class RelationInferencer:
         relationships: List[dict],
         *,
         question_terms: Optional[Set[str]] = None,
+        question_subject_idxs: Optional[Set[int]] = None,
         similarity_fn: Optional[Callable[[str, str], float]] = None,
         threshold: float = 0.5,
     ) -> List[dict]:
@@ -1238,12 +1686,64 @@ class RelationInferencer:
         if not question_terms:
             return relationships
 
+        def _norm_label(s: str) -> str:
+            return s.lower().strip().replace(" ", "_")
+
+        norm_terms = {_norm_label(t) for t in question_terms}
+        inverse_map = {
+            "above": "below",
+            "below": "above",
+            "left_of": "right_of",
+            "right_of": "left_of",
+            "in_front_of": "behind",
+            "behind": "in_front_of",
+        }
+        directional_terms = set(inverse_map.keys())
+        question_dir_terms = {t for t in norm_terms if t in inverse_map}
+        restrict_to_targets = question_subject_idxs is not None and len(question_subject_idxs) > 0
+
         out: List[dict] = []
         for r in relationships:
-            label = str(r["relation"]).lower().replace("_", " ")
+            label = _norm_label(str(r.get("relation", "")))
+            src_idx = r.get("src_idx")
+            tgt_idx = r.get("tgt_idx")
+
+            if restrict_to_targets:
+                if src_idx not in question_subject_idxs and tgt_idx not in question_subject_idxs:
+                    continue
+
+                # If the question specifies a directional relation, enforce direction relative to target.
+                if question_dir_terms:
+                    if label in question_dir_terms:
+                        if tgt_idx in question_subject_idxs:
+                            r2 = r.copy()
+                            r2["forced"] = True
+                            out.append(r2)
+                        continue
+                    if label in inverse_map and inverse_map[label] in question_dir_terms:
+                        if src_idx in question_subject_idxs:
+                            desired = inverse_map[label]
+                            flipped = r.copy()
+                            flipped["src_idx"] = tgt_idx
+                            flipped["tgt_idx"] = src_idx
+                            flipped["relation"] = desired
+                            flipped["forced"] = True
+                            out.append(flipped)
+                        continue
+
+                # If question asks a specific direction, keep other target-involved
+                # relations as secondary context (only non-directional).
+                if question_dir_terms:
+                    if label not in directional_terms:
+                        out.append(r)
+                    continue
+
+                # Otherwise, keep additional relations involving the target for context.
+                out.append(r)
+                continue
+
             keep = False
-            for t in question_terms:
-                t_norm = t.lower().replace("_", " ")
+            for t_norm in norm_terms:
                 if label == t_norm or t_norm in label:
                     keep = True
                     break
@@ -1254,6 +1754,126 @@ class RelationInferencer:
             if keep:
                 out.append(r)
         return out
+
+    def enforce_question_relations(
+        self,
+        relationships: List[dict],
+        boxes: Sequence[Sequence[float]],
+        *,
+        question_rel_terms: Optional[Set[str]] = None,
+        question_subject_idxs: Optional[Set[int]] = None,
+        masks: Optional[Sequence[dict]] = None,
+        depths: Optional[Sequence[float]] = None,
+        depth_map: Optional[np.ndarray] = None,
+    ) -> List[dict]:
+        """
+        Ensure that relations explicitly requested by the question exist when geometry supports them.
+        """
+        if not question_rel_terms or not question_subject_idxs or not boxes:
+            return relationships
+
+        directional = {"above", "below", "left_of", "right_of", "in_front_of", "behind"}
+        rel_terms = {t for t in question_rel_terms if t in directional}
+        if not rel_terms:
+            return relationships
+
+        centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+        widths = [max(1.0, b[2] - b[0]) for b in boxes]
+        heights = [max(1.0, b[3] - b[1]) for b in boxes]
+
+        existing = {(r.get("src_idx"), r.get("tgt_idx"), r.get("relation")) for r in relationships}
+
+        def _margin(i: int, j: int) -> float:
+            avg = (widths[i] + heights[i] + widths[j] + heights[j]) / 4.0
+            return max(self.margin_px * 0.5, avg * 0.06)
+
+        def _depth_at(idx: int) -> Optional[float]:
+            if depths is not None and idx < len(depths):
+                return depths[idx]
+            if depth_map is not None and masks is not None and idx < len(masks):
+                m = masks[idx]["segmentation"] if masks[idx] is not None else None
+                return depth_stats_from_map(m, depth_map, box=boxes[idx])
+            return None
+
+        added = []
+        for tgt in question_subject_idxs:
+            if tgt < 0 or tgt >= len(boxes):
+                continue
+            cx_t, cy_t = centers[tgt]
+            for rel in rel_terms:
+                # If already present for this target, skip.
+                if rel in {"above", "below", "left_of", "right_of"}:
+                    already = any(
+                        r[2] == rel and r[1] == tgt for r in existing
+                    )
+                else:
+                    already = any(
+                        r[2] == rel and r[1] == tgt for r in existing
+                    )
+                if already:
+                    continue
+
+                best_idx = None
+                best_dist = float("inf")
+                for i in range(len(boxes)):
+                    if i == tgt:
+                        continue
+                    cx_i, cy_i = centers[i]
+                    dx = cx_i - cx_t
+                    dy = cy_i - cy_t
+                    margin = _margin(i, tgt)
+                    da = _depth_at(i)
+                    db = _depth_at(tgt)
+                    if da is not None and db is not None and rel in {"above", "below", "left_of", "right_of"}:
+                        depth_delta = abs(float(da) - float(db))
+                        depth_gate = float(getattr(self.config, "depth_front_threshold", 0.05)) * 2.0
+                        if depth_delta > depth_gate:
+                            continue
+                    if rel == "below":
+                        if dy <= margin or abs(dy) < abs(dx) * 0.6:
+                            continue
+                    elif rel == "above":
+                        if dy >= -margin or abs(dy) < abs(dx) * 0.6:
+                            continue
+                    elif rel == "left_of":
+                        if dx >= -margin or abs(dx) < abs(dy) * 0.6:
+                            continue
+                    elif rel == "right_of":
+                        if dx <= margin or abs(dx) < abs(dy) * 0.6:
+                            continue
+                    elif rel in {"in_front_of", "behind"}:
+                        if da is None or db is None:
+                            continue
+                        delta = float(getattr(self.config, "depth_front_threshold", 0.05))
+                        if rel == "in_front_of" and (da <= db + delta):
+                            continue
+                        if rel == "behind" and (da >= db - delta):
+                            continue
+                    dist = math.hypot(dx, dy)
+                    if dist < best_dist:
+                        best_idx = i
+                        best_dist = dist
+
+                if best_idx is None:
+                    continue
+
+                # Build relation directed from candidate -> target.
+                rel_dict = {
+                    "src_idx": best_idx,
+                    "tgt_idx": tgt,
+                    "relation": rel,
+                    "distance": float(best_dist),
+                    "confidence": 0.55,
+                    "forced": True,
+                }
+                key = (rel_dict["src_idx"], rel_dict["tgt_idx"], rel_dict["relation"])
+                if key not in existing:
+                    added.append(rel_dict)
+                    existing.add(key)
+
+        if added:
+            relationships = list(relationships) + added
+        return relationships
 
     # unify_spatial_direction rimossa: le relazioni spaziali mantengono la direzione originale src_idx → tgt_idx
 
@@ -1274,3 +1894,16 @@ class RelationInferencer:
                 if r.get("distance", 1e9) < best_for_pair[key].get("distance", 1e9):
                     best_for_pair[key] = r
         return list(best_for_pair.values())
+        num_objects = total_objects
+        if num_objects is None:
+            uniq = set()
+            for rel in relationships:
+                uniq.add(rel.get("src_idx"))
+                uniq.add(rel.get("tgt_idx"))
+            num_objects = len([u for u in uniq if u is not None])
+        max_relations_per_object = self._compute_effective_max_relations_per_object(
+            relationships=relationships,
+            num_objects=max(1, num_objects),
+            max_relations_per_object=max_relations_per_object,
+            question_rel_terms=question_rel_terms,
+        )

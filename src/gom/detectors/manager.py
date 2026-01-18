@@ -616,6 +616,7 @@ class DetectorManager:
                     from gom.fusion.nms import nms as _nms_list
                     # Run class-aware NMS first to remove intra-class duplicates
                     try:
+                        self.logger.info(f"[DEBUG WBF] About to run NMS with iou_thr={iou_thr}")
                         fused = _nms_list(fused, class_aware=True, iou_thr=iou_thr, sort_desc=True)
                     except Exception:
                         # nms may accept different signatures; fall back silently

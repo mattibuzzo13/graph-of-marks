@@ -303,6 +303,11 @@ def canonical_label(label: str) -> str:
         "sofa": "sofa",
         "armchair": "chair",
         "chair": "chair",
+        "potted plant": "plant",
+        "potted_plant": "plant",
+        "pottedplant": "plant",
+        "houseplant": "plant",
+        "plant": "plant",
         # Add more domain-specific mappings here as needed.
     }
     return CANONICAL_MAP.get(lb, lb)

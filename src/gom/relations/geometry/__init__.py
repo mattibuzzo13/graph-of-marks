@@ -85,6 +85,7 @@ from .core import (
     as_xyxy,
     area,
     center,
+    mask_center,
     center_distance,
     iou,
     iou_matrix,
@@ -143,6 +144,7 @@ __all__ = [
     "overlap_ratio",
     "is_inside",
     "contains",
+    "mask_center",
     # Vectorized
     "centers_vectorized",
     "areas_vectorized",

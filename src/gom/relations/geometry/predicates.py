@@ -191,7 +191,7 @@ def is_on_top_of(
     """
     Robust heuristic for 'A on top of B':
       1) A above B by Y center
-      2) vertical gap small (allow slight overlap)
+      2) touching contact (small gap, no deep overlap)
       3) sufficient horizontal overlap (relative to box widths)
       4) optional mask contact along interface band
       5) optional depth consistency (A not much farther than B)
@@ -203,15 +203,15 @@ def is_on_top_of(
     if (y1a + y2a) / 2.0 >= (y1b + y2b) / 2.0:
         return False
 
-    # 2) vertical gap tolerance (scale-aware)
+    # 2) touching contact (scale-aware)
     hA = max(1.0, y2a - y1a)
     hB = max(1.0, y2b - y1b)
     h_ref = min(hA, hB)
-    tol_px = max_gap_px if max_gap_px is not None else max(8.0, 0.06 * h_ref)
+    contact_tol = max_gap_px if max_gap_px is not None else max(2.0, 0.02 * h_ref)
 
     bottom_a, top_b = y2a, y1b
     gap = top_b - bottom_a
-    if gap > tol_px:
+    if gap > contact_tol:
         return False
     if gap < 0:
         # Allow slight overlap but avoid deep interpenetration
