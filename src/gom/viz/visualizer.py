@@ -18,6 +18,7 @@ methods to draw annotated images with various combinations of visual elements.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -149,43 +150,29 @@ class VisualizerConfig:
     display_labels: bool = True
     display_relationships: bool = True
     display_relation_labels: bool = True
-    display_legend: bool = True
+    display_legend: bool = False
 
     # Object rendering options
     show_segmentation: bool = True
     fill_segmentation: bool = True
     show_bboxes: bool = True
-    
+
     # Performance optimization flags
-    # Optimized: vectorized mask blending provides 2-2.5x speedup
     use_vectorized_masks: bool = True
-    # Optimized: batched text rendering provides 20-30% speedup
     use_batch_text_renderer: bool = True
 
     # Typography and visual style
-    font_family: str = "DejaVu Sans Mono"
-    obj_fontsize_inside: int = 32
-    obj_fontsize_outside: int = 32
-    rel_fontsize: int = 28
-    legend_fontsize: int = 14
-    auto_scale_styles: bool = True
-    style_ref_px: int = 1000
-    style_ref_dpi: int = 600
-    style_scale_min: float = 0.75
-    style_scale_max: float = 2.5
-    seg_fill_alpha: float = 0.6  # Segmentation transparency (0=invisible, 1=opaque)
-    bbox_linewidth: float = 1.0
-    rel_arrow_linewidth: float = 1.5
-    rel_arrow_mutation_scale: float = 22.0
-    # Make contours/labels/relations more prominent by default
-    seg_fill_alpha: float = 0.55
-    bbox_linewidth: float = 2.5
-    rel_arrow_linewidth: float = 6.0
-    rel_arrow_mutation_scale: float = 48.0
-    # Label/legend styling
-    label_bbox_linewidth: float = 2.5
-    relation_label_bbox_linewidth: float = 2.0
-    connector_linewidth: float = 2.0
+    obj_fontsize_inside: int = 12
+    obj_fontsize_outside: int = 12
+    rel_fontsize: int = 10
+    legend_fontsize: int = 8
+    seg_fill_alpha: float = 0.25
+    bbox_linewidth: float = 2.0
+    rel_arrow_linewidth: float = 2.5
+    rel_arrow_mutation_scale: float = 26.0
+    label_bbox_linewidth: float = 3.0
+    relation_label_bbox_linewidth: float = 3.0
+    connector_linewidth: float = 1.5
 
     # Relation post-processing
     filter_redundant_relations: bool = True
@@ -223,8 +210,8 @@ class VisualizerConfig:
     relation_label_max_dist_px: float = 20.0
 
     # Global color tweaks
-    color_sat_boost: float = 1.40
-    color_val_boost: float = 1.20
+    color_sat_boost: float = 1.1
+    color_val_boost: float = 1.1
 
     # Special knobs
     on_top_gap_px: int = 8
@@ -409,6 +396,94 @@ class Visualizer:
             for k, v in restore_cfg.items():
                 setattr(self.cfg, k, v)
         return fig, ax
+
+    @staticmethod
+    def draw_detections_only(
+        image: Image.Image,
+        boxes: Sequence[Sequence[float]],
+        labels: Sequence[str],
+        scores: Sequence[float],
+        save_path: str,
+    ) -> None:
+        """
+        Render an image with only detection bounding boxes + labels (no masks, no relations).
+        
+        Args:
+            image: Input PIL Image
+            boxes: List of bounding boxes
+            labels: List of labels
+            scores: List of scores
+            save_path: Path to save the output image
+        """
+        cfg = VisualizerConfig()
+        cfg.display_labels = True
+        cfg.display_relationships = False
+        cfg.display_relation_labels = False
+        cfg.show_segmentation = False
+        cfg.show_bboxes = True
+        cfg.display_legend = False
+
+        viz = Visualizer(cfg)
+        # Ensure parent directory exists
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+        viz.draw(
+            image=image,
+            boxes=boxes,
+            labels=labels,
+            scores=scores,
+            relationships=[],   # no relations
+            masks=None,
+            save_path=str(save_path),
+            draw_background=True,
+            bg_color=(1, 1, 1, 1),
+        )
+
+    @staticmethod
+    def draw_segmentation_only(
+        image: Image.Image,
+        boxes: Sequence[Sequence[float]],
+        labels: Sequence[str],
+        scores: Sequence[float],
+        masks: Sequence[np.ndarray],
+        save_path: str,
+    ) -> None:
+        """
+        Render segmentation masks (and optional boxes/labels) for a set of objects.
+        
+        Args:
+            image: Input PIL Image
+            boxes: List of bounding boxes
+            labels: List of labels
+            scores: List of scores
+            masks: List of segmentation masks
+            save_path: Path to save the output image
+        """
+        cfg = VisualizerConfig()
+        cfg.display_labels = True
+        cfg.display_relationships = False
+        cfg.display_relation_labels = False
+        cfg.show_segmentation = True
+        cfg.fill_segmentation = True
+        cfg.show_bboxes = True
+        cfg.display_legend = False
+        cfg.seg_fill_alpha = 0.25
+
+        viz = Visualizer(cfg)
+        # Ensure parent directory exists
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+        viz.draw(
+            image=image,
+            boxes=boxes,
+            labels=labels,
+            scores=scores,
+            relationships=[],
+            masks=masks,
+            save_path=str(save_path),
+            draw_background=True,
+            bg_color=(1, 1, 1, 1),
+        )
 
     # -----------------------------------------------------------
     # CANVAS CREATION AND FINALIZATION

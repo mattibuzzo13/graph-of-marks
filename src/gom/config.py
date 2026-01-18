@@ -228,18 +228,18 @@ except Exception as _exc:
         label_mode: str = "original"
         display_labels: bool = True
         display_relationships: bool = True
-        display_relation_labels: bool = False
+        display_relation_labels: bool = True
         show_segmentation: bool = True
         fill_segmentation: bool = True
-        display_legend: bool = True
-        seg_fill_alpha: float = 0.30
+        display_legend: bool = False
+        seg_fill_alpha: float = 0.25
         bbox_linewidth: float = 2.0
         obj_fontsize_inside: int = 12
         obj_fontsize_outside: int = 12
         rel_fontsize: int = 10
         legend_fontsize: int = 8
         rel_arrow_linewidth: float = 2.5
-        rel_arrow_mutation_scale: float = 22.0
+        rel_arrow_mutation_scale: float = 26.0
         resolve_overlaps: bool = True
         show_bboxes: bool = True
         show_confidence: bool = False
@@ -267,8 +267,8 @@ except Exception as _exc:
         force_preprocess_per_question: bool = False
 
         # color tweaks
-        color_sat_boost: float = 1.30
-        color_val_boost: float = 1.15
+        color_sat_boost: float = 1.1
+        color_val_boost: float = 1.1
 
 
 def default_config(**overrides: Any) -> PreprocessorConfig:

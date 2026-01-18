@@ -532,11 +532,11 @@ class PreprocessorConfig:
     label_mode: str = "original"  # Label format: "original", "numeric", "alphabetic"
     display_labels: bool = True  # Show object labels
     display_relationships: bool = True  # Show relationship arrows
-    display_relation_labels: bool = False  # Show text on relationship arrows
+    display_relation_labels: bool = True  # Show text on relationship arrows
     show_segmentation: bool = True  # Render segmentation masks
     fill_segmentation: bool = True  # Fill masks (vs outline only)
-    display_legend: bool = True  # Show legend with object classes
-    seg_fill_alpha: float = 0.75  # Segmentation transparency (0=invisible, 1=opaque)
+    display_legend: bool = False  # Show legend with object classes
+    seg_fill_alpha: float = 0.25  # Segmentation transparency (0=invisible, 1=opaque)
     bbox_linewidth: float = 2.0  # Bounding box line width
     obj_fontsize_inside: int = 12  # Font size for inside labels
     obj_fontsize_outside: int = 12  # Font size for outside labels
@@ -584,8 +584,8 @@ class PreprocessorConfig:
     detection_mask_merge_iou_thr: Optional[float] = 0.6  # Mask IoU threshold for merging
     
     # Color enhancement for visualization
-    color_sat_boost: float = 1.30  # Saturation boost factor
-    color_val_boost: float = 1.15  # Value/brightness boost factor
+    color_sat_boost: float = 1.1  # Saturation boost factor
+    color_val_boost: float = 1.1  # Value/brightness boost factor
 
 
 # ----------------------------- Main Preprocessor Class -----------------------------
@@ -704,7 +704,7 @@ class ImageGraphPreprocessor:
             self.detector_manager = None
 
         # Initialize segmenter (SAM v1 / v2 / HQ)
-        self.segmenter: Segmenter = self._init_segmenter()
+        self.segmenter: Optional[Segmenter] = self._init_segmenter()
 
         # Depth estimation, and CLIP for semantic similarity
         depth_config = DepthConfig(device=self.device)
@@ -814,14 +814,32 @@ class ImageGraphPreprocessor:
             ...     # Code that may produce warnings
             ...     model.predict(image)
         """
-        if getattr(self.cfg, "suppress_warnings", True):
+        if self.cfg.suppress_warnings:
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=UserWarning)
-                warnings.simplefilter("ignore", category=DeprecationWarning)
-                warnings.simplefilter("ignore", category=ResourceWarning)
+                warnings.filterwarnings("ignore", category=UserWarning)
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                warnings.filterwarnings("ignore", category=ResourceWarning)
                 yield
         else:
             yield
+
+    def run_detectors(self, image: Image.Image) -> Dict[str, Any]:
+        """
+        Run object detection on the input image.
+        
+        This is a public wrapper around the internal detection logic.
+        
+        Args:
+            image: Input PIL Image
+            
+        Returns:
+            Dictionary containing:
+                - boxes: List of [x1, y1, x2, y2]
+                - labels: List of class labels
+                - scores: List of confidence scores
+        """
+        return self._run_detectors(image)
+
 
     # ----------------------------- Initialization Helpers -----------------------------
 
@@ -920,6 +938,9 @@ class ImageGraphPreprocessor:
         )
         
         # SAM variant selection
+        if str(self.cfg.sam_version).lower() == "none":
+            return None
+
         if self.cfg.sam_version == "2":
             return Sam2Segmenter(config=s_cfg, **self.cfg.segmenter_kwargs)
         if self.cfg.sam_version == "hq":
