@@ -3,13 +3,29 @@ Graph of Marks - High-level API
 
 Simple interface for visual scene understanding. Accepts optional custom functions
 for detection, segmentation, and depth estimation. When not provided, uses defaults.
+
+GoM Visual Prompting Modes (from AAAI 2026 paper):
+    The library supports different visual prompting configurations as described
+    in the Graph-of-Mark paper. These can be controlled via:
+
+    1. label_mode: "original" (textual IDs like "oven_1") or "numeric" (1, 2, 3)
+    2. display_relationships: True/False to show/hide relation arrows
+    3. display_relation_labels: True/False to show/hide labels on arrows
+
+    Paper configurations (Table 2):
+    - Segmented objects + Object Text IDs: label_mode="original", display_relationships=False
+    - Segmented objects + Object Num IDs: label_mode="numeric", display_relationships=False
+    - GoM with Text IDs: label_mode="original", display_relationships=True, display_relation_labels=False
+    - GoM with Num IDs: label_mode="numeric", display_relationships=True, display_relation_labels=False
+    - GoM with Text IDs + Relation labels: label_mode="original", display_relationships=True, display_relation_labels=True
+    - GoM with Num IDs + Relation labels: label_mode="numeric", display_relationships=True, display_relation_labels=True
 """
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
@@ -18,6 +34,52 @@ from .config import PreprocessorConfig
 from .pipeline.preprocessor import ImageGraphPreprocessor
 from .types import Detection, Relationship
 from .viz.visualizer import Visualizer, VisualizerConfig
+from .graph.prompt import graph_to_triples_text, graph_to_prompt
+
+
+# GoM prompting style presets matching the paper's experimental configurations
+GOM_STYLE_PRESETS = {
+    # Set-of-Mark style (no relations, just segmented objects with IDs)
+    "som_text": {
+        "label_mode": "original",
+        "display_relationships": False,
+        "display_relation_labels": False,
+    },
+    "som_numeric": {
+        "label_mode": "numeric",
+        "display_relationships": False,
+        "display_relation_labels": False,
+    },
+    # GoM with relations but no relation labels (arrows only)
+    "gom_text": {
+        "label_mode": "original",
+        "display_relationships": True,
+        "display_relation_labels": False,
+    },
+    "gom_numeric": {
+        "label_mode": "numeric",
+        "display_relationships": True,
+        "display_relation_labels": False,
+    },
+    # Full GoM with relation labels (paper's best configuration for most tasks)
+    "gom_text_labeled": {
+        "label_mode": "original",
+        "display_relationships": True,
+        "display_relation_labels": True,
+    },
+    "gom_numeric_labeled": {
+        "label_mode": "numeric",
+        "display_relationships": True,
+        "display_relation_labels": True,
+    },
+}
+
+# Type alias for prompting styles
+GomStyle = Literal[
+    "som_text", "som_numeric",
+    "gom_text", "gom_numeric",
+    "gom_text_labeled", "gom_numeric_labeled"
+]
 
 
 class Gom:
@@ -37,9 +99,25 @@ class Gom:
         depth_fn(image: Image.Image) -> np.ndarray
             Returns normalized depth map (H, W) in [0, 1], higher = closer
 
+    GoM Visual Prompting Styles (from AAAI 2026 paper):
+        Use the `style` parameter to easily switch between paper configurations:
+
+        - "som_text": Set-of-Mark with textual IDs (oven_1, chair_2)
+        - "som_numeric": Set-of-Mark with numeric IDs (1, 2, 3)
+        - "gom_text": GoM with textual IDs + relation arrows (no labels)
+        - "gom_numeric": GoM with numeric IDs + relation arrows (no labels)
+        - "gom_text_labeled": GoM with textual IDs + labeled relations (best for VQA)
+        - "gom_numeric_labeled": GoM with numeric IDs + labeled relations (best for REC)
+
+        Or configure manually via label_mode, display_relationships, display_relation_labels.
+
     Example:
-        # Default models
+        # Default models with full GoM (textual IDs + labeled relations)
         gom = Gom()
+        result = gom.process("scene.jpg")
+
+        # Use specific GoM style from the paper
+        gom = Gom(style="gom_numeric_labeled")  # Best for RefCOCO tasks
         result = gom.process("scene.jpg")
 
         # With custom detection
@@ -47,8 +125,11 @@ class Gom:
             boxes, labels, scores = run_yolo(image)
             return boxes, labels, scores
 
-        gom = Gom(detect_fn=my_detector)
+        gom = Gom(detect_fn=my_detector, style="gom_text_labeled")
         result = gom.process("scene.jpg")
+
+        # Access textual scene graph for multimodal prompting
+        print(result["scene_graph_text"])  # Triples format for LLM prompts
     """
 
     def __init__(
@@ -58,6 +139,8 @@ class Gom:
         depth_fn: Optional[Callable[[Image.Image], np.ndarray]] = None,
         output_dir: str = "output",
         device: Optional[str] = None,
+        style: Optional[GomStyle] = None,
+        include_textual_sg: bool = True,
         **config_overrides,
     ):
         """
@@ -69,6 +152,16 @@ class Gom:
             depth_fn: Custom depth function. If None, uses Depth Anything V2.
             output_dir: Directory for output files.
             device: Compute device ("cuda", "mps", "cpu"). Auto-detected if None.
+            style: GoM visual prompting style preset. One of:
+                   - "som_text": Set-of-Mark with textual IDs
+                   - "som_numeric": Set-of-Mark with numeric IDs
+                   - "gom_text": GoM with textual IDs (arrows, no labels)
+                   - "gom_numeric": GoM with numeric IDs (arrows, no labels)
+                   - "gom_text_labeled": GoM with textual IDs + relation labels
+                   - "gom_numeric_labeled": GoM with numeric IDs + relation labels
+                   If None, uses default (gom_text_labeled style).
+            include_textual_sg: If True, includes textual scene graph representation
+                               in the output for multimodal (Visual + Textual SG) prompting.
             **config_overrides: Additional PreprocessorConfig overrides.
         """
         self.detect_fn = detect_fn
@@ -76,6 +169,17 @@ class Gom:
         self.depth_fn = depth_fn
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.include_textual_sg = include_textual_sg
+
+        # Apply style preset if specified
+        style_config = {}
+        if style is not None:
+            if style not in GOM_STYLE_PRESETS:
+                raise ValueError(
+                    f"Unknown GoM style '{style}'. "
+                    f"Available styles: {list(GOM_STYLE_PRESETS.keys())}"
+                )
+            style_config = GOM_STYLE_PRESETS[style].copy()
 
         # Build config with defaults matching run_pipeline_with_intermediates.py
         cfg_dict = {
@@ -127,6 +231,8 @@ class Gom:
         if device:
             cfg_dict["preproc_device"] = device
 
+        # Apply style preset first, then allow explicit overrides
+        cfg_dict.update(style_config)
         cfg_dict.update(config_overrides)
         self.config = PreprocessorConfig(**cfg_dict)
 
@@ -242,6 +348,44 @@ class Gom:
             )
             relationships = self._preprocessor.relations_inferencer.drop_inverse_duplicates(relationships)
 
+        # Build scene graph for textual representation
+        scene_graph = None
+        scene_graph_text = ""
+        scene_graph_prompt = ""
+        if self.include_textual_sg and boxes:
+            try:
+                from .graph.scene_graph import SceneGraphBuilder, SceneGraphConfig
+                # Use minimal config for fast graph building (no CLIP/depth recomputation)
+                sg_config = SceneGraphConfig(
+                    store_clip_embeddings=False,
+                    store_depth=False,
+                    store_color=False,
+                    add_scene_node=False,
+                )
+                builder = SceneGraphBuilder(config=sg_config)
+                scene_graph = builder.build(
+                    image=image_pil,
+                    boxes_xyxy=boxes,
+                    labels=labels,
+                    scores=scores,
+                )
+                # Add relationship edges with relation attribute
+                for rel in relationships:
+                    src_idx = rel.get("src_idx", -1)
+                    tgt_idx = rel.get("tgt_idx", -1)
+                    relation = rel.get("relation", "related_to")
+                    if 0 <= src_idx < len(boxes) and 0 <= tgt_idx < len(boxes):
+                        if scene_graph.has_edge(src_idx, tgt_idx):
+                            scene_graph[src_idx][tgt_idx]["relation"] = relation
+                        else:
+                            scene_graph.add_edge(src_idx, tgt_idx, relation=relation)
+                # Generate textual representations
+                scene_graph_text = graph_to_triples_text(scene_graph)
+                scene_graph_prompt = graph_to_prompt(scene_graph)
+            except Exception:
+                # Gracefully handle if scene graph building fails
+                pass
+
         result = {
             "boxes": boxes,
             "labels": labels,
@@ -249,6 +393,9 @@ class Gom:
             "masks": masks,
             "depth": depth,
             "relationships": relationships,
+            "scene_graph": scene_graph,
+            "scene_graph_text": scene_graph_text,  # Triples format for T^SG prompting
+            "scene_graph_prompt": scene_graph_prompt,  # Compact inline format
             "processing_time": time.time() - t0,
         }
 

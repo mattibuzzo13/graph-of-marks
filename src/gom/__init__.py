@@ -19,6 +19,31 @@ Quick Start:
     >>> gom = Gom(detect_fn=my_detector)
     >>> result = gom.process("scene.jpg")
 
+GoM Visual Prompting Styles (AAAI 2026 Paper):
+    The library supports different visual prompting configurations as described
+    in the Graph-of-Mark paper. Use the `style` parameter to switch:
+
+    >>> # SoM-style with numeric IDs (no relations)
+    >>> gom = Gom(style="som_numeric")
+    >>>
+    >>> # Full GoM with textual IDs and labeled relations (best for VQA)
+    >>> gom = Gom(style="gom_text_labeled")
+    >>>
+    >>> # Full GoM with numeric IDs and labeled relations (best for REC)
+    >>> gom = Gom(style="gom_numeric_labeled")
+
+    Available styles:
+        - "som_text": Set-of-Mark with textual IDs (oven_1, chair_2)
+        - "som_numeric": Set-of-Mark with numeric IDs (1, 2, 3)
+        - "gom_text": GoM with textual IDs + relation arrows
+        - "gom_numeric": GoM with numeric IDs + relation arrows
+        - "gom_text_labeled": GoM with textual IDs + labeled relations
+        - "gom_numeric_labeled": GoM with numeric IDs + labeled relations
+
+    For Visual + Textual SG prompting (multimodal), access:
+        result["scene_graph_text"]   # Triples format for LLM prompts
+        result["scene_graph_prompt"] # Compact inline format
+
 Custom Functions:
     detect_fn(image: Image) -> (boxes, labels, scores)
         boxes: List of [x1, y1, x2, y2]
@@ -33,11 +58,12 @@ Custom Functions:
 
 Exports:
     Gom, GraphOfMarks, create_pipeline
+    GOM_STYLE_PRESETS, GomStyle
     ImageGraphPreprocessor
     Detection, Relationship, Box, MaskDict
     PreprocessorConfig, SegmenterConfig, RelationsConfig, VisualizerConfig
 
-Version: 0.1.2
+Version: 0.1.3
 """
 from __future__ import annotations
 
@@ -46,6 +72,9 @@ __all__ = [
     "Gom",
     "GraphOfMarks",
     "create_pipeline",
+    # GoM style presets (AAAI 2026 paper configurations)
+    "GOM_STYLE_PRESETS",
+    "GomStyle",
     # Core pipeline (advanced)
     "ImageGraphPreprocessor",
     # Types
@@ -61,7 +90,7 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # Core public types
 from .types import Detection, Relationship, Box, MaskDict
@@ -79,4 +108,4 @@ from .config import (
 from .pipeline.preprocessor import ImageGraphPreprocessor
 
 # High-level API
-from .api import Gom, GraphOfMarks, create_pipeline
+from .api import Gom, GraphOfMarks, create_pipeline, GOM_STYLE_PRESETS, GomStyle

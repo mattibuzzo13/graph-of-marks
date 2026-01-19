@@ -1,257 +1,321 @@
 # Graph of Marks (GoM)
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.4+-red.svg)](https://pytorch.org/)
 [![PyPI version](https://badge.fury.io/py/graph-of-marks.svg)](https://badge.fury.io/py/graph-of-marks)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Overview
+**Graph of Marks (GoM)** transforms images into structured semantic graphs for visual scene understanding. It combines state-of-the-art detection, segmentation, depth estimation, and relationship extraction models to build comprehensive scene graphs.
 
-**Graph of Marks (GoM)** transforms images into structured semantic graphs for visual scene understanding. It combines multiple state-of-the-art detection and segmentation models to extract objects, relationships, and scene graphs, enabling both visual analysis and Visual Question Answering (VQA).
+## 📚 Paper
 
-## Installation
+This work has been accepted at **AAAI 2026**. The paper and supplementary material are available in the `paper/` directory.
 
-### From PyPI (Recommended)
+## 🛠️ Installation
+
+### From PyPI
 
 ```bash
 pip install graph-of-marks
 ```
 
 With optional dependencies:
+
 ```bash
-# Install with all features (detection, segmentation, VQA)
+# Install with all features
 pip install "graph-of-marks[all]"
 
 # Or install specific extras
-pip install "graph-of-marks[detection,segmentation,vqa]"
+pip install "graph-of-marks[detection,segmentation,vqa,depth]"
 ```
-
-> **Note:** For Detectron2 support, install separately:
-> ```bash
-> pip install git+https://github.com/facebookresearch/detectron2.git
-> ```
 
 ### From Source
 
 ```bash
-# Clone repository
 git clone https://github.com/disi-unibo-nlp/graph-of-marks.git
 cd graph-of-marks
 
-# Install PyTorch with CUDA support
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# Install dependencies
+# Install with all dependencies
 pip install -e ".[all]"
-
-# Download pretrained models
-bash download_ckpt.sh
 ```
 
-### Docker Install
+## 🚀 Quick Start
+
+### Python API
+
+```python
+from gom import Gom
+
+# Create pipeline with default models
+gom = Gom(output_dir="output")
+
+# Process an image
+result = gom.process("scene.jpg", question="What objects are in the room?")
+
+# Access results
+print(f"Detected {len(result['boxes'])} objects")
+print(f"Found {len(result['relationships'])} relationships")
+```
+
+### GoM Visual Prompting Styles (AAAI 2026 Paper)
+
+The library supports all visual prompting configurations from the paper:
+
+```python
+from gom import Gom
+
+# Use predefined style presets matching the paper's experiments
+gom = Gom(style="gom_text_labeled")  # Best for VQA tasks
+# or
+gom = Gom(style="gom_numeric_labeled")  # Best for RefCOCO/REC tasks
+
+# Available styles:
+# - "som_text": Set-of-Mark with textual IDs (oven_1, chair_2) - no relations
+# - "som_numeric": Set-of-Mark with numeric IDs (1, 2, 3) - no relations
+# - "gom_text": GoM with textual IDs + relation arrows (no labels)
+# - "gom_numeric": GoM with numeric IDs + relation arrows (no labels)
+# - "gom_text_labeled": GoM with textual IDs + labeled relations
+# - "gom_numeric_labeled": GoM with numeric IDs + labeled relations
+
+result = gom.process("scene.jpg")
+
+# For Visual + Textual SG prompting (multimodal), access:
+print(result["scene_graph_text"])    # Triples format for LLM prompts
+print(result["scene_graph_prompt"])  # Compact inline format
+```
+
+You can also configure manually:
+
+```python
+gom = Gom(
+    label_mode="numeric",           # "original" (text IDs) or "numeric"
+    display_relationships=True,      # Show relation arrows
+    display_relation_labels=True,    # Show labels on arrows
+)
+```
+
+### CLI Usage
 
 ```bash
-docker build -f build/Dockerfile -t gom:latest .
+# Image preprocessing
+gom-preprocess --input_file data.json --image_dir images/ --output_folder output/
+
+# Visual Question Answering
+gom-vqa --input_file vqa_data.json --model_name llava-hf/llava-1.5-7b-hf
 ```
 
-## How It Works
+### Custom Models
 
-GoM processes images through a 7-stage pipeline:
+GoM supports plugging in your own detection, segmentation, and depth models:
+
+```python
+from gom.api import Gom
+
+def my_detector(image):
+    # Your detection logic
+    boxes = [[100, 100, 200, 200]]
+    labels = ["person"]
+    scores = [0.95]
+    return boxes, labels, scores
+
+def my_segmenter(image, boxes):
+    # Your segmentation logic
+    import numpy as np
+    h, w = image.size[1], image.size[0]
+    masks = [np.ones((h, w), dtype=np.uint8) for _ in boxes]
+    return masks
+
+gom = Gom(
+    detect_fn=my_detector,
+    segment_fn=my_segmenter,
+    output_dir="custom_output"
+)
+result = gom.process("scene.jpg")
+```
+
+## 📁 Repository Structure
 
 ```
-Input Image
-    ↓
-1. DETECTION
-    Multiple detectors (YOLOv8, OWL-ViT, etc.) find objects
-    → Weighted Box Fusion (WBF) combines results
-    ↓
-2. SEGMENTATION  
-    SAM models generate precise masks for each object
-    → Smart GPU cache management
-    ↓
-3. RELATION EXTRACTION
-    Compute spatial (left/right/above), semantic (CLIP),
-    physical (support/occlusion), and depth (3D) relations
-    ↓
-4. SEMANTIC FILTERING
-    CLIP filters irrelevant objects based on question context
-    → Physics validation removes impossible relations
-    ↓
-5. SCENE GRAPH GENERATION
-    Build NetworkX graph: nodes = objects, edges = relations
-    ↓
-6. VISUALIZATION
-    Render annotated images (SVG/PNG/JPG) with labels,
-    masks, and relationship arrows
-    ↓
-7. VQA (Optional)
-    Pass scene graph + image to vision-language models
-    → Generate answers to questions
+graph-of-marks/
+├── src/gom/                    # Main package
+│   ├── api.py                  # High-level API (Gom class)
+│   ├── config.py               # Configuration management
+│   ├── cli/                    # Command-line interface
+│   │   ├── preprocess.py       # gom-preprocess command
+│   │   └── vqa.py              # gom-vqa command
+│   ├── detectors/              # Object detection models
+│   │   ├── yolov8.py           # YOLOv8 detector
+│   │   ├── owlvit.py           # OWL-ViT detector
+│   │   ├── grounding_dino.py   # GroundingDINO detector
+│   │   └── detectron2.py       # Detectron2 detector
+│   ├── segmentation/           # Segmentation models
+│   │   ├── sam1.py             # SAM 1 segmentation
+│   │   ├── sam2.py             # SAM 2 segmentation
+│   │   ├── samhq.py            # SAM-HQ segmentation
+│   │   └── fastsam.py          # FastSAM segmentation
+│   ├── fusion/                 # Detection fusion strategies
+│   │   ├── wbf.py              # Weighted Box Fusion
+│   │   ├── nms.py              # Non-Maximum Suppression
+│   │   └── cascade.py          # Cascade fusion
+│   ├── relations/              # Relationship extraction
+│   │   ├── inference.py        # Main relationship inferencer
+│   │   ├── clip_rel.py         # CLIP-based semantic relations
+│   │   ├── physics.py          # Physical relations
+│   │   ├── spatial_3d.py       # 3D spatial relations
+│   │   └── geometry/           # Geometric computations
+│   ├── graph/                  # Scene graph construction
+│   │   ├── scene_graph.py      # Graph building utilities
+│   │   └── prompt.py           # Graph-to-text prompts
+│   ├── viz/                    # Visualization
+│   │   └── visualizer.py       # Image rendering
+│   ├── vqa/                    # Visual Question Answering
+│   │   ├── models.py           # VLM model support
+│   │   └── runner.py           # VQA inference runner
+│   ├── utils/                  # Utilities
+│   │   ├── depth.py            # Depth estimation (v1)
+│   │   ├── depth_v2.py         # Depth Anything V2
+│   │   ├── clip_utils.py       # CLIP utilities
+│   │   └── gpu_memory.py       # GPU memory management
+│   └── pipeline/               # Processing pipeline
+│       └── preprocessor.py     # Main preprocessing pipeline
+├── examples/                   # Usage examples
+│   ├── README.md               # Examples documentation
+│   ├── quickstart.py           # Quick start script
+│   └── demo.ipynb              # Jupyter notebook demo
+├── scripts/                    # Inference scripts
+│   ├── run_vqa_inference.py    # VQA inference script
+│   └── run_ref_inference.py    # Referring expression script
+├── external_libs/              # External dependencies
+│   └── sam2/                   # SAM2 library
+├── images/                     # Sample images
+├── paper/                      # AAAI 2026 paper PDFs
+├── pyproject.toml              # Package configuration
+├── setup.py                    # Setup script
+└── Makefile                    # Build/development commands
 ```
+
+## 🔧 Pipeline Overview
+
+The GoM pipeline processes images through the following stages:
+
+1. **Detection** → Multiple detectors (YOLOv8, OWL-ViT, GroundingDINO, Detectron2)
+2. **Fusion** → Weighted Box Fusion (WBF) combines predictions
+3. **Segmentation** → SAM/SAM2/SAM-HQ/FastSAM generates masks
+4. **Depth Estimation** → Depth Anything V2 for 3D understanding
+5. **Relationship Extraction** → Spatial, semantic, and physical relations
+6. **Scene Graph** → NetworkX graph with nodes (objects) and edges (relations)
+7. **Visualization** → Annotated output images (PNG/SVG/JPG)
 
 ### Output Files
 
-For each image, GoM generates:
-- `{id}_detections.json` - Bounding boxes, labels, confidence scores
-- `{id}_relations.json` - All detected relationships
-- `{id}_scene_graph.json` - Graph structure (nodes + edges)
-- `{id}_viz.{svg,png,jpg}` - Annotated visualization
+For each processed image, GoM generates:
+- `{name}_01_detections.png` - Bounding boxes visualization
+- `{name}_02_segmentation.png` - Segmentation masks overlay
+- `{name}_03_depth.png` - Depth map
+- `{name}_04_output.png` - Final composite with relations
+- `{name}_05_graph.json` - Scene graph structure
 
-## Quick Start
+### Output Dictionary
 
-### Basic Image Preprocessing
+The `process()` method returns a dictionary with:
 
-```bash
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --image_dir images/ \
-  --preproc_folder output/
+```python
+result = {
+    "boxes": [[x1, y1, x2, y2], ...],     # Bounding boxes
+    "labels": ["person", "chair", ...],    # Object labels
+    "scores": [0.95, 0.87, ...],           # Confidence scores
+    "masks": [np.ndarray, ...],            # Segmentation masks
+    "depth": np.ndarray,                   # Depth map
+    "relationships": [...],                 # Spatial relations
+    "scene_graph": nx.DiGraph,             # NetworkX graph
+    "scene_graph_text": "Triples:...",     # T^SG for LLM prompts
+    "scene_graph_prompt": "0:person...",   # Compact format
+    "processing_time": 12.5,               # Time in seconds
+}
 ```
 
-### Visual Question Answering
+## 🤖 Supported Models
 
-```bash
-python src/vqa.py \
-  --input_file vqa_data.json \
-  --model_name llava-hf/llava-1.5-7b-hf \
-  --include_scene_graph
-```
+### Detection
+| Model | Type | Key Feature |
+|-------|------|-------------|
+| YOLOv8 | Real-time | Fast inference |
+| OWL-ViT | Open-vocabulary | Text-guided detection |
+| GroundingDINO | Open-vocabulary | Text-guided detection |
+| Detectron2 | Instance | High accuracy |
 
-### Docker Usage
-
-```bash
-docker run --rm --gpus all \
-  -v $(pwd):/workdir \
-  gom:latest python src/image_preprocessor.py \
-    --input_file data.json
-```
-
-## 📖 Advanced Usage
-
-### Custom Detectors & Fusion
-
-```bash
-# Use specific detectors with custom IoU threshold
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --detectors owlvit yolov8 \
-  --fusion_iou_threshold 0.45
-```
-
-### High-Quality Segmentation
-
-```bash
-# SAM-HQ with smart caching
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --sam_version sam_hq \
-  --seg_smart_cache
-```
-
-### CLIP Semantic Filtering
-
-```bash
-# Filter objects by question relevance
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --enable_q_filter \
-  --clip_pruning_threshold 0.25
-```
-
-### Custom Visualizations
-
-```bash
-# Transparent SVG with segmentation masks only
-python src/image_preprocessor.py \
-  --input_file data.json \
-  --show_segmentation \
-  --no_display_relationships \
-  --save_without_background \
-  --output_format svg
-```
-
-## Components Overview
-
-### Detection Models
-- **YOLOv8**: Fast real-time detection
-- **OWL-ViT**: Open-vocabulary detection
-- **Detectron2**: High-accuracy instance detection
-- **GroundingDINO**: Text-guided detection
-
-**Fusion:** Weighted Box Fusion (WBF) combines predictions with confidence-based weights
-
-### Segmentation Models
-- **SAM 1/2**: Meta's Segment Anything
-- **SAM-HQ**: High-quality segmentation
-- **FastSAM**: Lightweight alternative
-
-**Optimization:** Smart GPU cache with 80% threshold, adaptive memory management
-
-### Relationship Types
-- **Spatial (2D)**: left, right, above, below, near, far
-- **Semantic**: CLIP-based object similarity
-- **Physical**: support, containment, occlusion (size-validated)
-- **Depth (3D)**: front, behind (Depth Anything V2)
+### Segmentation
+| Model | Quality | Speed |
+|-------|---------|-------|
+| SAM-HQ | Highest | Slow |
+| SAM 2 | High | Medium |
+| SAM 1 | Good | Medium |
+| FastSAM | Lower | Fast |
 
 ### VQA Models
-- **LLaVA** 1.5/1.6 (7B-34B)
-- **BLIP-2** (2.7B-6.7B)
-- **Qwen2.5-VL** (7B-72B)
-- **Gemma-3** (4B)
-- **LLaMA-v-o1** (11B)
-- **Others**: Gemma-2, Pixtral, Llama-3.2-Vision
+- LLaVA 1.5/1.6 (7B-34B)
+- BLIP-2 (2.7B-6.7B)
+- Qwen2.5-VL (7B-72B)
+- Gemma-3 (4B)
+- LLaMA-v-o1 (11B)
 
-## Key Parameters
+## ⚙️ Key Configuration Options
+
+### GoM Visual Prompting Styles (Paper Table 2)
+
+| Style Preset | Label Mode | Relations | Relation Labels | Use Case |
+|--------------|------------|-----------|-----------------|----------|
+| `som_text` | Textual (oven_1) | ❌ | ❌ | Set-of-Mark baseline |
+| `som_numeric` | Numeric (1, 2) | ❌ | ❌ | Set-of-Mark baseline |
+| `gom_text` | Textual | ✅ | ❌ | GoM with arrows only |
+| `gom_numeric` | Numeric | ✅ | ❌ | GoM with arrows only |
+| `gom_text_labeled` | Textual | ✅ | ✅ | **Best for VQA** |
+| `gom_numeric_labeled` | Numeric | ✅ | ✅ | **Best for RefCOCO** |
+
+### Pipeline Configuration
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `--detectors` | Detection models to use | `owlvit yolov8` |
-| `--sam_version` | Segmentation model | `sam1` |
-| `--fusion_iou_threshold` | IoU for WBF fusion | `0.45` |
-| `--enable_q_filter` | CLIP semantic filtering | `False` |
-| `--clip_pruning_threshold` | Relevance threshold | `0.25` |
-| `--seg_smart_cache` | Adaptive GPU cache | `False` |
-| `--output_format` | Output format | `svg` |
-| `--display_labels` | Show object labels | `True` |
-| `--display_relationships` | Show relations | `True` |
-| `--show_segmentation` | Show masks | `True` |
+| `detectors_to_use` | Detection models | `("yolov8",)` |
+| `sam_version` | Segmentation model | `"hq"` |
+| `wbf_iou_threshold` | IoU for WBF fusion | `0.55` |
+| `label_mode` | Label format | `"original"` |
+| `display_labels` | Show object labels | `True` |
+| `display_relationships` | Show relations | `True` |
+| `display_relation_labels` | Show labels on arrows | `True` |
+| `show_segmentation` | Show masks | `True` |
+| `output_format` | Output format | `"png"` |
 
-**Full documentation:** `python src/image_preprocessor.py --help`
+Full configuration options available in `src/gom/config.py`.
 
-## Python API
+## 📖 Examples
 
-```python
-from gom.pipeline.preprocessor import ImagePreprocessor
-from gom.config import GoMConfig
+See the [`examples/`](examples/) directory for:
+- **`quickstart.py`** - Basic usage and installation verification
+- **`demo.ipynb`** - Comprehensive Jupyter notebook with all features
+- **Custom model integration** - Templates for plugging in your own models
 
-# Configure pipeline
-config = GoMConfig(
-    detectors=["owlvit", "yolov8"],
-    sam_version="sam_hq",
-    enable_q_filter=True,
-    clip_pruning_threshold=0.25
-)
-
-# Process image
-preprocessor = ImagePreprocessor(config)
-result = preprocessor.process_image(
-    image_path="room.jpg",
-    question="What objects are in the room?"
-)
-
-# Access results
-print(f"Detected {len(result.objects)} objects")
-print(f"Found {len(result.relations)} relationships")
-print(f"Scene graph: {result.scene_graph}")
-```
-
-## Benchmarks & Datasets
-
-### Supported Datasets
-Download scripts available for: **COCO**, **GQA**, **RefCOCO/+/g**, **VQA v2**, **TextVQA**
+## 🐳 Docker
 
 ```bash
-bash scripts/download/download_coco.sh /path/to/data
-bash scripts/download/download_gqa.sh /path/to/data
-bash scripts/download/download_vqa.sh /path/to/data
+# Build
+docker build -f build/Dockerfile -t gom:latest .
+
+# Run
+docker run --rm --gpus all -v $(pwd):/workdir gom:latest \
+    gom-preprocess --input_file data.json
 ```
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## 📝 Citation
+
+If you use Graph of Marks in your research, please cite our AAAI 2026 paper.
+
+## 🔗 Links
+
+- [GitHub Repository](https://github.com/disi-unibo-nlp/graph-of-marks)
+- [PyPI Package](https://pypi.org/project/graph-of-marks/)
+- [Bug Reports](https://github.com/disi-unibo-nlp/graph-of-marks/issues)
