@@ -89,7 +89,7 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.19"
+__version__ = "1.1.0"
 
 # High-level API
 from .api import GOM_STYLE_PRESETS, GoM, Gom, GomStyle, GraphOfMarks, ProcessingConfig, create_pipeline, run
