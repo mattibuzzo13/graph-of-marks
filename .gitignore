@@ -52,3 +52,5 @@ demo_output/
 external_libs/
 tests/
 scripts_test/
+
+.coverage
