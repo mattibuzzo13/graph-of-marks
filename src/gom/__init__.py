@@ -89,7 +89,7 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 # Core public types
 from .types import Detection, Relationship, Box, MaskDict

@@ -2,7 +2,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![PyPI version](https://badge.fury.io/py/graph-of-marks.svg)](https://badge.fury.io/py/graph-of-marks)
+[![PyPI version](https://img.shields.io/pypi/v/graph-of-marks.svg)](https://pypi.org/project/graph-of-marks/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Graph of Marks (GoM)** is a visual prompting framework that transforms images into structured semantic graphs for enhanced visual scene understanding. The system integrates state-of-the-art object detection, instance segmentation, depth estimation, and relationship extraction models to construct comprehensive scene graphs that can be used as visual prompts for Multimodal Language Models (MLMs).
