@@ -8,7 +8,7 @@
 **Graph of Marks (GoM)** is a visual prompting framework that transforms images into structured semantic graphs for enhanced visual scene understanding. The system integrates state-of-the-art object detection, instance segmentation, depth estimation, and relationship extraction models to construct comprehensive scene graphs that can be used as visual prompts for Multimodal Language Models (MLMs).
 
 <p align="center">
-  <img src="assets/gom_lab_obj_lab_rel.png" alt="Graph of Marks Output Example" width="600"/>
+  <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gom_lab_obj_lab_rel.png" alt="Graph of Marks Output Example" width="600"/>
 </p>
 <p align="center"><em>Example output showing detected objects with segmentation masks and spatial relationships.</em></p>
 
@@ -143,10 +143,10 @@ The GoM pipeline processes images through the following stages:
 | Graph Construction | Scene graph generation | NetworkX |
 
 <p align="center">
-  <img src="assets/gqa_sample_01_detections.png" alt="Detection Stage" width="280"/>
-  <img src="assets/gqa_sample_03_depth.png" alt="Depth Estimation" width="280"/>
-  <img src="assets/gqa_sample_02_segmentation.png" alt="Segmentation Stage" width="280"/>
-  <img src="assets/gqa_sample_04_output.png" alt="Final GoM output" width="280"/>
+  <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gqa_sample_01_detections.png" alt="Detection Stage" width="280"/>
+  <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gqa_sample_03_depth.png" alt="Depth Estimation" width="280"/>
+  <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gqa_sample_02_segmentation.png" alt="Segmentation Stage" width="280"/>
+  <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gqa_sample_04_output.png" alt="Final GoM output" width="280"/>
 </p>
 <p align="center"><em>Pipeline stages: object detection, instance segmentation, depth estimation.</em></p>
 
