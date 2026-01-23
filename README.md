@@ -44,10 +44,10 @@ pip install -e ".[all]"
 ### Python API
 
 ```python
-from gom import Gom
+from gom import GoM
 
 # Create pipeline with default models
-gom = Gom(output_dir="output")
+gom = GoM(output_dir="output")
 
 # Process an image
 result = gom.process("scene.jpg", question="What objects are in the room?")
@@ -62,12 +62,12 @@ print(f"Found {len(result['relationships'])} relationships")
 The library supports all visual prompting configurations from the paper:
 
 ```python
-from gom import Gom
+from gom import GoM
 
 # Use predefined style presets matching the paper's experiments
-gom = Gom(style="gom_text_labeled")  # Best for VQA tasks
+gom = GoM(style="gom_text_labeled")  # Best for VQA tasks
 # or
-gom = Gom(style="gom_numeric_labeled")  # Best for RefCOCO/REC tasks
+gom = GoM(style="gom_numeric_labeled")  # Best for RefCOCO tasks
 
 # Available styles:
 # - "som_text": Set-of-Mark with textual IDs (oven_1, chair_2) - no relations
@@ -87,7 +87,7 @@ print(result["scene_graph_prompt"])  # Compact inline format
 You can also configure manually:
 
 ```python
-gom = Gom(
+gom = GoM(
     label_mode="numeric",           # "original" (text IDs) or "numeric"
     display_relationships=True,      # Show relation arrows
     display_relation_labels=True,    # Show labels on arrows
@@ -109,7 +109,7 @@ gom-vqa --input_file vqa_data.json --model_name llava-hf/llava-1.5-7b-hf
 GoM supports plugging in your own detection, segmentation, and depth models:
 
 ```python
-from gom.api import Gom
+from gom import GoM
 
 def my_detector(image):
     # Your detection logic
@@ -125,7 +125,7 @@ def my_segmenter(image, boxes):
     masks = [np.ones((h, w), dtype=np.uint8) for _ in boxes]
     return masks
 
-gom = Gom(
+gom = GoM(
     detect_fn=my_detector,
     segment_fn=my_segmenter,
     output_dir="custom_output"
@@ -138,7 +138,7 @@ result = gom.process("scene.jpg")
 ```
 graph-of-marks/
 ├── src/gom/                    # Main package
-│   ├── api.py                  # High-level API (Gom class)
+│   ├── api.py                  # High-level API (GoM class)
 │   ├── config.py               # Configuration management
 │   ├── cli/                    # Command-line interface
 │   │   ├── preprocess.py       # gom-preprocess command

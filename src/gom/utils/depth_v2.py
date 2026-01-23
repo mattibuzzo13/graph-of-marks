@@ -413,7 +413,7 @@ class DepthEstimatorV2:
                 try:
                     print("[DEPTH] Compiling model with torch.compile...")
                     self.model = torch.compile(self.model, mode="reduce-overhead")
-                    print("[DEPTH] ✓ torch.compile enabled (+30% speedup)")
+                    print("[DEPTH] ✓ torch.compile enabled")
                 except Exception as e:
                     print(f"[DEPTH] torch.compile failed (skipping): {e}")
             

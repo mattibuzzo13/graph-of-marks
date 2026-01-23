@@ -144,6 +144,13 @@ class VisualizerConfig:
         Spatial Relationship Rendering:
             on_top_gap_px: Vertical gap for "on_top_of" relationships (default: 8)
             on_top_horiz_overlap: Required horizontal overlap ratio (default: 0.35)
+
+        Auto-Scaling:
+            auto_scale_styles: Enable automatic font/arrow scaling for image size (default: True)
+            style_ref_px: Reference image size for scaling calculations (default: 1000)
+            style_ref_dpi: Reference DPI for scaling calculations (default: 100)
+            style_scale_min: Minimum scale factor (default: 0.5)
+            style_scale_max: Maximum scale factor (default: 2.0)
     """
     
     # Content control flags
@@ -162,6 +169,7 @@ class VisualizerConfig:
     use_batch_text_renderer: bool = True
 
     # Typography and visual style
+    font_family: str = "DejaVu Sans"  # Font family for all text elements
     obj_fontsize_inside: int = 12
     obj_fontsize_outside: int = 12
     rel_fontsize: int = 10
@@ -216,6 +224,13 @@ class VisualizerConfig:
     # Special knobs
     on_top_gap_px: int = 8
     on_top_horiz_overlap: float = 0.35
+
+    # Auto-scaling for different image sizes/resolutions
+    auto_scale_styles: bool = True
+    style_ref_px: int = 1000  # Reference image size for scaling
+    style_ref_dpi: int = 100  # Reference DPI
+    style_scale_min: float = 0.5  # Minimum scale factor
+    style_scale_max: float = 2.0  # Maximum scale factor
 
 
 # ===============================================================

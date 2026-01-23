@@ -3023,16 +3023,30 @@ class ImageGraphPreprocessor:
 
 
         # Espansione automatica con WordNet se disponibile
-        try:
-            from nltk.corpus import wordnet as wn
-            def get_synonyms(word):
+        def get_synonyms(word):
+            """Get synonyms from WordNet, gracefully handling missing corpus."""
+            try:
+                from nltk.corpus import wordnet as wn
                 syns = set()
                 for syn in wn.synsets(word):
                     for lemma in syn.lemmas():
                         syns.add(lemma.name().replace("_", " "))
                 return syns
-        except Exception:
-            def get_synonyms(word):
+            except LookupError:
+                # WordNet corpus not downloaded - try to download it once
+                try:
+                    import nltk
+                    nltk.download('wordnet', quiet=True)
+                    nltk.download('omw-1.4', quiet=True)  # Open Multilingual Wordnet
+                    from nltk.corpus import wordnet as wn
+                    syns = set()
+                    for syn in wn.synsets(word):
+                        for lemma in syn.lemmas():
+                            syns.add(lemma.name().replace("_", " "))
+                    return syns
+                except Exception:
+                    return set()
+            except Exception:
                 return set()
 
         obj_terms = set(unigrams)

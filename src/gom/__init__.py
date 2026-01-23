@@ -4,33 +4,34 @@ Graph of Marks (GoM) - Visual Scene Understanding Pipeline
 Extracts objects, masks, depth, and relationships from images.
 Supports custom functions for detection, segmentation, and depth.
 
+Key Design Principle:
+    Models are loaded ONCE at initialization. Processing configuration
+    (thresholds, limits, visualization options) can be changed per-call
+    via ProcessingConfig, similar to how LLM inference uses SamplingParams.
+
 Quick Start:
-    >>> from gom import Gom
+    >>> from gom import GoM, ProcessingConfig
     >>>
-    >>> # Default models (YOLOv8 + SAM-HQ + Depth Anything V2)
-    >>> gom = Gom()
+    >>> # Initialize once (loads models)
+    >>> gom = GoM()
+    >>>
+    >>> # Process with default settings
     >>> result = gom.process("scene.jpg")
     >>>
-    >>> # Custom detection function
-    >>> def my_detector(image):
-    ...     boxes, labels, scores = run_yolo(image)
-    ...     return boxes, labels, scores
-    >>>
-    >>> gom = Gom(detect_fn=my_detector)
-    >>> result = gom.process("scene.jpg")
+    >>> # Process with different configurations (no model reload!)
+    >>> result = gom.process("scene.jpg", config=ProcessingConfig(threshold=0.8))
+    >>> result = gom.process("scene.jpg", config=ProcessingConfig(style="gom_numeric_labeled"))
+    >>> result = gom.process("scene.jpg", config=ProcessingConfig(
+    ...     max_detections=5,
+    ...     max_relations_per_object=2,
+    ...     display_relationships=False
+    ... ))
 
 GoM Visual Prompting Styles (AAAI 2026 Paper):
-    The library supports different visual prompting configurations as described
-    in the Graph-of-Mark paper. Use the `style` parameter to switch:
+    Use the `style` parameter in ProcessingConfig to switch configurations:
 
-    >>> # SoM-style with numeric IDs (no relations)
-    >>> gom = Gom(style="som_numeric")
-    >>>
-    >>> # Full GoM with textual IDs and labeled relations (best for VQA)
-    >>> gom = Gom(style="gom_text_labeled")
-    >>>
-    >>> # Full GoM with numeric IDs and labeled relations (best for REC)
-    >>> gom = Gom(style="gom_numeric_labeled")
+    >>> config = ProcessingConfig(style="gom_text_labeled")  # Best for VQA
+    >>> config = ProcessingConfig(style="gom_numeric_labeled")  # Best for REC
 
     Available styles:
         - "som_text": Set-of-Mark with textual IDs (oven_1, chair_2)
@@ -39,10 +40,6 @@ GoM Visual Prompting Styles (AAAI 2026 Paper):
         - "gom_numeric": GoM with numeric IDs + relation arrows
         - "gom_text_labeled": GoM with textual IDs + labeled relations
         - "gom_numeric_labeled": GoM with numeric IDs + labeled relations
-
-    For Visual + Textual SG prompting (multimodal), access:
-        result["scene_graph_text"]   # Triples format for LLM prompts
-        result["scene_graph_prompt"] # Compact inline format
 
 Custom Functions:
     detect_fn(image: Image) -> (boxes, labels, scores)
@@ -57,21 +54,23 @@ Custom Functions:
         Returns normalized depth map (H, W) in [0, 1]
 
 Exports:
-    Gom, GraphOfMarks, create_pipeline
+    GoM, ProcessingConfig, create_pipeline
     GOM_STYLE_PRESETS, GomStyle
-    ImageGraphPreprocessor
+    ImageGraphPreprocessor, PreprocessorConfig
     Detection, Relationship, Box, MaskDict
-    PreprocessorConfig, SegmenterConfig, RelationsConfig, VisualizerConfig
-
-Version: 0.1.3
+    SegmenterConfig, RelationsConfig, VisualizerConfig
 """
 from __future__ import annotations
 
 __all__ = [
     # High-level API
+    "GoM",
+    "ProcessingConfig",
+    "create_pipeline",
+    "run",
+    # Backward compatibility aliases
     "Gom",
     "GraphOfMarks",
-    "create_pipeline",
     # GoM style presets (AAAI 2026 paper configurations)
     "GOM_STYLE_PRESETS",
     "GomStyle",
@@ -90,7 +89,7 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.4"
+__version__ = "0.1.16"
 
 # Core public types
 from .types import Detection, Relationship, Box, MaskDict
@@ -108,4 +107,4 @@ from .config import (
 from .pipeline.preprocessor import ImageGraphPreprocessor
 
 # High-level API
-from .api import Gom, GraphOfMarks, create_pipeline, GOM_STYLE_PRESETS, GomStyle
+from .api import GoM, Gom, GraphOfMarks, create_pipeline, run, GOM_STYLE_PRESETS, GomStyle, ProcessingConfig
