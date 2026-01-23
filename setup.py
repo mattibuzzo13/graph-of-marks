@@ -88,17 +88,17 @@ for k, v in extras_require.items():
 extras_require["all-mps"] = list(set(all_mps))
 
 setup(
-    name="graph-of-marks",
+    name="graph-of-mark",
     version="1.0.1",
     author="DISI-UNIBO-NLP",
     author_email="",
     description="Visual scene understanding pipeline with multi-model detection, segmentation, and scene graph generation",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/disi-unibo-nlp/graph-of-marks",
+    url="https://github.com/disi-unibo-nlp/graph-of-mark",
     project_urls={
-        "Bug Reports": "https://github.com/disi-unibo-nlp/graph-of-marks/issues",
-        "Source": "https://github.com/disi-unibo-nlp/graph-of-marks",
+        "Bug Reports": "https://github.com/disi-unibo-nlp/graph-of-mark/issues",
+        "Source": "https://github.com/disi-unibo-nlp/graph-of-mark",
     },
     package_dir={"": "src"},
     packages=find_packages(where="src"),

@@ -1,11 +1,11 @@
-# Graph of Marks (GoM)
+# Graph of Mark (GoM)
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![PyPI version](https://img.shields.io/pypi/v/graph-of-marks.svg)](https://pypi.org/project/graph-of-marks/)
+[![PyPI version](https://img.shields.io/pypi/v/graph-of-mark.svg)](https://pypi.org/project/graph-of-marks/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Graph of Marks (GoM)** is a visual prompting framework that transforms images into structured semantic graphs for enhanced visual scene understanding. The system integrates state-of-the-art object detection, instance segmentation, depth estimation, and relationship extraction models to construct comprehensive scene graphs that can be used as visual prompts for Multimodal Language Models (MLMs).
+**Graph of Mark (GoM)** is a visual prompting framework that transforms images into structured semantic graphs for enhanced visual scene understanding. The system integrates state-of-the-art object detection, instance segmentation, depth estimation, and relationship extraction models to construct comprehensive scene graphs that can be used as visual prompts for Multimodal Language Models (MLMs).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/disi-unibo-nlp/graph-of-marks/main/assets/gom_lab_obj_lab_rel.png" alt="Graph of Marks Output Example" width="600"/>
@@ -18,7 +18,7 @@
 
 This work has been accepted at the **40th Annual AAAI Conference on Artificial Intelligence (AAAI 2026)**. The paper and supplementary materials are available in the [`paper/`](paper/) directory.
 
-If you use Graph of Marks in your research, please cite:
+If you use Graph of Mark in your research, please cite:
 
 ```bibtex
 @inproceedings{gom2026aaai,
@@ -40,14 +40,14 @@ Visit our research group website at: https://disi-unibo-nlp.github.io
 ### From PyPI
 
 ```bash
-pip install graph-of-marks
+pip install graph-of-mark
 ```
 
 With optional dependencies:
 
 ```bash
 # Install with all features
-pip install "graph-of-marks[all]"
+pip install "graph-of-mark[all]"
 ```
 
 ### From Source
@@ -321,5 +321,5 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 ## Links
 
 - [GitHub Repository](https://github.com/disi-unibo-nlp/graph-of-marks)
-- [PyPI Package](https://pypi.org/project/graph-of-marks/)
+- [PyPI Package](https://pypi.org/project/graph-of-mark/)
 - [Issue Tracker](https://github.com/disi-unibo-nlp/graph-of-marks/issues)
