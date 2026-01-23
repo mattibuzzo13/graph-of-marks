@@ -16,7 +16,7 @@
 
 ## Publication
 
-This work has been accepted at the **38th Annual AAAI Conference on Artificial Intelligence (AAAI 2026)**. The paper and supplementary materials are available in the [`paper/`](paper/) directory.
+This work has been accepted at the **40th Annual AAAI Conference on Artificial Intelligence (AAAI 2026)**. The paper and supplementary materials are available in the [`paper/`](paper/) directory.
 
 If you use Graph of Marks in your research, please cite:
 
@@ -30,6 +30,8 @@ If you use Graph of Marks in your research, please cite:
   year         = {2026},
 }
 ```
+
+Visit our research group website at: https://disi-unibo-nlp.github.io
 
 ---
 
