@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple, Union
+
 import numpy as np
 
 try:
@@ -425,7 +426,7 @@ def nms(
 
 
 # ------------------------------------------------------------------------------
-# 🚀 SOTA NMS Methods (2024)
+# SOTA NMS Methods (2024)
 # ------------------------------------------------------------------------------
 
 def soft_nms_gaussian(

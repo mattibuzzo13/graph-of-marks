@@ -46,8 +46,10 @@ See Also:
     - gom.vqa.preproc: Preprocessing functions
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
+
 
 @dataclass
 class VQAExample:

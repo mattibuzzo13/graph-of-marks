@@ -183,13 +183,13 @@ See Also:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-import json
-import numpy as np
-from PIL import Image
 import base64
+import json
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from PIL import Image
 
 
 @dataclass
@@ -474,7 +474,7 @@ class LLMRelationInferencer:
         """Call LLaVA (local inference)."""
         try:
             import torch
-            
+
             # Prepare inputs
             inputs = self._llava_processor(
                 text=prompt,
@@ -644,7 +644,7 @@ class LLMRelationInferencer:
     ) -> str:
         """Generate cache key."""
         import hashlib
-        
+
         # Hash image
         buffered = BytesIO()
         image.save(buffered, format="PNG")

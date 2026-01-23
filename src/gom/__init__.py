@@ -89,16 +89,16 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "0.1.17"
+__version__ = "0.1.19"
 
-# Core public types
-from .types import Detection, Relationship, Box, MaskDict
+# High-level API
+from .api import GOM_STYLE_PRESETS, GoM, Gom, GomStyle, GraphOfMarks, ProcessingConfig, create_pipeline, run
 
 # Configuration objects
 from .config import (
     PreprocessorConfig,
-    SegmenterConfig,
     RelationsConfig,
+    SegmenterConfig,
     VisualizerConfig,
     default_config,
 )
@@ -106,5 +106,5 @@ from .config import (
 # Pipeline (advanced users)
 from .pipeline.preprocessor import ImageGraphPreprocessor
 
-# High-level API
-from .api import GoM, Gom, GraphOfMarks, create_pipeline, run, GOM_STYLE_PRESETS, GomStyle, ProcessingConfig
+# Core public types
+from .types import Box, Detection, MaskDict, Relationship

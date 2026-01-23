@@ -1,12 +1,12 @@
 # igp/utils/gpu_memory.py
-# 🚀 GPU Memory Management and Optimization
+# GPU Memory Management and Optimization
 
 from __future__ import annotations
 
 import gc
-from contextlib import contextmanager
-from typing import Optional, List, Any
 import warnings
+from contextlib import contextmanager
+from typing import Any, List, Optional
 
 
 class GPUMemoryManager:

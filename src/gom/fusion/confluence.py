@@ -1,6 +1,6 @@
 # igp/fusion/confluence.py
 """
-🚀 Confluence Fusion: IoU + Objectness Combined Fusion (CVPR 2021)
+Confluence Fusion: IoU + Objectness Combined Fusion (CVPR 2021)
 
 Advanced fusion method that combines:
 1. Spatial IoU overlap
@@ -26,9 +26,10 @@ Performance:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
-import numpy as np
 import logging
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 

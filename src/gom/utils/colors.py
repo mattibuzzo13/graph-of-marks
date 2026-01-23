@@ -43,9 +43,8 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Tuple
-
 import colorsys
+from typing import Dict, Iterable, List, Tuple
 
 try:
     import matplotlib.colors as mcolors
@@ -55,13 +54,13 @@ except Exception:
 
 
 # Distinct, reproducible color palette (hex). Suitable for categorical labels.
-# Espansa a 40 colori per supportare più classi senza ripetizioni
+# Expanded to 40 colors to support more classes without repetitions
 BASIC_COLORS: List[str] = [
     "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
     "#ffff33", "#a65628", "#f781bf", "#999999", "#1f78b4",
     "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#cab2d6",
     "#6a3d9a", "#b2df8a", "#ffed6f", "#a6cee3", "#b15928",
-    # 20 colori aggiuntivi per evitare ripetizioni
+    # 20 additional colors to avoid repetitions
     "#8dd3c7", "#ffffb3", "#bebada", "#fb8072", "#80b1d3",
     "#fdb462", "#b3de69", "#fccde5", "#d9d9d9", "#bc80bd",
     "#ccebc5", "#ffed6f", "#e78ac3", "#a6d854", "#ffd92f",

@@ -48,9 +48,6 @@ With optional dependencies:
 ```bash
 # Install with all features
 pip install "graph-of-marks[all]"
-
-# Or install specific components
-pip install "graph-of-marks[detection,segmentation,vqa,depth]"
 ```
 
 ### From Source
@@ -65,20 +62,29 @@ pip install -e ".[all]"
 
 ## Quick Start
 
+Check out `examples/demo_gom.ipynb` for detailed examples on how to use GoM.
+
 ### Python API
 
 ```python
-from gom import GoM
+from gom import GoM, ProcessingConfig
 
 # Initialize the pipeline
-gom = GoM(output_dir="output")
+pipeline = GoM(device="cuda")  # or "mps" for Apple Silicon, "cpu" for CPU
 
-# Process an image
-result = gom.process("scene.jpg", question="What objects are in the room?")
+# Process an image with a question
+config = ProcessingConfig(
+    question="What objects are in the room?",
+    style="gom_text_labeled",
+)
+result = pipeline.process("scene.jpg", config=config, save=False)
 
 # Access results
 print(f"Detected {len(result['boxes'])} objects")
 print(f"Found {len(result['relationships'])} relationships")
+
+# Display the output image
+result["output_image"].show()  # PIL Image
 ```
 
 ### Visual Prompting Styles
@@ -86,11 +92,17 @@ print(f"Found {len(result['relationships'])} relationships")
 The library implements all visual prompting configurations presented in the paper:
 
 ```python
-from gom import GoM
+from gom import GoM, ProcessingConfig, GOM_STYLE_PRESETS
 
-# Use predefined style presets
-gom = GoM(style="gom_text_labeled")    # Recommended for VQA tasks
-gom = GoM(style="gom_numeric_labeled") # Recommended for RefCOCO tasks
+pipeline = GoM(device="cuda")
+
+# Use predefined style presets via ProcessingConfig
+config = ProcessingConfig(
+    question="Where is the bowl?",
+    style="gom_text_labeled",      # Recommended for VQA tasks
+    apply_question_filter=True,    # Filter objects by question relevance
+)
+result = pipeline.process("scene.jpg", config=config, save=False)
 
 # Available styles:
 # - "som_text": Set-of-Mark with textual IDs (baseline, no relations)
@@ -100,8 +112,6 @@ gom = GoM(style="gom_numeric_labeled") # Recommended for RefCOCO tasks
 # - "gom_text_labeled": GoM with textual IDs and labeled relations
 # - "gom_numeric_labeled": GoM with numeric IDs and labeled relations
 
-result = gom.process("scene.jpg")
-
 # Access scene graph representations for VLM prompting
 print(result["scene_graph_text"])    # Triple format for LLM prompts
 print(result["scene_graph_prompt"])  # Compact inline format
@@ -110,11 +120,14 @@ print(result["scene_graph_prompt"])  # Compact inline format
 Manual configuration is also supported:
 
 ```python
-gom = GoM(
-    label_mode="numeric",
+config = ProcessingConfig(
+    question="What is near the table?",
+    label_mode="numeric",           # "original", "numeric", or "alphabetic"
     display_relationships=True,
     display_relation_labels=True,
+    aggressive_pruning=True,        # Keep only question-relevant objects
 )
+result = pipeline.process("scene.jpg", config=config, save=False)
 ```
 
 ### Command-Line Interface
@@ -166,35 +179,11 @@ result = {
     "scene_graph": nx.DiGraph,             # NetworkX graph
     "scene_graph_text": "...",             # Triple format for prompts
     "scene_graph_prompt": "...",           # Compact format
+    "output_image": PIL.Image.Image,       # Rendered visualization as PIL Image
     "processing_time": 12.5,               # Processing time (seconds)
 }
 ```
 
----
-
-## Supported Models
-
-### Object Detection
-
-| Model | Type | Description |
-|-------|------|-------------|
-| YOLOv8 | Real-time | Fast inference, suitable for most applications |
-| OWL-ViT | Open-vocabulary | Text-guided detection for custom categories |
-| GroundingDINO | Open-vocabulary | Text-guided detection with grounding |
-| Detectron2 | Instance | High accuracy for benchmark evaluation |
-
-### Instance Segmentation
-
-| Model | Quality | Speed |
-|-------|---------|-------|
-| SAM-HQ | Highest | Slow |
-| SAM 2 | High | Medium |
-| SAM 1 | Good | Medium |
-| FastSAM | Lower | Fast |
-
-### Vision-Language Models
-
-Supported models for VQA inference include LLaVA 1.5/1.6 (7B-34B), BLIP-2 (2.7B-6.7B), Qwen2.5-VL (7B-72B), Gemma-3 (4B), and LLaMA-v-o1 (11B).
 
 ---
 
@@ -234,10 +223,12 @@ Complete configuration options are documented in [`src/gom/config.py`](src/gom/c
 GoM supports integration of custom detection, segmentation, and depth models:
 
 ```python
-from gom import GoM
+from gom import GoM, ProcessingConfig
+import numpy as np
 
 def custom_detector(image):
     # Custom detection logic
+    # Returns: boxes, labels, scores
     boxes = [[100, 100, 200, 200]]
     labels = ["person"]
     scores = [0.95]
@@ -245,17 +236,30 @@ def custom_detector(image):
 
 def custom_segmenter(image, boxes):
     # Custom segmentation logic
-    import numpy as np
+    # Returns: list of boolean masks (H, W)
     h, w = image.size[1], image.size[0]
-    masks = [np.ones((h, w), dtype=np.uint8) for _ in boxes]
+    masks = [np.ones((h, w), dtype=bool) for _ in boxes]
     return masks
 
-gom = GoM(
+def custom_depth(image):
+    # Custom depth estimation
+    # Returns: depth map (H, W) normalized to [0, 1]
+    h, w = image.size[1], image.size[0]
+    return np.zeros((h, w), dtype=np.float32)
+
+# Create GoM with custom functions
+pipeline = GoM(
     detect_fn=custom_detector,
     segment_fn=custom_segmenter,
-    output_dir="output"
+    depth_fn=custom_depth,
+    device="cuda"
 )
-result = gom.process("scene.jpg")
+
+config = ProcessingConfig(
+    question="What objects are visible?",
+    style="gom_text_labeled",
+)
+result = pipeline.process("scene.jpg", config=config, save=False)
 ```
 
 ---

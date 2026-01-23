@@ -225,14 +225,15 @@ See Also:
     - gom.config: Configuration system
 """
 from __future__ import annotations
+
 import glob
 import hashlib
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from PIL import Image
+
+from ..config import default_config
 from ..pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
-from ..config import PreprocessorConfig, default_config
 from .io import load_image
 
 # -----------------------------

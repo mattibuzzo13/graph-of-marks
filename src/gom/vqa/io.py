@@ -75,12 +75,13 @@ See Also:
     - gom.vqa.runner: VQA inference pipeline
 """
 from __future__ import annotations
+
 import json
-from io import BytesIO
-from typing import Iterable, List, Union, Optional
 import logging
 import os
+from io import BytesIO
 from pathlib import Path
+from typing import List, Optional, Union
 from urllib.parse import urlparse
 
 import requests

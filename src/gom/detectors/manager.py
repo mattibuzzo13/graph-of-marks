@@ -33,18 +33,18 @@ Dependencies:
 """
 from __future__ import annotations
 
-from typing import List, Sequence, Optional, Dict, Tuple
-from collections import OrderedDict, defaultdict
-import hashlib
-import copy
-import logging
 import concurrent.futures
+import copy
+import hashlib
+import logging
+from collections import OrderedDict, defaultdict
+from typing import Dict, List, Optional, Sequence
 
 from PIL import Image
 
 from gom.detectors.base import Detector
-from gom.types import Detection
 from gom.fusion.wbf import fuse_detections_wbf
+from gom.types import Detection
 
 # Advanced optimizations (optional, fallback to standard WBF if not available)
 try:
@@ -374,7 +374,7 @@ class DetectorManager:
         images: Sequence[Image.Image],
         *,
         fuse: bool = True,
-        iou_thr: float = 0.40,  # 🔧 More aggressive (was 0.55) to reduce overlap
+        iou_thr: float = 0.40,  # More aggressive (was 0.55) to reduce overlap
         skip_box_thr: float = 0.0,
         return_stats: bool = False,
     ) -> List[List[Detection]]:
@@ -478,7 +478,7 @@ class DetectorManager:
         import time
         t_start = time.monotonic()
 
-        # Calcola hash immagini e trova quali sono in cache
+        # Compute image hashes and find which are in cache
         # Mark images with desired hash mode to allow _hash_image to pick a
         # cheaper thumbnail-based hash when requested.
         imgs_for_hash = []
@@ -581,7 +581,7 @@ class DetectorManager:
 
             if fuse:
                 W, H = images[orig_idx].size
-                # 🚀 Save all original detections before fusion for recovery later
+                # Save all original detections before fusion for recovery later
                 all_original_detections = list(per_image_dets) if self.keep_non_competing_low_scores else []
                 
                 try:
@@ -614,6 +614,7 @@ class DetectorManager:
                 try:
                     # Prefer using the project's NMS utility for stable behaviour
                     from gom.fusion.nms import nms as _nms_list
+
                     # Run class-aware NMS first to remove intra-class duplicates
                     try:
                         self.logger.info(f"[DEBUG WBF] About to run NMS with iou_thr={iou_thr}")
@@ -630,8 +631,9 @@ class DetectorManager:
                     if getattr(self, 'enable_group_merge', False) and fused:
                         try:
                             import numpy as _np
-                            from gom.fusion.nms import iou as _box_iou_fn
                             from PIL import Image as _PILImage
+
+                            from gom.fusion.nms import iou as _box_iou_fn
 
                             N = len(fused)
                             boxes_np = _np.asarray([_np.asarray(d.box, dtype=_np.float32) for d in fused]) if N else _np.zeros((0,4), dtype=_np.float32)
@@ -790,12 +792,13 @@ class DetectorManager:
                             logger.exception('Group merge failed; continuing with fused list')
 
                     if self.enable_cross_class_suppression:
-                        # 🔧 ULTRA-AGGRESSIVE cross-class suppression with:
+                        # ULTRA-AGGRESSIVE cross-class suppression with:
                         # 1. Containment removal (remove boxes fully inside others)
                         # 2. Aggressive IoU-based removal
                         # 3. Semantic similarity check for label deduplication
-                        from gom.fusion.nms import iou as _iou_fn
                         import numpy as _np
+
+                        from gom.fusion.nms import iou as _iou_fn
 
                         if self.cross_class_iou_thr is not None:
                             cross_class_iou_thr = float(self.cross_class_iou_thr)
@@ -871,12 +874,12 @@ class DetectorManager:
                                     bj = boxes[j]
                                     label_j = labels[j]
                                     
-                                    # 🔧 Strategy 1: Remove if fully contained
+                                    # Strategy 1: Remove if fully contained
                                     if is_contained(bj, bi, threshold=0.90):
                                         removed.add(j)
                                         continue
                                     
-                                    # 🔧 Strategy 2: Remove if semantically similar AND high overlap
+                                    # Strategy 2: Remove if semantically similar AND high overlap
                                     are_similar = are_semantically_similar(label_i, label_j)
                                     
                                     # Calculate IoU
@@ -896,7 +899,7 @@ class DetectorManager:
                                         area2 = max(1e-6, (cx2 - cx1) * (cy2 - cy1))
                                         val = inter / (area1 + area2 - inter + 1e-7)
                                     
-                                    # 🔧 Use more aggressive threshold for similar labels
+                                    # Use more aggressive threshold for similar labels
                                     effective_threshold = 0.40 if are_similar else cross_class_iou_thr
                                     
                                     if val >= effective_threshold:
@@ -972,7 +975,7 @@ class DetectorManager:
                     except Exception:
                         logger.exception("Mask IoU suppression failed; continuing")
 
-                # 🚀 NEW: Recover low-score detections if no competing objects in region
+                # NEW: Recover low-score detections if no competing objects in region
                 if self.keep_non_competing_low_scores and fuse and all_original_detections:
                     try:
                         fused = self._recover_non_competing_detections(
@@ -1007,7 +1010,7 @@ class DetectorManager:
         except Exception:
             pass
 
-        # ✅ Aggiungi suffissi numerici univoci a ogni oggetto
+        # Add unique numeric suffixes to each object
         for img_idx, dets in enumerate(results):
             if dets:
                 labels = [d.label for d in dets]
@@ -1105,10 +1108,10 @@ class DetectorManager:
         Suffix Logic:
             - First instance: "chair_1"
             - Second instance: "chair_2"
-            - Handles multiple classes: ["chair", "table", "chair"] → ["chair_1", "table_1", "chair_2"]
+            - Handles multiple classes: ["chair", "table", "chair"] -> ["chair_1", "table_1", "chair_2"]
         
         Notes:
-            - Strips existing suffixes matching pattern "_\d+" before processing
+            - Strips existing suffixes matching pattern "_[0-9]+" before processing
             - Increments counter per base class name
             - Required for VQA tasks that reference specific instances
             - Enables relationship grounding (e.g., "chair_1 next_to table_2")
@@ -1194,8 +1197,9 @@ class DetectorManager:
         
         try:
             import numpy as np
+
             from gom.fusion.nms import iou as compute_iou
-            
+
             # Get boxes from fused detections
             fused_boxes = np.array([np.array(d.box, dtype=np.float32) for d in fused_detections])
             

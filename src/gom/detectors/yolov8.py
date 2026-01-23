@@ -84,7 +84,7 @@ from gom.utils.detector_utils import make_detection
 try:
     from ultralytics import YOLO
 except Exception as e:  # pragma: no cover
-    raise ImportError("Ultralytics YOLOv8 non è installato. Installa con: pip install ultralytics") from e
+    raise ImportError("Ultralytics YOLOv8 is not installed. Install with: pip install ultralytics") from e
 
 
 class YOLOv8Detector(Detector):
@@ -173,7 +173,7 @@ class YOLOv8Detector(Detector):
         tta_hflip: bool = False,
         max_det: int = 300,
         batch_size: int = 16,
-        use_half: Optional[bool] = None,  # None = auto (True se cuda disponibile)
+        use_half: Optional[bool] = None,  # None = auto (True if cuda available)
     ) -> None:
         super().__init__(name="yolov8", device=device, score_threshold=score_threshold)
 
@@ -183,22 +183,22 @@ class YOLOv8Detector(Detector):
         self.max_det = int(max_det)
         self.batch_size = int(batch_size)
 
-        # Sposta su device selezionato
+        # Move to selected device
         try:
             self.model.to(self.device)
         except Exception:
             try:
-                self.model.model.to(self.device)  # vecchie versioni
+                self.model.model.to(self.device)  # older versions
             except Exception:
                 pass
 
-        # Fuse Conv+BN se disponibile
+        # Fuse Conv+BN if available
         try:
             self.model.fuse()
         except Exception:
             pass
 
-        # FP16 su GPU (auto o forzato via argomento)
+        # FP16 on GPU (auto or forced via argument)
         if use_half is None:
             self.use_half = (str(self.device).startswith("cuda") and torch.cuda.is_available())
         else:
@@ -207,7 +207,7 @@ class YOLOv8Detector(Detector):
             try:
                 self.model.model.half()
             except Exception:
-                self.use_half = False  # fallback se non supportato
+                self.use_half = False  # fallback if not supported
 
         # Eval mode
         try:
@@ -215,7 +215,7 @@ class YOLOv8Detector(Detector):
         except Exception:
             pass
 
-        # Cache dei nomi classi (best-effort)
+        # Cache class names (best-effort)
         self.names = self._resolve_names()
 
     def warmup(self, example_image=None, use_half: Optional[bool] = None) -> None:
@@ -417,11 +417,11 @@ class YOLOv8Detector(Detector):
             verbose=False,
             max_det=self.max_det,
         )
-        # Alcune versioni accettano 'half' e 'batch'
+        # Some versions accept 'half' and 'batch'
         try:
             return self.model.predict(inputs, half=self.use_half, batch=self.batch_size, **kwargs)
         except TypeError:
-            # Fallback senza argomenti extra
+            # Fallback without extra arguments
             return self.model.predict(inputs, **kwargs)
 
     def _parse_single_result(self, results) -> List[Detection]:
@@ -455,7 +455,7 @@ class YOLOv8Detector(Detector):
 
     def _get_names(self, results):
         """Resolve class names from results or model (version-robust)."""
-        # Priorità: results.names -> model.names -> model.model.names
+        # Priority: results.names -> model.names -> model.model.names
         names = getattr(results, "names", None)
         if names is None:
             names = getattr(self.model, "names", None)

@@ -42,7 +42,7 @@ Functions:
 
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 try:
     import numpy as np

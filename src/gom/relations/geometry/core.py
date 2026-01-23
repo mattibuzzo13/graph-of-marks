@@ -117,11 +117,10 @@ See Also:
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence, Tuple
 
-import math
 import numpy as np
-
 
 # ------------------------ format conversion ------------------------
 

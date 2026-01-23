@@ -94,7 +94,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Sequence, Tuple, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -312,7 +312,7 @@ class Segmenter(ABC):
 
         m_bool = mask.astype(bool)
 
-        # OpenCV path (più veloce/robusto)
+        # OpenCV path (faster/more robust)
         try:
             import cv2  # type: ignore
 
@@ -322,7 +322,7 @@ class Segmenter(ABC):
             m_u8 = (m_bool.astype(np.uint8) * 255)
             m_u8 = cv2.morphologyEx(m_u8, cv2.MORPH_CLOSE, kernel)
 
-            # Trova i fori: floodfill sul background inverso
+            # Find holes: floodfill on inverted background
             inv = 255 - m_u8
             h, w = inv.shape[:2]
             flood = inv.copy()
@@ -330,7 +330,7 @@ class Segmenter(ABC):
             cv2.floodFill(flood, ff_mask, (0, 0), 0)
             holes = cv2.bitwise_and(inv, flood)
 
-            # Rimuove solo fori piccoli via connectedComponentsWithStats
+            # Remove only small holes via connectedComponentsWithStats
             num, labels, stats, _ = cv2.connectedComponentsWithStats((holes > 0).astype(np.uint8), connectivity=4)
             out = m_u8.copy()
             min_area = int(self.config.min_hole_area)
@@ -344,7 +344,7 @@ class Segmenter(ABC):
         except Exception:
             pass  # fallback SciPy/NumPy
 
-        # SciPy fallback: closing + fill_holes + filtro per area
+        # SciPy fallback: closing + fill_holes + filter by area
         try:
             from scipy.ndimage import binary_closing, binary_fill_holes, label  # type: ignore
 
@@ -352,7 +352,7 @@ class Segmenter(ABC):
             structure = np.ones((k, k), dtype=bool)
             closed = binary_closing(m_bool, structure=structure)
 
-            # Trova fori (componenti del background dentro all'oggetto)
+            # Find holes (background components inside the object)
             filled = binary_fill_holes(closed)
             holes = np.logical_and(filled, np.logical_not(closed))
 
@@ -369,14 +369,14 @@ class Segmenter(ABC):
                 return filled.astype(bool)
 
         except Exception:
-            # Ultimo fallback: piccolo closing NumPy (dilatazione/erosione naive)
+            # Last fallback: lightweight NumPy closing (naive dilation/erosion)
             return self._binary_closing_numpy(m_bool, radius=max(1, int(self.config.hole_kernel // 2)))
 
     @staticmethod
     def _binary_closing_numpy(mask: np.ndarray, radius: int = 3) -> np.ndarray:
         """
-        Closing leggero senza dipendenze: ripete dilatazione ed erosione 3x3 per ~radius volte.
-        Utile come fallback se OpenCV/SciPy non sono disponibili.
+        Lightweight closing without dependencies: repeats 3x3 dilation and erosion ~radius times.
+        Useful as fallback if OpenCV/SciPy are not available.
         """
         if radius <= 0:
             return mask.astype(bool)

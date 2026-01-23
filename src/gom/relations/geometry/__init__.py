@@ -82,50 +82,50 @@ from __future__ import annotations
 
 # Core utilities
 from .core import (
-    as_xyxy,
     area,
+    as_xyxy,
     center,
-    mask_center,
     center_distance,
+    contains,
+    diou,
+    edge_gap,
+    giou,
+    horizontal_overlap,
     iou,
     iou_matrix,
-    giou,
-    diou,
-    horizontal_overlap,
-    vertical_overlap,
-    edge_gap,
-    overlap_ratio,
     is_inside,
-    contains,
-)
-
-# Vectorized operations
-from .vectorized import (
-    centers_vectorized,
-    areas_vectorized,
-    pairwise_distances_vectorized,
-    horizontal_overlaps_vectorized,
-    vertical_overlaps_vectorized,
+    mask_center,
+    overlap_ratio,
+    vertical_overlap,
 )
 
 # Mask operations
 from .masks import (
-    mask_iou,
     depth_stats_from_map,
-)
-
-# Spatial predicates
-from .predicates import (
-    orientation_label,
-    is_on_top_of,
-    is_below_of,
-    is_in_front_of,
-    is_behind_of,
+    mask_iou,
 )
 
 # Nearest relation builder
 from .nearest import (
     build_precise_nearest_relation,
+)
+
+# Spatial predicates
+from .predicates import (
+    is_behind_of,
+    is_below_of,
+    is_in_front_of,
+    is_on_top_of,
+    orientation_label,
+)
+
+# Vectorized operations
+from .vectorized import (
+    areas_vectorized,
+    centers_vectorized,
+    horizontal_overlaps_vectorized,
+    pairwise_distances_vectorized,
+    vertical_overlaps_vectorized,
 )
 
 __all__ = [

@@ -288,30 +288,28 @@ License: See repository LICENSE file
 
 from __future__ import annotations
 
+import contextlib
 import gc
-import hashlib
 import json
+import logging
 import math
-import networkx as nx
-from PIL import Image
 import os
 import time
-import torch
-from dataclasses import dataclass, field
-from enum import Enum
-import contextlib
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
-
-import numpy as np
-import logging
 import warnings
-from gom.utils.colors import canonical_label, base_label
-from scipy import ndimage
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import networkx as nx
+import numpy as np
+import torch
+from PIL import Image
+
+from gom.detectors import DetectorManager
 
 # Detection modules
 from gom.detectors.base import Detector
-from gom.detectors import DetectorManager
+from gom.utils.colors import base_label, canonical_label
 
 # Try to import optional detectors
 try:
@@ -334,30 +332,31 @@ try:
 except ImportError:
     GroundingDINODetector = None  # type: ignore
 
+from gom.fusion.nms import labelwise_nms
+
 # Detection fusion algorithms
 from gom.fusion.wbf import fuse_detections_wbf as weighted_boxes_fusion
-from gom.fusion.nms import labelwise_nms
+from gom.graph.prompt import graph_to_triples_text
+
+# Scene graph construction
+from gom.graph.scene_graph import SceneGraphBuilder as _SceneGraphBuilder
+
+# Relationship extraction
+from gom.relations.inference import RelationInferencer, RelationsConfig
 
 # Segmentation modules  
 from gom.segmentation.base import Segmenter, SegmenterConfig
 from gom.segmentation.sam1 import Sam1Segmenter
 from gom.segmentation.sam2 import Sam2Segmenter
 from gom.segmentation.samhq import SamHQSegmenter
+from gom.utils.boxes import iou
+from gom.utils.cache_advanced import ImageDetectionCache
+from gom.utils.clip_utils import CLIPWrapper
+from gom.utils.colors import base_label, canonical_label
 
 # Utility modules
-from gom.utils.depth import DepthEstimator, DepthConfig
-from gom.utils.clip_utils import CLIPWrapper  
-from gom.utils.boxes import iou, clamp_xyxy  
-from gom.utils.colors import base_label, canonical_label
-from gom.utils.cache_advanced import ImageDetectionCache
+from gom.utils.depth import DepthConfig, DepthEstimator
 
-# Relationship extraction
-from gom.relations.inference import RelationsConfig, RelationInferencer
-
-# Scene graph construction
-from gom.graph.scene_graph import SceneGraphBuilder
-from gom.graph.prompt import graph_to_triples_text
-from gom.graph.scene_graph import SceneGraphBuilder as _SceneGraphBuilder
 
 def build_scene_graph(
     image_size: Tuple[int, int],
@@ -538,11 +537,11 @@ class PreprocessorConfig:
     display_legend: bool = False  # Show legend with object classes
     seg_fill_alpha: float = 0.25  # Segmentation transparency (0=invisible, 1=opaque)
     bbox_linewidth: float = 2.0  # Bounding box line width
-    obj_fontsize_inside: int = 12  # Font size for inside labels
-    obj_fontsize_outside: int = 12  # Font size for outside labels
-    rel_fontsize: int = 10  # Font size for relationship labels
+    obj_fontsize_inside: int = 9  # Font size for inside labels
+    obj_fontsize_outside: int = 10  # Font size for outside labels
+    rel_fontsize: int = 8  # Font size for relationship labels
     legend_fontsize: int = 8  # Font size for legend
-    rel_arrow_linewidth: float = 2.5  # Relationship arrow line width
+    rel_arrow_linewidth: float = 2.0  # Relationship arrow line width
     rel_arrow_mutation_scale: float = 26.0  # Relationship arrow head size
     resolve_overlaps: bool = True  # Auto-adjust overlapping labels
     show_bboxes: bool = True  # Show bounding boxes
@@ -710,13 +709,16 @@ class ImageGraphPreprocessor:
         depth_config = DepthConfig(device=self.device)
         self.depth_est = DepthEstimator(config=depth_config)
         
+        # Initialize CLIP wrapper with proper config object
         try:
-            self.clip = CLIPWrapper(device=self.device)
-        except TypeError:
-            # If CLIPWrapper expects a config object, use the optional config path
             from gom.utils.clip_utils import CLIPConfig
             clip_config = CLIPConfig(device=self.device)
-            self.clip = CLIPWrapper(config=clip_config) 
+            self.clip = CLIPWrapper(config=clip_config)
+        except Exception as e:
+            # CLIP loading may fail (network, auth, etc.) - continue without it
+            import warnings
+            warnings.warn(f"Failed to initialize CLIP wrapper: {e}. Continuing without CLIP-based filtering.")
+            self.clip = None 
 
         # Relation inference with geometric constraints and optional CLIP scoring
         # If we have a CLIP wrapper available, create a ClipRelScorer and pass
@@ -780,16 +782,14 @@ class ImageGraphPreprocessor:
             )
         )
 
-        # 🚀 Advanced LRU detection cache with memory-aware eviction
+        # LRU detection cache with memory-aware eviction
         if self.cfg.enable_detection_cache:
-            self.detection_cache = ImageDetectionCache(max_items=self.cfg.max_cache_size)
+            self._detection_cache = ImageDetectionCache(
+                max_items=self.cfg.max_cache_size,
+                max_size_mb=500.0  # 500 MB max cache size
+            )
         else:
-            self.detection_cache = None
-        
-        self._detection_cache = ImageDetectionCache(
-            max_items=self.cfg.max_cache_size,
-            max_size_mb=500.0  # 500 MB max cache size
-        )
+            self._detection_cache = None
 
         # Support for custom user-defined functions
         # These can be set by the high-level API (GraphOfMarks)
@@ -797,6 +797,36 @@ class ImageGraphPreprocessor:
         self._custom_segmenter = None
         self._custom_depth_estimator = None
         self._custom_relation_extractor = None
+
+    def __del__(self) -> None:
+        """Release resources when the preprocessor is garbage collected."""
+        # Clear detection cache
+        if hasattr(self, '_detection_cache') and self._detection_cache is not None:
+            self._detection_cache.clear()
+
+        # Clear detector models
+        if hasattr(self, 'detectors'):
+            for det in self.detectors:
+                if hasattr(det, 'clear'):
+                    try:
+                        det.clear()
+                    except Exception:
+                        pass
+
+        # Clear depth estimator cache
+        if hasattr(self, 'depth_est') and hasattr(self.depth_est, 'clear_cache'):
+            try:
+                self.depth_est.clear_cache()
+            except Exception:
+                pass
+
+        # Clear CUDA cache
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     @contextlib.contextmanager
     def _maybe_suppress_warnings(self):
@@ -1275,7 +1305,6 @@ class ImageGraphPreprocessor:
             - Automatically handles box coordinate scaling
             - Typical speedup: 4-8x vs sequential processing
         """
-        from concurrent.futures import ThreadPoolExecutor
 
         batch_results = []
 
@@ -1297,7 +1326,7 @@ class ImageGraphPreprocessor:
         restore_thresholds = self._apply_auto_detector_thresholds()
         if getattr(self, 'detector_manager', None) is not None:
             try:
-                # 🚀 Parametri bilanciati: velocità + accuratezza su piccoli oggetti
+                # Balanced parameters: speed + accuracy on small objects
                 wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.25)
                 skip_thr = getattr(self.cfg, 'skip_box_threshold', 0.10)
                 det_lists = self.detector_manager.detect_ensemble(
@@ -1991,7 +2020,7 @@ class ImageGraphPreprocessor:
         num_objects: int
     ) -> List[Dict[str, Any]]:
         """
-        🧹 Remove relations that point to invalid object indices.
+        Remove relations that point to invalid object indices.
         
         After deduplication in DetectorManager, some objects may have been removed.
         This function removes relations that reference indices >= num_objects.
@@ -2167,7 +2196,7 @@ class ImageGraphPreprocessor:
         
         # Log filtering summary
         if removed_count > 0:
-            self.logger.info(f"   🎯 Filtered {removed_count} low-quality masks")
+            self.logger.info(f"   Filtered {removed_count} low-quality masks")
             if getattr(self.cfg, "verbose", False):
                 for idx, reason in removal_reasons.items():
                     label_str = labels[idx] if idx < len(labels) else "?"
@@ -2200,7 +2229,7 @@ class ImageGraphPreprocessor:
         target_indices: Optional[Set[int]] = None,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
         """
-        🧹 Remove highly overlapping objects (both same-class and cross-class).
+        Remove highly overlapping objects (both same-class and cross-class).
         
         This function removes duplicates and overlaps that may have survived fusion/NMS:
         - Same-class objects with high IoU (likely duplicates)
@@ -2225,7 +2254,7 @@ class ImageGraphPreprocessor:
             return boxes, labels, scores, masks, depths, list(range(len(boxes)))
         
         import numpy as np
-        
+
         # Convert to numpy for easier computation
         boxes_arr = np.array(boxes, dtype=float)
         
@@ -2284,7 +2313,7 @@ class ImageGraphPreprocessor:
                 # Same class: stricter threshold
                 same_class = canonical_label(labels[i]).lower() == canonical_label(labels[j]).lower()
                 
-                # 🎯 SINGLETON MODE PROTECTION: Never remove target objects
+                # SINGLETON MODE PROTECTION: Never remove target objects
                 i_is_target = target_indices is not None and i in target_indices
                 j_is_target = target_indices is not None and j in target_indices
 
@@ -2324,7 +2353,7 @@ class ImageGraphPreprocessor:
                     # 1. High box/mask IoU (clear spatial overlap)
                     # 2. One object is mostly contained within another (>80% overlap)
                     # 3. Low score object overlapping higher score object (likely false positive)
-                    # 🎯 BUT: NEVER remove target objects in singleton mode
+                    # BUT: NEVER remove target objects in singleton mode
                     
                     # Skip if both are targets
                     if i_is_target and j_is_target:
@@ -2350,7 +2379,7 @@ class ImageGraphPreprocessor:
                     if use_mask_iou and m_iou >= mask_iou_threshold:
                         should_remove = True
                         reason = f"mask IoU={m_iou:.3f}"
-                        # 🎯 SINGLETON MODE: Prefer target over non-target
+                        # SINGLETON MODE: Prefer target over non-target
                         if i_is_target:
                             remove_idx = j  # Keep target i, remove j
                         elif j_is_target:
@@ -2361,7 +2390,7 @@ class ImageGraphPreprocessor:
                     elif box_iou >= 0.25:
                         should_remove = True
                         reason = f"box IoU={box_iou:.3f}"
-                        # 🎯 SINGLETON MODE: Prefer target over non-target
+                        # SINGLETON MODE: Prefer target over non-target
                         if i_is_target:
                             remove_idx = j  # Keep target i, remove j
                         elif j_is_target:
@@ -2371,7 +2400,7 @@ class ImageGraphPreprocessor:
                             remove_idx = j if scores[i] >= scores[j] else i
                     elif mostly_contained_i:
                         # i is mostly contained in j
-                        # 🎯 SINGLETON MODE: If i is target, ALWAYS keep it (remove j)
+                        # SINGLETON MODE: If i is target, ALWAYS keep it (remove j)
                         should_remove = True
                         if i_is_target:
                             # i is target -> ALWAYS keep it, remove j
@@ -2391,7 +2420,7 @@ class ImageGraphPreprocessor:
                             reason = f"i {overlap_i*100:.1f}% contained in j (IoU={box_iou:.3f})"
                     elif mostly_contained_j:
                         # j is mostly contained in i
-                        # 🎯 SINGLETON MODE: If j is target, ALWAYS keep it (remove i)
+                        # SINGLETON MODE: If j is target, ALWAYS keep it (remove i)
                         should_remove = True
                         if j_is_target:
                             # j is target -> ALWAYS keep it, remove i
@@ -2411,7 +2440,7 @@ class ImageGraphPreprocessor:
                             reason = f"j {overlap_j*100:.1f}% contained in i (IoU={box_iou:.3f})"
                     elif box_iou >= 0.10 and score_ratio >= cross_class_score_diff_threshold:
                         # Even low overlap: if one object has much lower score, it's likely wrong
-                        # 🎯 SINGLETON MODE: Prefer target over non-target
+                        # SINGLETON MODE: Prefer target over non-target
                         should_remove = True
                         reason = f"IoU={box_iou:.3f}, score_diff={score_ratio:.3f}"
                         if i_is_target:
@@ -2456,7 +2485,7 @@ class ImageGraphPreprocessor:
         max_target_dist_px: Optional[float] = None,
     ) -> Set[int]:
         """
-        🔗 Find all object indices that are directly connected to target objects via relations.
+        Find all object indices that are directly connected to target objects via relations.
         
         Args:
             relations: List of relation dicts (already filtered to target-connected relations)
@@ -2511,7 +2540,7 @@ class ImageGraphPreprocessor:
         relations: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], Optional[List[Dict[str, Any]]]]:
         """
-        🎯 Filter objects to keep ONLY target object(s) and their directly connected neighbors.
+        Filter objects to keep ONLY target object(s) and their directly connected neighbors.
         
         This implements the "singleton object" fallback logic:
         - Keep all instances of the target object
@@ -2636,7 +2665,7 @@ class ImageGraphPreprocessor:
             if not boxes:
                 return boxes, labels, scores
 
-        # 🚀 Compute semantic relevance scores if question terms provided
+        # Compute semantic relevance scores if question terms provided
         semantic_boost = {}
         if question_terms:
             # Level 1: Text-based fuzzy matching (fast, existing implementation)
@@ -2671,7 +2700,7 @@ class ImageGraphPreprocessor:
             from collections import defaultdict
             idx_by_label = defaultdict(list)
             for i, (lb, sc) in enumerate(zip(labels, scores)):
-                # 🚀 Boost score for semantically relevant objects
+                # Boost score for semantically relevant objects
                 effective_score = float(sc)
                 if semantic_boost:
                     boost_factor = semantic_boost.get(i, 0.0)
@@ -2693,7 +2722,7 @@ class ImageGraphPreprocessor:
         # Cap total (with semantic awareness)
         total_cap = max(0, int(self.cfg.max_detections_total))
         if total_cap > 0 and len(boxes) > total_cap:
-            # 🚀 Sort by composite score: detection confidence + semantic relevance
+            # Sort by composite score: detection confidence + semantic relevance
             composite_scores = []
             for i in range(len(boxes)):
                 base_score = float(scores[i])
@@ -2837,7 +2866,7 @@ class ImageGraphPreprocessor:
             if not boxes:
                 return boxes, labels, scores
 
-        # 🚀 Compute multi-signal semantic scores
+        # Compute multi-signal semantic scores
         semantic_boost = {}
         
         # Signal 1: Text-based fuzzy matching (existing)
@@ -2905,7 +2934,7 @@ class ImageGraphPreprocessor:
         # Cap total with multi-criteria ranking
         total_cap = max(0, int(self.cfg.max_detections_total))
         
-        # 🚀 Apply min/max objects per question constraints
+        # Apply min/max objects per question constraints
         if self.cfg.false_negative_reduction:
             min_cap = max(self.cfg.min_objects_per_question, 3)
             max_cap = min(self.cfg.max_objects_per_question, total_cap if total_cap > 0 else 50)
@@ -2928,7 +2957,7 @@ class ImageGraphPreprocessor:
             composite_scores.sort(key=lambda x: -x[1])
             kept_indices = [i for i, _ in composite_scores[:total_cap]]
             
-            # 🚀 False negative safety: ensure we keep minimum objects
+            # False negative safety: ensure we keep minimum objects
             if self.cfg.false_negative_reduction and len(kept_indices) < min_cap:
                 # Add more objects sorted by detection confidence
                 remaining = [i for i in range(len(boxes)) if i not in kept_indices]
@@ -3180,14 +3209,10 @@ class ImageGraphPreprocessor:
             obj_terms: {"laptop", "computer", "pc", "desk", "table"}
             
             Matches:
-            - "laptop" → Level 1 exact match ✓
-            - "computer" → Level 3 semantic (synonym of laptop) ✓
-            - "desk" → Level 1 exact match ✓
-            - "dining_table" → Level 2 partial ("table" in obj_terms) ✓
-            
+            - "laptop" → Level 1 exact match            - "computer" → Level 3 semantic (synonym of laptop)            - "desk" → Level 1 exact match            - "dining_table" → Level 2 partial ("table" in obj_terms)            
             Filtered out:
-            - "chair" → No match at any level ✗
-            - "lamp" → No match at any level ✗
+            - "chair" -> No match at any level
+            - "lamp" -> No match at any level
         
         Performance:
             - Level 1+2: ~2-5ms for 100 detections
@@ -3197,7 +3222,7 @@ class ImageGraphPreprocessor:
         if not self.cfg.apply_question_filter or not obj_terms:
             return boxes, labels, scores
         
-        # 🚀 Multi-level matching strategy:
+        # Multi-level matching strategy:
         matched_indices = []
         
         for i, lb in enumerate(labels):
@@ -3275,7 +3300,7 @@ class ImageGraphPreprocessor:
 
     # ----------------------------- single image -----------------------------
 
-    @torch.inference_mode()  # 🚀 Performance: Disable gradient tracking for inference
+    @torch.inference_mode()  # Performance: Disable gradient tracking for inference
     def process_single_image(self, image_pil: Image.Image, image_name: str, custom_question: Optional[str] = None) -> None:
         """
         Execute the complete 7-phase preprocessing pipeline on a single image.
@@ -3337,11 +3362,11 @@ class ImageGraphPreprocessor:
         # ═══════════════════════════════════════════════════════════════════
         self.logger.info(f"")
         self.logger.info(f"{'='*70}")
-        self.logger.info(f"🖼️  Processing: {image_name}")
-        self.logger.info(f"📐 Size: {W}x{H} px")
+        self.logger.info(f"Processing: {image_name}")
+        self.logger.info(f"Size: {W}x{H} px")
         if custom_question or self.cfg.question:
             q = custom_question or self.cfg.question
-            self.logger.info(f"❓ Question: {q[:80]}{'...' if len(q) > 80 else ''}")
+            self.logger.info(f"Question: {q[:80]}{'...' if len(q) > 80 else ''}")
         self.logger.info(f"{'='*70}")
         
         # Use a detection-only cache key so we can reuse detections across
@@ -3366,10 +3391,10 @@ class ImageGraphPreprocessor:
         # ═══════════════════════════════════════════════════════════════════
         # PHASE 1: OBJECT DETECTION (with intelligent caching)
         # ═══════════════════════════════════════════════════════════════════
-        self.logger.info(f"\n🔍 [1/7] Object Detection")
+        self.logger.info(f"\n[1/7] Object Detection")
         cached = None if getattr(self.cfg, "force_preprocess_per_question", False) else self._cache_get(detection_key)
         if cached is None:
-            self.logger.info(f"   ⚙️  Running detectors...")
+            self.logger.info(f"   Running detectors...")
             mark("start_detection")
             det_raw = self._run_detectors(image_pil)
             # DetectorManager now performs fusion centrally; consume its outputs
@@ -3401,9 +3426,9 @@ class ImageGraphPreprocessor:
             # Persist detection-only results under the detection_key so they can
             # be reused by other questions referring to the same image
             self._cache_put(detection_key, cached)
-            self.logger.info(f"   ✅ Detected {len(boxes_fused)} objects")
+            self.logger.info(f"   Detected {len(boxes_fused)} objects")
         else:
-            self.logger.info(f"   💾 Using cached detections")
+            self.logger.info(f"   Using cached detections")
 
         boxes = list(cached["boxes"])
         labels = list(cached["labels"])
@@ -3414,7 +3439,7 @@ class ImageGraphPreprocessor:
         if getattr(self.cfg, "verbose", False):
             # Show top detected objects
             top_objects = sorted(zip(labels, scores), key=lambda x: -x[1])[:5]
-            self.logger.info(f"   📊 Top objects: {', '.join([f'{l}({s:.2f})' for l, s in top_objects])}")
+            self.logger.info(f"   Top objects: {', '.join([f'{l}({s:.2f})' for l, s in top_objects])}")
 
         # 2) QUESTION FILTER (objects)
         self.logger.info(f"\n🔎 [2/7] Question-Based Filtering")
@@ -3427,7 +3452,7 @@ class ImageGraphPreprocessor:
         original_labels = list(cached["labels"])
         original_scores = list(cached["scores"])
         
-        # 🚀 SINGLETON MODE: Check if question mentions EXACTLY ONE object type
+        # SINGLETON MODE: Check if question mentions EXACTLY ONE object type
         # This enables keeping only target object + directly connected objects
         target_object_detected = None
         self._singleton_mode_enabled = False
@@ -3471,12 +3496,12 @@ class ImageGraphPreprocessor:
                 # Keep all instances of the target label (no dedup in singleton mode)
                 
                 if target_indices:
-                    # ✅ ACTIVATE SINGLETON MODE
+                    # ACTIVATE SINGLETON MODE
                     self._target_object_indices = set(target_indices)
                     self._singleton_mode_enabled = True
                     self._singleton_target_label = target_obj_label
                     
-                    print(f"\n🎯 [SINGLETON MODE ACTIVATED]")
+                    print(f"\n[SINGLETON MODE ACTIVATED]")
                     print(f"   Target object: '{target_obj_label}'")
                     print(f"   Found {len(target_indices)} instance(s) at indices {target_indices}")
                     print(f"   Will filter to: target + connected objects only")
@@ -3516,7 +3541,7 @@ class ImageGraphPreprocessor:
         boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores, protected_indices)
         det2_for_mask = [det2_for_mask[i] for i in keep]
         
-        # 🎯 CRITICAL: Update target_object_indices after NMS (indices change!)
+        # CRITICAL: Update target_object_indices after NMS (indices change!)
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
             # Map old indices to new indices after NMS
             old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep)}
@@ -3544,7 +3569,7 @@ class ImageGraphPreprocessor:
             clip_semantic_scores = {}
             mark("no_clip_scoring")
             
-            # 🚀 False Negative Reduction: Ensure minimum objects are kept
+            # False Negative Reduction: Ensure minimum objects are kept
             if self.cfg.false_negative_reduction and len(boxes) > 0:
                 # Count objects with good semantic scores
                 high_scoring = sum(1 for score in clip_semantic_scores.values() if score > 0.4)
@@ -3556,7 +3581,7 @@ class ImageGraphPreprocessor:
                         self.logger.info(f"[FALSE NEGATIVE REDUCTION] Only {high_scoring} objects with CLIP score > 0.4, keeping at least {self.cfg.min_objects_per_question} objects")
 
         # 4) LIGHT PRUNING (area, per-label, total) BEFORE SEGMENTATION
-        # 🚀 Pass question terms + CLIP scores for semantic-aware pruning
+        # Pass question terms + CLIP scores for semantic-aware pruning
         self.logger.info(f"\n✂️  [3/7] Pruning & NMS")
         initial_count = len(boxes)
         # Preserve all singleton target instances across pruning
@@ -3574,7 +3599,7 @@ class ImageGraphPreprocessor:
             clip_scores=clip_semantic_scores,
             image_size=image_pil.size,
         )
-        self.logger.info(f"   ✅ {initial_count} → {len(boxes)} objects (removed {initial_count - len(boxes)} duplicates/low-score)")
+        self.logger.info(f"   {initial_count} -> {len(boxes)} objects (removed {initial_count - len(boxes)} duplicates/low-score)")
         if preserved_targets:
             existing = {(canonical_label(lb).lower(), tuple(map(float, bx))) for bx, lb in zip(boxes, labels)}
             for bx, lb, sc, d2 in preserved_targets:
@@ -3587,14 +3612,14 @@ class ImageGraphPreprocessor:
                 if det2_for_mask is not None:
                     det2_for_mask.append(d2)
             self.logger.info(
-                f"   🎯 Restored {len(preserved_targets)} target objects after pruning"
+                f"   Restored {len(preserved_targets)} target objects after pruning"
             )
         # Sync det2_for_mask with possibly reduced boxes
         if len(det2_for_mask) != len(boxes):
             # Approximate alignment by score order
             idx_sorted = sorted(range(len(scores)), key=lambda i: -float(scores[i]))
             det2_for_mask = [det2_for_mask[i] for i in idx_sorted[: len(boxes)]] if det2_for_mask else [None] * len(boxes)
-        # 🎯 CRITICAL: Recompute singleton target indices after pruning
+        # CRITICAL: Recompute singleton target indices after pruning
         if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
             target_label = str(self._singleton_target_label).lower()
             new_target_indices = {
@@ -3607,10 +3632,10 @@ class ImageGraphPreprocessor:
         # 5) SEGMENTATION (SAM) + optional union with Detectron2 masks — only if needed
         masks = None
         if need_seg and boxes:
-            self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
-            self.logger.info(f"   ⚙️  Generating masks for {len(boxes)} objects...")
+            self.logger.info(f"\n[4/7] Segmentation (SAM)")
+            self.logger.info(f"   Generating masks for {len(boxes)} objects...")
             if self._custom_segmenter:
-                self.logger.info(f"   ⚙️  Using custom segmenter...")
+                self.logger.info(f"   Using custom segmenter...")
                 # Custom segmenter expects numpy image and boxes
                 custom_out = self._custom_segmenter(np.array(image_pil), boxes)
                 
@@ -3636,18 +3661,18 @@ class ImageGraphPreprocessor:
                 d2m = det2_for_mask[i].get("det2_mask") if det2_for_mask and det2_for_mask[i] is not None else None
                 if d2m is not None:
                     masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
-            self.logger.info(f"   ✅ Generated {len(masks)} segmentation masks")
+            self.logger.info(f"   Generated {len(masks)} segmentation masks")
             
-            # 🎯 MASK QUALITY FILTER: Remove poor quality or fragmented segmentations
+            # MASK QUALITY FILTER: Remove poor quality or fragmented segmentations
             boxes, labels, scores, masks, det2_for_mask = self._filter_low_quality_masks(
                 boxes, labels, scores, masks, det2_for_mask
             )
             # Post-segmentation deduplication: remove highly overlapping objects
-            print(f"\n🧹 [4.5/7] Post-Segmentation Deduplication")
+            print(f"\n[4.5/7] Post-Segmentation Deduplication")
             print(f"   Checking for overlapping objects...")
             initial_count = len(boxes)
             
-            # 🎯 Pass target_indices to protect singleton targets from removal
+            # Pass target_indices to protect singleton targets from removal
             current_target_indices = getattr(self, '_target_object_indices', None)
             
             boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
@@ -3655,11 +3680,11 @@ class ImageGraphPreprocessor:
                 iou_threshold=getattr(self.cfg, 'same_class_iou_threshold', 0.30),  # Same-class overlap threshold
                 mask_iou_threshold=0.60,  # Cross-class mask overlap threshold (lowered from 0.65)
                 cross_class_score_diff_threshold=getattr(self.cfg, 'cross_class_score_diff_threshold', 0.80),
-                target_indices=current_target_indices  # 🎯 Protect targets in singleton mode
+                target_indices=current_target_indices  # Protect targets in singleton mode
             )
             if len(boxes) < initial_count:
-                print(f"   ✅ Removed {initial_count - len(boxes)} overlapping objects")
-            # 🎯 CRITICAL: Update singleton target indices after post-segmentation deduplication
+                print(f"   Removed {initial_count - len(boxes)} overlapping objects")
+            # CRITICAL: Update singleton target indices after post-segmentation deduplication
             # kept_overlap contains the original indices (w.r.t. boxes before dedup) that were kept.
             if hasattr(self, '_target_object_indices') and getattr(self, '_target_object_indices', None):
                 # Build mapping old_index -> new_index after dedup
@@ -3683,18 +3708,18 @@ class ImageGraphPreprocessor:
 
                 self._target_object_indices = new_target_indices
             else:
-                print(f"   ✅ No overlapping objects found")
+                print(f"   No overlapping objects found")
         else:
-            self.logger.info(f"\n🎭 [4/7] Segmentation (SAM)")
-            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
+            self.logger.info(f"\n[4/7] Segmentation (SAM)")
+            self.logger.info(f"   Skipped (not needed for current config)")
 
         # 6) DEPTH (at box centers) — only if needed
         centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
         depths = None
         depth_map = None
         if need_depth and boxes:
-            self.logger.info(f"\n📏 [5/7] Depth Estimation")
-            self.logger.info(f"   ⚙️  Computing depth for {len(boxes)} objects...")
+            self.logger.info(f"\n[5/7] Depth Estimation")
+            self.logger.info(f"   Computing depth for {len(boxes)} objects...")
             if hasattr(self.depth_est, "depth_map"):
                 try:
                     dmap = self.depth_est.depth_map(image_pil)  # returns HxW or normalized map
@@ -3706,19 +3731,19 @@ class ImageGraphPreprocessor:
                 try:
                     depths = self.depth_est.relative_depth_at(image_pil, centers)
                 except Exception as e:
-                    self.logger.warning(f"   ⚠️  Depth estimation failed: {e}")
-                    self.logger.warning(f"   ⏭️  Continuing without depth information")
+                    self.logger.warning(f"   Depth estimation failed: {e}")
+                    self.logger.warning(f"   Continuing without depth information")
                     depths = [0.5] * len(centers)  # Default depth values
-            self.logger.info(f"   ✅ Depth computed")
+            self.logger.info(f"   Depth computed")
         else:
-            self.logger.info(f"\n📏 [5/7] Depth Estimation")
-            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
+            self.logger.info(f"\n[5/7] Depth Estimation")
+            self.logger.info(f"   Skipped (not needed for current config)")
 
         # 7) RELATIONS (geometry + CLIP) — only if needed
         rels_all: List[Dict[str, Any]] = []
         if need_rel and boxes:
-            self.logger.info(f"\n🔗 [6/7] Spatial Relations Inference")
-            self.logger.info(f"   ⚙️  Analyzing relationships between {len(boxes)} objects...")
+            self.logger.info(f"\n[6/7] Spatial Relations Inference")
+            self.logger.info(f"   Analyzing relationships between {len(boxes)} objects...")
             # Prepare relations config with image-level geometry params
             r_cfg = RelationsConfig(
                 margin_px=self.cfg.margin,
@@ -3797,7 +3822,7 @@ class ImageGraphPreprocessor:
             )
             mark("relations_infer")
             
-            self.logger.info(f"   ✅ Found {len(rels_rel)} candidate relationships")
+            self.logger.info(f"   Found {len(rels_rel)} candidate relationships")
 
             # If we pruned objects, remap relation indices back to the original indexing
             if len(indices_for_rel) != len(boxes):
@@ -3815,19 +3840,19 @@ class ImageGraphPreprocessor:
             else:
                 rels_all = rels_rel
         else:
-            self.logger.info(f"\n🔗 [6/7] Spatial Relations Inference")
-            self.logger.info(f"   ⏭️  Skipped (not needed for current config)")
+            self.logger.info(f"\n[6/7] Spatial Relations Inference")
+            self.logger.info(f"   Skipped (not needed for current config)")
         
-        # 🧹 CRITICAL: Clean relations to remove references to deduplicated objects
+        # CRITICAL: Clean relations to remove references to deduplicated objects
         # After DetectorManager's aggressive deduplication, some object indices may be invalid.
         # This removes relations pointing to non-existent objects.
         if rels_all and boxes:
             initial_rels = len(rels_all)
             rels_all = self._clean_invalid_relations(rels_all, len(boxes))
             if initial_rels != len(rels_all):
-                self.logger.info(f"   🧹 Cleaned {initial_rels - len(rels_all)} invalid relations")
+                self.logger.info(f"   Cleaned {initial_rels - len(rels_all)} invalid relations")
         
-        # 🎯 SINGLETON FALLBACK Logic
+        # SINGLETON FALLBACK Logic
         # If question mentions only ONE object type, keep:
         # 1. All instances of that target object
         # 2. All objects directly connected to target via ANY relation
@@ -3880,7 +3905,7 @@ class ImageGraphPreprocessor:
             boxes,
             question_rel_terms=rel_terms if rel_terms else None,
         )
-        # 🎯 CRITICAL: Recompute singleton target indices after relations filtering
+        # CRITICAL: Recompute singleton target indices after relations filtering
         if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
             target_label = str(self._singleton_target_label).lower()
             new_target_indices = {
@@ -3913,7 +3938,7 @@ class ImageGraphPreprocessor:
         # 6c) Apply singleton filtering AFTER limiting relations per object
         # This ensures we only consider the most important relations when finding connected objects
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
-            print(f"\n🎯 [SINGLETON FILTERING] Target + Connected Objects Only (post-relation-filter)")
+            print(f"\n[SINGLETON FILTERING] Target + Connected Objects Only (post-relation-filter)")
             print(f"   Target indices: {sorted(self._target_object_indices)}")
             print(f"   Target labels: {[labels[i] for i in sorted(self._target_object_indices)]}")
             print(f"   Total objects before filter: {len(boxes)}")
@@ -3948,7 +3973,7 @@ class ImageGraphPreprocessor:
                 boxes, labels, scores, masks, depths, rels_all
             )
             
-            print(f"   ✅ After filter: {len(boxes)} objects, {len(rels_all) if rels_all else 0} relations")
+            print(f"   After filter: {len(boxes)} objects, {len(rels_all) if rels_all else 0} relations")
             print(f"   Kept objects: {labels}")
             
             # Clean up flags after use
@@ -3975,7 +4000,7 @@ class ImageGraphPreprocessor:
             
             # Add inferred relation labels to graph edges
             # This ensures that the triple output matches what's drawn in the visualization
-            # ✅ CREATE edges explicitly for ALL inferred relations (don't rely on geometric edge creation)
+            # CREATE edges explicitly for ALL inferred relations (don't rely on geometric edge creation)
             for rel in rels_all:
                 src_idx = int(rel["src_idx"])
                 tgt_idx = int(rel["tgt_idx"])
@@ -3994,6 +4019,7 @@ class ImageGraphPreprocessor:
                 # matches the triples text.
                 try:
                     from gom.graph.prompt import _infer_relation_from_attrs
+
                     # Only apply normalization to basic spatial predicates
                     spatial_set = {
                         "left_of",
@@ -4014,7 +4040,7 @@ class ImageGraphPreprocessor:
                     # If anything goes wrong here, don't break the pipeline; keep original relation
                     pass
             
-            # ✅ FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
+            # FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
             # This prevents inconsistency between triples.txt (which infers relations) and JSON output
             from gom.graph.prompt import _infer_relation_from_attrs
             for u, v in list(scene_graph.edges()):
@@ -4042,7 +4068,7 @@ class ImageGraphPreprocessor:
             with open(triples_path, "w", encoding="utf-8") as f:
                 f.write(to_triples_text(scene_graph))
 
-        # ✅ FIX: Extract relationships from the updated scene_graph (not rels_all)
+        # FIX: Extract relationships from the updated scene_graph (not rels_all)
         # This ensures visualization matches triples.txt and graph.json
         rels_for_viz = []
         if scene_graph is not None and need_rel:
@@ -4064,7 +4090,7 @@ class ImageGraphPreprocessor:
             rels_for_viz = rels_all
 
         # 8) VISUALIZATION / EXPORT
-        self.logger.info(f"\n🎨 [7/7] Visualization & Export")
+        self.logger.info(f"\n[7/7] Visualization & Export")
         if not self.cfg.skip_visualization:
             # Determine output file extension and background settings
             ext = self.cfg.output_format if self.cfg.output_format in ["jpg", "png", "svg"] else "jpg"
@@ -4081,10 +4107,10 @@ class ImageGraphPreprocessor:
             if self.cfg.show_bboxes:
                 render_components.append("bboxes")
             
-            self.logger.info(f"   ⚙️  Rendering: {', '.join(render_components) if render_components else 'all elements'}")
-            self.logger.info(f"   📁 Format: {ext.upper()}")
+            self.logger.info(f"   Rendering: {', '.join(render_components) if render_components else 'all elements'}")
+            self.logger.info(f"   Format: {ext.upper()}")
             if not draw_bg:
-                self.logger.info(f"   🖼️  Background: transparent")
+                self.logger.info(f"   Background: transparent")
             
             out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.{ext}")
             self.visualizer.draw(
@@ -4098,9 +4124,9 @@ class ImageGraphPreprocessor:
                 draw_background=draw_bg,
                 bg_color=(1, 1, 1, 0),
             )
-            self.logger.info(f"   ✅ Saved: {out_img}")
+            self.logger.info(f"   Saved: {out_img}")
         else:
-            self.logger.info(f"   ⏭️  Skipped (visualization disabled)")
+            self.logger.info(f"   Skipped (visualization disabled)")
             
         if self.cfg.export_preproc_only:
             out_png = os.path.join(self.cfg.output_folder, f"{image_name}_preproc.png")
@@ -4121,12 +4147,12 @@ class ImageGraphPreprocessor:
         dt = time.time() - t0
         
         # ═══════════════════════════════════════════════════════════════════
-        # ✅ PREPROCESSING COMPLETE
+        # PREPROCESSING COMPLETE
         # ═══════════════════════════════════════════════════════════════════
         self.logger.info(f"\n{'='*70}")
-        self.logger.info(f"✅ Preprocessing complete!")
-        self.logger.info(f"⏱️  Total time: {dt:.2f}s")
-        self.logger.info(f"📊 Final results:")
+        self.logger.info(f"Preprocessing complete!")
+        self.logger.info(f"Total time: {dt:.2f}s")
+        self.logger.info(f"Final results:")
         self.logger.info(f"   • Objects: {len(boxes)}")
         if rels_for_viz:
             self.logger.info(f"   • Relationships: {len(rels_for_viz)}")

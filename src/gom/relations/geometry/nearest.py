@@ -152,11 +152,10 @@ See Also:
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence
 
-import math
-
-from .core import as_xyxy, iou, edge_gap
+from .core import as_xyxy, edge_gap, iou
 from .masks import depth_stats_from_map
 from .predicates import orientation_label
 

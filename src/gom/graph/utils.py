@@ -3,7 +3,8 @@ Graph Utilities
 
 Helper functions for working with scene graphs and JSON exports.
 """
-from typing import List, Tuple, Union, Dict
+from typing import List, Tuple
+
 
 def boxes_from_scene_graph_json(
     scene_graph_json: dict,

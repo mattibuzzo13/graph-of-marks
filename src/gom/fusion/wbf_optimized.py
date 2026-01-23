@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import logging
 
-from gom.types import Detection
 from gom.fusion.spatial_hash import SpatialHashGrid, compute_iou_pairwise
+from gom.types import Detection
 
 logger = logging.getLogger(__name__)
 

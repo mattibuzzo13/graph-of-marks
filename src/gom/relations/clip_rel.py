@@ -89,17 +89,13 @@ See Also:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
-
-import math
-from PIL import Image
-from collections import deque
 import hashlib
-import os
-from typing import Dict
-import time
-import json
+import math
+from collections import deque
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from PIL import Image
 
 try:
     import numpy as np
@@ -220,15 +216,11 @@ class ClipRelScorer:
         """Initialize CLIP and caches."""
         if self.clip is None and CLIPWrapper is not None:
             try:
-                # Prefer constructor with device kw
-                self.clip = CLIPWrapper(device=self.device)  # type: ignore
-            except TypeError:
-                try:
-                    # Fallback to config object signature
-                    from gom.utils.clip_utils import CLIPConfig  # type: ignore
-                    self.clip = CLIPWrapper(config=CLIPConfig(device=self.device))  # type: ignore
-                except Exception:
-                    self.clip = None  # no CLIP available
+                # Use config object signature
+                from gom.utils.clip_utils import CLIPConfig  # type: ignore
+                self.clip = CLIPWrapper(config=CLIPConfig(device=self.device))  # type: ignore
+            except Exception:
+                self.clip = None  # no CLIP available
         # initialize caches
         try:
             self._score_cache = {} if self._score_cache is None else self._score_cache

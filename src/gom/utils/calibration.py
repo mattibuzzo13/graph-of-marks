@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-import numpy as np
-from pathlib import Path
 import pickle
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence, Tuple
+
+import numpy as np
 
 
 @dataclass
@@ -330,7 +331,6 @@ class ConfidenceCalibrator:
     def _fit_beta(self, scores: np.ndarray, correct: np.ndarray) -> None:
         """Fit beta calibration (generalized Platt scaling)."""
         from scipy.optimize import minimize
-        from scipy.special import betaln
         
         def nll(params):
             a, b, c = params

@@ -88,21 +88,19 @@ References:
 """
 from __future__ import annotations
 
-from .nms import (
-    nms,
-    soft_nms,
+from .nms import (  # SOTA methods
+    adaptive_nms,
+    diou_nms,
     iou,
     labelwise_nms,
-    # SOTA methods
-    soft_nms_gaussian,
-    diou_nms,
     matrix_nms,
-    adaptive_nms,
+    nms,
+    soft_nms,
+    soft_nms_gaussian,
 )
-
 from .wbf import (
-    fuse_detections_wbf,
     compute_iou_vectorized,
+    fuse_detections_wbf,
 )
 
 try:

@@ -1,6 +1,6 @@
 # igp/fusion/benchmark.py
 """
-🚀 Fusion Methods Benchmark & Comparison
+Fusion Methods Benchmark & Comparison
 
 Utility to compare different fusion methods on your data:
 - Speed comparison
@@ -15,9 +15,9 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,6 @@ def compare_fusion_methods(
     
     from . import get_fusion_method
     from .nms import nms as nms_fn
-    from .wbf import fuse_detections_wbf
     
     results = {}
     
@@ -136,13 +135,13 @@ def compare_fusion_methods(
             }
             
             if verbose:
-                print(f"  ✓ {method_name}: {avg_time:.1f}ms, "
+                print(f"  [OK] {method_name}: {avg_time:.1f}ms, "
                       f"{num_output} outputs ({len(detections)-num_output} removed), "
                       f"avg_score={avg_score:.3f}")
         
         except Exception as e:
             if verbose:
-                print(f"  ✗ {method_name}: FAILED ({e})")
+                print(f"  [FAILED] {method_name}: ({e})")
             results[method_name] = {"error": str(e)}
     
     if verbose:
@@ -156,9 +155,9 @@ def compare_fusion_methods(
             most_outputs = max(valid_results.items(), key=lambda x: x[1]["num_output"])
             fewest_outputs = min(valid_results.items(), key=lambda x: x[1]["num_output"])
             
-            print(f"⚡ Fastest: {fastest[0]} ({fastest[1]['time_ms']:.1f}ms)")
-            print(f"🎯 Most outputs: {most_outputs[0]} ({most_outputs[1]['num_output']} dets)")
-            print(f"🔥 Most aggressive: {fewest_outputs[0]} ({fewest_outputs[1]['num_output']} dets)")
+            print(f"Fastest: {fastest[0]} ({fastest[1]['time_ms']:.1f}ms)")
+            print(f"Most outputs: {most_outputs[0]} ({most_outputs[1]['num_output']} dets)")
+            print(f"Most aggressive: {fewest_outputs[0]} ({fewest_outputs[1]['num_output']} dets)")
         print("="*60)
     
     return results
@@ -182,8 +181,8 @@ def visualize_fusion_comparison(
         output_path: If provided, save figure to this path
     """
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.patches as patches
+        import matplotlib.pyplot as plt
     except ImportError:
         logger.error("matplotlib not installed, cannot visualize")
         return

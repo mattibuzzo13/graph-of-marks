@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
-import torch
-from typing import Optional, Callable, Any
-from functools import wraps
 import contextlib
+from functools import wraps
+from typing import Any, Callable, Optional
+
+import torch
 
 
 class MixedPrecisionManager:

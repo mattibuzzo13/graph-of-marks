@@ -101,7 +101,8 @@ except Exception:
 
 # Try to use optimized V2 implementation
 try:
-    from gom.utils.depth_v2 import DepthEstimatorV2, DepthConfig as DepthConfigV2, DepthModel
+    from gom.utils.depth_v2 import DepthConfig as DepthConfigV2
+    from gom.utils.depth_v2 import DepthEstimatorV2, DepthModel
     _HAS_V2 = True
 except ImportError:
     _HAS_V2 = False

@@ -1,5 +1,5 @@
 # igp/utils/cache_advanced.py
-# 🚀 Advanced LRU Cache with intelligent eviction and memory management
+# Advanced LRU Cache with intelligent eviction and memory management
 
 from __future__ import annotations
 

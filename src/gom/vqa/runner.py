@@ -246,25 +246,25 @@ See Also:
     - gom.pipeline.preprocessor: Core preprocessing logic
 """
 from __future__ import annotations
+
 import gc
 import glob
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import psutil
 import torch
 
-from .types import VQAExample
+from .models import HFVLModel, VLLMWrapper
 from .preproc import (
-    preprocess_for_qa,
     get_preprocessed_path,
     get_scene_graph_path,
     load_scene_graph,
+    preprocess_for_qa,
 )
-from .io import load_image
-from .models import VLLMWrapper, HFVLModel
+from .types import VQAExample
 
 # Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
 ModelLike = Union[VLLMWrapper, HFVLModel]
@@ -272,7 +272,7 @@ ModelLike = Union[VLLMWrapper, HFVLModel]
 
 def _should_clear_gpu_cache() -> bool:
     """
-    🚀 Optimized: Smart GPU cache clearing (only when needed).
+    Smart GPU cache clearing (only when needed).
     Returns True if memory usage > 80% threshold.
     Reduces unnecessary empty_cache() calls by ~80%.
     
@@ -345,7 +345,7 @@ def run_vqa(
                     continue
 
                 # Periodic memory cleanup for long runs.
-                # 🚀 Optimized: Smart GPU cache (80% threshold)
+                # Smart GPU cache (80% threshold)
                 if len(processed) and len(processed) % 50 == 0:
                     gc.collect()
                     if _should_clear_gpu_cache():
@@ -414,7 +414,7 @@ def run_vqa(
                 # --- 4) Generate answer and log metadata ---
                 t0 = time.time()
                 ans = model.generate(prompt, image_path=inference_img)
-                # 🚀 Optimized: Smart GPU cache (only when > 80% used)
+                # Smart GPU cache (only when > 80% used)
                 if _should_clear_gpu_cache():
                     torch.cuda.empty_cache()
                 if "Answer:" in ans:

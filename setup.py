@@ -89,7 +89,7 @@ extras_require["all-mps"] = list(set(all_mps))
 
 setup(
     name="graph-of-marks",
-    version="0.1.0",
+    version="1.0.1",
     author="DISI-UNIBO-NLP",
     author_email="",
     description="Visual scene understanding pipeline with multi-model detection, segmentation, and scene graph generation",

@@ -55,9 +55,9 @@ Usage:
 """
 from __future__ import annotations
 
-from typing import List, Tuple
 import html
-import math
+from typing import List
+
 import networkx as nx
 
 

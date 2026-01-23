@@ -25,19 +25,18 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
 from .config import PreprocessorConfig
+from .graph.prompt import graph_to_prompt, graph_to_triples_text
 from .pipeline.preprocessor import ImageGraphPreprocessor
-from .types import Detection, Relationship
 from .viz.visualizer import Visualizer, VisualizerConfig
-from .graph.prompt import graph_to_triples_text, graph_to_prompt
-
 
 # GoM prompting style presets matching the paper's experimental configurations
 GOM_STYLE_PRESETS = {
@@ -74,13 +73,29 @@ GOM_STYLE_PRESETS = {
         "display_relationships": True,
         "display_relation_labels": True,
     },
+    # Alphabetic variants (A, B, C instead of 1, 2, 3)
+    "som_alphabetic": {
+        "label_mode": "alphabetic",
+        "display_relationships": False,
+        "display_relation_labels": False,
+    },
+    "gom_alphabetic": {
+        "label_mode": "alphabetic",
+        "display_relationships": True,
+        "display_relation_labels": False,
+    },
+    "gom_alphabetic_labeled": {
+        "label_mode": "alphabetic",
+        "display_relationships": True,
+        "display_relation_labels": True,
+    },
 }
 
 # Type alias for prompting styles
 GomStyle = Literal[
-    "som_text", "som_numeric",
-    "gom_text", "gom_numeric",
-    "gom_text_labeled", "gom_numeric_labeled"
+    "som_text", "som_numeric", "som_alphabetic",
+    "gom_text", "gom_numeric", "gom_alphabetic",
+    "gom_text_labeled", "gom_numeric_labeled", "gom_alphabetic_labeled"
 ]
 
 
@@ -114,7 +129,11 @@ class ProcessingConfig:
 
     Attributes:
         # Detection parameters
-        threshold: Detection confidence threshold (applies to all detectors)
+        threshold: Default detection confidence threshold (applies to all detectors)
+        threshold_owl: OWL-ViT detector threshold (overrides threshold if set)
+        threshold_yolo: YOLOv8 detector threshold (overrides threshold if set)
+        threshold_detectron: Detectron2 detector threshold (overrides threshold if set)
+        threshold_grounding_dino: GroundingDINO detector threshold (overrides threshold if set)
         max_detections: Maximum number of detections to keep (top-N by score)
 
         # Relationship parameters
@@ -124,7 +143,7 @@ class ProcessingConfig:
         # Visualization style (GoM paper configurations)
         style: Preset style ("som_text", "som_numeric", "gom_text", "gom_numeric",
                "gom_text_labeled", "gom_numeric_labeled")
-        label_mode: "original" (oven_1) or "numeric" (1, 2, 3)
+        label_mode: "original" (oven_1), "numeric" (1, 2, 3), or "alphabetic" (A, B, C)
         display_labels: Show object labels
         display_relationships: Show relationship arrows
         display_relation_labels: Show labels on arrows
@@ -161,6 +180,10 @@ class ProcessingConfig:
     """
     # Detection
     threshold: float = 0.5
+    threshold_owl: Optional[float] = None  # OWL-ViT threshold (uses threshold if None)
+    threshold_yolo: Optional[float] = None  # YOLOv8 threshold (uses threshold if None)
+    threshold_detectron: Optional[float] = None  # Detectron2 threshold (uses threshold if None)
+    threshold_grounding_dino: Optional[float] = None  # GroundingDINO threshold (uses threshold if None)
     max_detections: int = 200
 
     # Relationships
@@ -366,8 +389,9 @@ class GoM:
                 - scene_graph: NetworkX graph object
                 - scene_graph_text: Textual scene graph (triples format)
                 - scene_graph_prompt: Compact prompt format
+                - output_image: PIL Image with the rendered visualization
                 - processing_time: Time in seconds
-                - output_path: Path to visualization (if saved)
+                - output_path: Path to visualization (if save=True)
         """
         t0 = time.time()
 
@@ -395,8 +419,11 @@ class GoM:
             boxes, labels, scores = self.detect_fn(image_pil)
             boxes = [list(b) for b in boxes]
         else:
-            # Update threshold for this run
-            self._preprocessor.cfg.threshold_yolo = config.threshold
+            # Update thresholds for this run (per-detector or fallback to global)
+            self._preprocessor.cfg.threshold_owl = config.threshold_owl if config.threshold_owl is not None else config.threshold
+            self._preprocessor.cfg.threshold_yolo = config.threshold_yolo if config.threshold_yolo is not None else config.threshold
+            self._preprocessor.cfg.threshold_detectron = config.threshold_detectron if config.threshold_detectron is not None else config.threshold
+            self._preprocessor.cfg.threshold_grounding_dino = config.threshold_grounding_dino if config.threshold_grounding_dino is not None else config.threshold
             det_result = self._preprocessor._run_detectors(image_pil)
             boxes = det_result.get("boxes", [])
             labels = det_result.get("labels", [])
@@ -454,6 +481,17 @@ class GoM:
         if boxes:
             depths_at_centers = None
             if depth is not None:
+                # Resize depth map to match image dimensions if needed
+                dH, dW = depth.shape[:2]
+                if (dH, dW) != (H, W):
+                    try:
+                        import cv2
+                        depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
+                    except ImportError:
+                        from PIL import Image as PILImage
+                        depth_pil = PILImage.fromarray(depth)
+                        depth = np.array(depth_pil.resize((W, H), PILImage.BILINEAR))
+                
                 centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
                 depths_at_centers = []
                 for cx, cy in centers:
@@ -542,12 +580,87 @@ class GoM:
             "processing_time": time.time() - t0,
         }
 
-        # Save outputs
+        # Always render the visualization (returned in output_image)
+        output_image = self._render_visualization(image_pil, result, config)
+        result["output_image"] = output_image
+
+        # Save outputs to disk if requested
         if save:
             self._save_outputs(image_pil, image_name, result, config, output_dir)
             result["output_path"] = str(output_dir / f"{image_name}_04_output.png")
 
         return result
+
+    def _render_visualization(
+        self,
+        image: Image.Image,
+        result: Dict[str, Any],
+        config: ProcessingConfig,
+    ) -> Image.Image:
+        """
+        Render the final visualization and return as PIL Image.
+        
+        This method creates the annotated output image with bounding boxes,
+        segmentation masks, labels, and relationship arrows based on the
+        configuration settings.
+        
+        Args:
+            image: Original input image
+            result: Processing result dict with boxes, labels, masks, relationships
+            config: Processing configuration
+            
+        Returns:
+            PIL Image with the rendered visualization
+        """
+        import io
+        
+        boxes = result["boxes"]
+        labels = result["labels"]
+        scores = result["scores"]
+        masks = result["masks"]
+        relationships = result["relationships"]
+        
+        if not boxes:
+            # Return original image if no detections
+            return image.copy()
+        
+        # Create visualizer with config settings
+        viz_config = VisualizerConfig(
+            label_mode=config.label_mode,
+            display_labels=config.display_labels,
+            display_relationships=config.display_relationships,
+            display_relation_labels=config.display_relation_labels,
+            display_legend=config.display_legend,
+            show_segmentation=config.show_segmentation,
+            fill_segmentation=config.fill_segmentation,
+            show_bboxes=config.show_bboxes,
+            seg_fill_alpha=config.seg_fill_alpha,
+            bbox_linewidth=config.bbox_linewidth,
+            color_sat_boost=config.color_sat_boost,
+            color_val_boost=config.color_val_boost,
+        )
+        visualizer = Visualizer(viz_config)
+        
+        mask_dicts = [{"segmentation": m} for m in masks] if masks else None
+        fig, ax = visualizer.draw(
+            image=image,
+            boxes=boxes,
+            labels=labels,
+            scores=scores,
+            relationships=relationships if config.display_relationships else [],
+            masks=mask_dicts,
+            save_path=None,  # Don't save, just render
+            draw_background=True,
+        )
+        
+        # Convert matplotlib figure to PIL Image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, dpi=150)
+        buf.seek(0)
+        output_image = Image.open(buf).convert("RGB")
+        plt.close(fig)
+        
+        return output_image
 
     def _save_outputs(
         self,

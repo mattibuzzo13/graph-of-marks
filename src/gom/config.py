@@ -86,10 +86,11 @@ from __future__ import annotations
 
 from typing import Any
 
-# Re-export configuration dataclasses from their respective modules
-from gom.segmentation.base import SegmenterConfig
 from gom.relations.inference import RelationsConfig
+from gom.segmentation.base import SegmenterConfig
 from gom.viz.visualizer import VisualizerConfig
+
+# Re-export configuration dataclasses from their respective modules
 
 # PreprocessorConfig is defined in the pipeline module
 # Use try/except to provide a lightweight fallback and avoid circular import errors
@@ -99,7 +100,7 @@ except Exception as _exc:
     # Fallback configuration class used only during early import phases
     # This will be replaced by the actual PreprocessorConfig once the pipeline module loads
     from dataclasses import dataclass, field
-    from typing import Optional, List, Dict, Any, Tuple
+    from typing import Any, Dict, Optional, Tuple
 
     @dataclass
     class PreprocessorConfig:  # type: ignore[no-redef]
@@ -129,8 +130,8 @@ except Exception as _exc:
         # Segmentation
         segmenter: str = "sam2"
         segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)
-        
-        # Depth estimationr = ""
+
+        # Output configuration
         output_folder: str = "output_images"
 
         # Dataset configuration and batching
@@ -234,11 +235,11 @@ except Exception as _exc:
         display_legend: bool = False
         seg_fill_alpha: float = 0.25
         bbox_linewidth: float = 2.0
-        obj_fontsize_inside: int = 12
-        obj_fontsize_outside: int = 12
-        rel_fontsize: int = 10
+        obj_fontsize_inside: int = 9
+        obj_fontsize_outside: int = 10
+        rel_fontsize: int = 8
         legend_fontsize: int = 8
-        rel_arrow_linewidth: float = 2.5
+        rel_arrow_linewidth: float = 2.0
         rel_arrow_mutation_scale: float = 26.0
         resolve_overlaps: bool = True
         show_bboxes: bool = True

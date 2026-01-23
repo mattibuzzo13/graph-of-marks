@@ -1,18 +1,17 @@
 # igp/utils/depth_v2.py
-# 🚀 OPTIMIZED Depth Estimator with support for multiple SOTA models:
+# Optimized Depth Estimator with support for multiple SOTA models:
 # - Depth Anything V2 (2024) - SOTA monocular depth estimation
 # - MiDaS v3.1 DPT-Large (fallback)
 # - Optimized with: lazy loading, model caching, warmup, mixed precision
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple, Any, Union
 import hashlib
 import os
-import threading
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
@@ -32,10 +31,6 @@ except Exception:
     _HAS_TORCH = False
     torch = None  # type: ignore
 
-# 🚀 Global model registry for shared instances across preprocessors
-_MODEL_REGISTRY: Dict[str, Any] = {}
-_REGISTRY_LOCK = threading.Lock()
-
 
 class DepthModel(str, Enum):
     """Supported depth estimation models."""
@@ -50,19 +45,18 @@ class DepthModel(str, Enum):
 class DepthConfig:
     """
     Configuration for depth estimation.
-    
+
     Depth Anything V2 models:
     - vits (Small): Fast, ~5 FPS on CPU, 50+ FPS on GPU
-    - vitb (Base): Balanced, ~3 FPS on CPU, 40+ FPS on GPU  
+    - vitb (Base): Balanced, ~3 FPS on CPU, 40+ FPS on GPU
     - vitl (Large): Best quality, ~2 FPS on CPU, 30+ FPS on GPU
-    
+
     MiDaS models:
     - DPT_Large: High quality, slower
     - DPT_Hybrid: Balanced quality/speed
-    
+
     Optimization flags:
     - lazy_load: Load model only when first needed (saves ~2-5s startup)
-    - use_model_registry: Share models across instances (saves RAM)
     - enable_compile: Use torch.compile for 30% speedup (PyTorch 2.0+)
     - warmup: Run dummy inference for JIT compilation
     """
@@ -72,9 +66,8 @@ class DepthConfig:
     cache_maps: bool = True  # Cache depth maps per image hash
     max_cache_size: int = 100  # Maximum cached depth maps
     
-    # 🚀 Loading optimizations
+    # Loading optimizations
     lazy_load: bool = True  # Defer model loading until first use
-    use_model_registry: bool = True  # Share model instances (saves RAM)
     enable_compile: bool = True  # torch.compile for speedup (PyTorch 2.0+)
     warmup: bool = False  # Run warmup inference (adds ~0.5s init time)
     download_timeout: int = 300  # HuggingFace download timeout (seconds)
@@ -83,13 +76,12 @@ class DepthConfig:
 
 class DepthEstimatorV2:
     """
-    🚀 OPTIMIZED Multi-model depth estimator supporting:
+    Multi-model depth estimator supporting:
     - Depth Anything V2 (SOTA 2024)
     - MiDaS v3.1
-    
+
     Features:
     - Lazy loading (load model only when first needed)
-    - Model registry (share models across instances)
     - Intelligent caching (avoid recomputing same images)
     - Mixed precision FP16 (2x GPU speedup)
     - torch.compile support (30% speedup on PyTorch 2.0+)
@@ -108,56 +100,27 @@ class DepthEstimatorV2:
         self._depth_cache: Dict[str, np.ndarray] = {}  # image_hash -> depth_map
         self._model_type = None
         self._model_loaded = False
-        self._model_key = None  # Key for model registry
-        
+
         if not self._ok:
             return
-        
+
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")  # type: ignore[attr-defined]
         self._amp_enabled = (self.device == "cuda" and bool(self.config.fp16_on_cuda))
         self._amp_dtype = torch.float16 if self._amp_enabled else torch.float32  # type: ignore[attr-defined]
-        
-        # Generate model key for registry
-        self._model_key = self._generate_model_key()
-        
+
         # Load model immediately or defer to first use
         if not self.config.lazy_load:
             self._ensure_model_loaded()
-    
-    def _generate_model_key(self) -> str:
-        """Generate unique key for model registry."""
-        return f"{self.config.model_name.value}_{self.device}_{self._amp_dtype}"
     
     def _ensure_model_loaded(self) -> None:
         """Ensure model is loaded (lazy loading support)."""
         if self._model_loaded:
             return
-        
-        # Check model registry first
-        if self.config.use_model_registry:
-            with _REGISTRY_LOCK:
-                if self._model_key in _MODEL_REGISTRY:
-                    print(f"[DEPTH] ✓ Reusing cached model: {self._model_key}")
-                    cached_model = _MODEL_REGISTRY[self._model_key]
-                    self.model = cached_model["model"]
-                    self.transform = cached_model["transform"]
-                    self._model_type = cached_model["model_type"]
-                    self._model_loaded = True
-                    return
-        
-        # Load model
+
+        # Load model into instance variables
         self._load_model()
         self._model_loaded = True
-        
-        # Store in registry
-        if self.config.use_model_registry:
-            with _REGISTRY_LOCK:
-                _MODEL_REGISTRY[self._model_key] = {
-                    "model": self.model,
-                    "transform": self.transform,
-                    "model_type": self._model_type,
-                }
-        
+
         # Optional warmup
         if self.config.warmup:
             self._warmup()
@@ -219,7 +182,7 @@ class DepthEstimatorV2:
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             
-            print("[DEPTH] ✓ Warmup complete")
+            print("[DEPTH] Warmup complete")
             
         except Exception as e:
             print(f"[DEPTH] Warmup failed (skipping): {e}")
@@ -241,7 +204,7 @@ class DepthEstimatorV2:
         """
         try:
             from huggingface_hub import hf_hub_download
-            
+
             # Map model name to configuration
             model_configs = {
                 "depth_anything_v2_vits": {
@@ -269,50 +232,51 @@ class DepthEstimatorV2:
             
             print(f"[DEPTH] Loading Depth Anything V2 ({encoder})...")
             
-            # 🚀 Download checkpoint with retry and cache support
+            # Download checkpoint with retry and cache support
             max_retries = 3
             checkpoint_path = None
             cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
             cache_dir.mkdir(parents=True, exist_ok=True)
             
+            # Check if offline mode is forced via environment
+            hf_offline = os.environ.get("HF_HUB_OFFLINE", "0").lower() in ("1", "true", "yes")
+            
             for attempt in range(max_retries):
                 try:
+                    # Always try with local_files_only=False unless HF_HUB_OFFLINE is set
                     checkpoint_path = hf_hub_download(
                         repo_id=config["hf_repo"],
                         filename=f"depth_anything_v2_{encoder}.pth",
                         repo_type="model",
                         cache_dir=str(cache_dir),
-                        local_files_only=(attempt > 0)  # First try: allow download, retry: cache only
+                        local_files_only=hf_offline,  # Respect env var, allow downloads otherwise
                     )
                     
-                    # Check if file was from cache or downloaded
-                    if attempt == 0:
-                        # First attempt succeeded - could be cache hit or download
-                        cache_path = Path(checkpoint_path)
-                        if cache_path.exists():
-                            # Check if it's recently modified (just downloaded)
-                            import time
-                            age_seconds = time.time() - cache_path.stat().st_mtime
-                            if age_seconds < 5:  # Modified in last 5 seconds
-                                print(f"[DEPTH] ✓ Checkpoint downloaded: {cache_path.name}")
-                            else:
-                                print(f"[DEPTH] ✓ Using cached checkpoint: {cache_path.name}")
-                    else:
-                        print(f"[DEPTH] ✓ Loaded from cache: {Path(checkpoint_path).name}")
+                    # Log cache hit vs download
+                    cache_path = Path(checkpoint_path)
+                    if cache_path.exists():
+                        import time
+                        age_seconds = time.time() - cache_path.stat().st_mtime
+                        if age_seconds < 5:  # Modified in last 5 seconds
+                            print(f"[DEPTH] Checkpoint downloaded: {cache_path.name}")
+                        else:
+                            print(f"[DEPTH] Using cached checkpoint: {cache_path.name}")
                     
                     break
                     
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        print(f"[DEPTH] Download attempt {attempt + 1} failed, retrying...")
+                        import time as time_mod
+                        print(f"[DEPTH] Download attempt {attempt + 1} failed, retrying in 2s...")
+                        time_mod.sleep(2)  # Wait before retry
                     else:
                         raise RuntimeError(f"Failed to download after {max_retries} attempts: {e}")
             
-            # 🚀 Import Depth Anything V2 - Efficient approach
+            # Import Depth Anything V2 - Efficient approach
             # Strategy: Copy only necessary files to src/ instead of cloning full repo
             try:
                 from depth_anything_v2.dpt import DepthAnythingV2
-                print(f"[DEPTH] ✓ Using installed depth_anything_v2 module")
+                print(f"[DEPTH] Using installed depth_anything_v2 module")
             except ImportError:
                 # Check if cached clone exists, and copy module to src/
                 cache_dir = Path.home() / ".cache" / "depth_anything_v2"
@@ -324,7 +288,7 @@ class DepthEstimatorV2:
                     sys.path.insert(0, str(src_depth_v2_dir.parent))
                     try:
                         from depth_anything_v2.dpt import DepthAnythingV2
-                        print(f"[DEPTH] ✓ Using depth_anything_v2 from {src_depth_v2_dir}")
+                        print(f"[DEPTH] Using depth_anything_v2 from {src_depth_v2_dir}")
                     except ImportError as e:
                         raise RuntimeError(f"Module exists but import failed: {e}")
                         
@@ -337,7 +301,7 @@ class DepthEstimatorV2:
                     if source_module.exists():
                         try:
                             shutil.copytree(source_module, src_depth_v2_dir)
-                            print(f"[DEPTH] ✓ Module copied to {src_depth_v2_dir}")
+                            print(f"[DEPTH] Module copied to {src_depth_v2_dir}")
                             
                             # Import after copy
                             import sys
@@ -366,7 +330,7 @@ class DepthEstimatorV2:
                         if source_module.exists():
                             import shutil
                             shutil.copytree(source_module, src_depth_v2_dir)
-                            print(f"[DEPTH] ✓ Module setup complete at {src_depth_v2_dir}")
+                            print(f"[DEPTH] Module setup complete at {src_depth_v2_dir}")
                             
                             # Import
                             import sys
@@ -380,7 +344,7 @@ class DepthEstimatorV2:
                     except Exception as e:
                         raise RuntimeError(f"Setup failed: {e}")
             
-            # 🚀 Initialize model
+            # Initialize model
             print(f"[DEPTH] Initializing Depth Anything V2 ({encoder})...")
             self.model = DepthAnythingV2(
                 encoder=encoder,
@@ -388,7 +352,7 @@ class DepthEstimatorV2:
                 out_channels=config["out_channels"]
             )
             
-            # 🚀 Load weights with memory optimization
+            # Load weights with memory optimization
             print(f"[DEPTH] Loading weights...")
             state_dict = torch.load(
                 checkpoint_path, 
@@ -408,16 +372,16 @@ class DepthEstimatorV2:
             # No separate transform needed for Depth Anything V2
             self.transform = None
             
-            # 🚀 torch.compile for 30% speedup (PyTorch 2.0+)
+            # torch.compile for 30% speedup (PyTorch 2.0+)
             if self.config.enable_compile and hasattr(torch, "compile") and self.device == "cuda":
                 try:
                     print("[DEPTH] Compiling model with torch.compile...")
                     self.model = torch.compile(self.model, mode="reduce-overhead")
-                    print("[DEPTH] ✓ torch.compile enabled")
+                    print("[DEPTH] torch.compile enabled")
                 except Exception as e:
                     print(f"[DEPTH] torch.compile failed (skipping): {e}")
             
-            print(f"[DEPTH] ✓ Depth Anything V2 ({encoder}) loaded successfully")
+            print(f"[DEPTH] Depth Anything V2 ({encoder}) loaded successfully")
                     
         except Exception as e:
             print(f"[WARNING] Failed to load Depth Anything V2: {e}")
@@ -438,31 +402,44 @@ class DepthEstimatorV2:
         torch.hub.set_dir(os.path.expanduser("~/.cache/torch/hub"))
         
         # Load model (torch.hub automatically uses cache if available)
-        try:
-            self.model = torch.hub.load(
-                "intel-isl/MiDaS", 
-                model_name,
-                skip_validation=False,  # Validate cache
-                verbose=True  # Show cache hits/misses
-            ).to(self.device).eval()  # type: ignore[attr-defined]
-            
-            transforms = torch.hub.load(
-                "intel-isl/MiDaS", 
-                "transforms",
-                skip_validation=False,
-                verbose=False  # Less verbose for transforms
-            )  # type: ignore[attr-defined]
-            
-            if model_name.startswith("DPT"):
-                self.transform = transforms.dpt_transform
-            else:
-                self.transform = transforms.small_transform
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                self.model = torch.hub.load(
+                    "intel-isl/MiDaS", 
+                    model_name,
+                    skip_validation=False,  # Validate cache
+                    trust_repo=True,  # Suppress untrusted repo warning
+                    verbose=True  # Show cache hits/misses
+                ).to(self.device).eval()  # type: ignore[attr-defined]
                 
-            print(f"[DEPTH] ✓ MiDaS {model_name} loaded successfully")
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to load MiDaS: {e}")
-            raise
+                transforms = torch.hub.load(
+                    "intel-isl/MiDaS", 
+                    "transforms",
+                    skip_validation=False,
+                    trust_repo=True,  # Suppress untrusted repo warning
+                    verbose=False  # Less verbose for transforms
+                )  # type: ignore[attr-defined]
+                
+                if model_name.startswith("DPT"):
+                    self.transform = transforms.dpt_transform
+                else:
+                    self.transform = transforms.small_transform
+                    
+                print(f"[DEPTH] MiDaS {model_name} loaded successfully")
+                return  # Success, exit function
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    import time as time_mod
+                    print(f"[DEPTH] MiDaS load attempt {attempt + 1} failed, retrying in 2s...")
+                    time_mod.sleep(2)
+        
+        print(f"[ERROR] Failed to load MiDaS after {max_retries} attempts: {last_error}")
+        raise last_error  # type: ignore[misc]
     
     def available(self) -> bool:
         """Check if depth estimation is available."""
@@ -488,7 +465,7 @@ class DepthEstimatorV2:
         Returns:
             Depth map as float32 numpy array, or None if unavailable
         """
-        # 🚀 Ensure model is loaded (lazy loading)
+        # Ensure model is loaded (lazy loading)
         self._ensure_model_loaded()
         
         if not self.available():

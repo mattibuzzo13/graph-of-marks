@@ -20,11 +20,11 @@ Features:
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
 from pathlib import Path
+from typing import List, Optional, Sequence
 
-import torch
 import numpy as np
+import torch
 from PIL import Image
 
 from gom.detectors.base import Detector
@@ -113,8 +113,6 @@ class GroundingDINODetector(Detector):
             )
         
         self.text_prompt = text_prompt
-        
-        # Load model
         self._load_model(model_name, checkpoint_dir)
     
     def _load_model(self, model_name: str, checkpoint_dir: str) -> None:

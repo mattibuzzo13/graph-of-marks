@@ -74,16 +74,16 @@ See Also:
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
-from dataclasses import dataclass
-
 import math
-import numpy as np
-from PIL import Image
+import os
 
 # Parallel processing
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+
+import numpy as np
+from PIL import Image
 
 from .clip_rel import ClipRelScorer
 from .geometry import (
@@ -92,13 +92,10 @@ from .geometry import (
     center_distance,
     depth_stats_from_map,
     edge_gap,
-    iou,
-    is_below_of,
-    is_on_top_of,
-    is_in_front_of,
-    is_behind_of,
-    orientation_label,
     horizontal_overlap,
+    iou,
+    is_in_front_of,
+    is_on_top_of,
     vertical_overlap,
 )
 
@@ -109,7 +106,7 @@ except Exception:
     _semantic_filter = None  # type: ignore
     _SEMANTIC_FILTER_AVAILABLE = False
 
-# 🚀 SOTA modules (optional)
+# SOTA modules (optional)
 try:
     from .llm_guided import LLMRelationInferencer, LLMRelationsConfig
     LLM_AVAILABLE = True
@@ -119,7 +116,7 @@ except ImportError:
     LLM_AVAILABLE = False
 
 try:
-    from .spatial_3d import Spatial3DReasoner, Spatial3DConfig
+    from .spatial_3d import Spatial3DConfig, Spatial3DReasoner
     SPATIAL_3D_AVAILABLE = True
 except ImportError:
     Spatial3DReasoner = None  # type: ignore
@@ -127,7 +124,7 @@ except ImportError:
     SPATIAL_3D_AVAILABLE = False
 
 try:
-    from .physics import PhysicsReasoner, PhysicsConfig
+    from .physics import PhysicsConfig, PhysicsReasoner
     PHYSICS_AVAILABLE = True
 except ImportError:
     PhysicsReasoner = None  # type: ignore
@@ -249,18 +246,18 @@ class RelationsConfig:
     max_clip_pairs: int = 500
     per_src_clip_pairs: int = 20
     
-    # 🚀 SOTA: LLM-guided relations (optional)
+    # SOTA: LLM-guided relations (optional)
     use_llm_relations: bool = False
     llm_backend: str = "gpt4v"  # "gpt4v" | "llava" | "mock"
     llm_api_key: Optional[str] = None
     llm_confidence_threshold: float = 0.6
     
-    # 🚀 SOTA: 3D spatial reasoning (optional)
+    # SOTA: 3D spatial reasoning (optional)
     use_3d_reasoning: bool = False
     depth_threshold: float = 0.1
     use_occlusion: bool = True
     
-    # 🚀 SOTA: Physics-informed filtering (ENABLED for better reliability)
+    # SOTA: Physics-informed filtering (ENABLED for better reliability)
     # Filters impossible relations like "sofa on_top_of book"
     use_physics_filtering: bool = True
     filter_impossible: bool = True
@@ -409,13 +406,13 @@ class RelationInferencer:
         if iou_val > 0.3:
             return rels  # Skip highly overlapping boxes
         
-        # Determina la direzione primaria
+        # Determine primary direction
         if abs(dy) >= abs(dx) and abs(dy) > margin:
-            # Relazione verticale
-            relation = "above" if cy1 < cy2 else "below"  # i sopra j se y1 < y2
+            # Vertical relation
+            relation = "above" if cy1 < cy2 else "below"  # i above j if y1 < y2
             v_overlap = vertical_overlap(box_i, box_j)
             if v_overlap > max(h_i, h_j) * 0.7:
-                return rels  # Troppa sovrapposizione verticale
+                return rels  # Too much vertical overlap
             h_ref = min(h_i, h_j)
             contact_tol = max(2.0, 0.02 * h_ref)
             if relation == "above":
@@ -425,20 +422,20 @@ class RelationInferencer:
             if gap <= contact_tol:
                 return rels
         elif abs(dx) > margin:
-            # Relazione orizzontale
-            relation = "left_of" if cx1 < cx2 else "right_of"  # i a sinistra di j se x1 < x2
+            # Horizontal relation
+            relation = "left_of" if cx1 < cx2 else "right_of"  # i left of j if x1 < x2
             h_overlap = horizontal_overlap(box_i, box_j)
             if h_overlap > max(w_i, w_j) * 0.7:
-                return rels  # Troppa sovrapposizione orizzontale
+                return rels  # Too much horizontal overlap
         else:
             return rels
 
-        # Aggiungi la relazione primaria (i -> j)
+        # Add primary relation (i -> j)
         rels.append(
             {"src_idx": i, "tgt_idx": j, "relation": relation, "distance": dist}
         )
 
-        # Aggiungi la relazione inversa (j -> i)
+        # Add inverse relation (j -> i)
         inverse_relation = {
             "left_of": "right_of",
             "right_of": "left_of",
@@ -1134,18 +1131,18 @@ class RelationInferencer:
             if i in question_subject_idxs:
                 rel_cap = max(rel_cap, 3)
 
-            # Ordina per confidenza/score se presente, altrimenti per distanza
+            # Sort by confidence/score if present, otherwise by distance
             def rel_sort_key(r):
-                # Priorità: question term, poi score/confidenza, poi distanza
+                # Priority: question term, then score/confidence, then distance
                 q_priority = 0 if _is_question_rel(r.get("relation", ""), r) else 1
                 rel_priority = self._get_relation_priority(r.get("relation", ""))
                 rel_conf = self._get_relation_confidence(r)
-                # Usa clip_sim, score, o distance
+                # Use clip_sim, score, or distance
                 score = r.get("clip_sim", None)
                 if score is None:
                     score = r.get("score", None)
                 if score is not None:
-                    # Score negativo per ordinare decrescente
+                    # Negative score for descending order
                     return (q_priority, -rel_priority, -score, r.get("distance", 1e9))
                 else:
                     return (q_priority, -rel_priority, -rel_conf, r.get("distance", 1e9))
@@ -1581,7 +1578,7 @@ class RelationInferencer:
         total_objects: Optional[int] = None,
     ) -> List[dict]:
         """
-        ✅ FIXED: Remove inverse duplicate relations correctly.
+        Remove inverse duplicate relations correctly.
         Keep only one direction per pair (i,j), preferring:
         1. Relations involving question subjects (if provided)
         2. Higher CLIP confidence
@@ -1891,7 +1888,7 @@ class RelationInferencer:
             relationships = list(relationships) + added
         return relationships
 
-    # unify_spatial_direction rimossa: le relazioni spaziali mantengono la direzione originale src_idx → tgt_idx
+    # unify_spatial_direction removed: spatial relations keep original direction src_idx → tgt_idx
 
     # -------------------- internals --------------------
 

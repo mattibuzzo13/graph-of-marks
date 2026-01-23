@@ -54,19 +54,20 @@ Typical Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Optional, Dict, Any
-
-import math
-import json
 import gzip
+import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import networkx as nx
+import numpy as np
 from PIL import Image
 
-from gom.utils.boxes import iou as iou_xyxy, center, union as union_box
+from gom.utils.boxes import center
+from gom.utils.boxes import iou as iou_xyxy
+from gom.utils.boxes import union as union_box
 from gom.utils.clip_utils import CLIPWrapper
 from gom.utils.depth import DepthEstimator
 
@@ -189,10 +190,10 @@ class SceneGraphBuilder:
     
     Example:
         >>> from PIL import Image
-        >>> from gom.utils.clip_utils import CLIPWrapper
+        >>> from gom.utils.clip_utils import CLIPWrapper, CLIPConfig
         >>> 
         >>> # Initialize builder with CLIP
-        >>> clip = CLIPWrapper(device="cuda")
+        >>> clip = CLIPWrapper(config=CLIPConfig(device="cuda"))
         >>> builder = SceneGraphBuilder(clip=clip)
         >>> 
         >>> # Build graph from detections
@@ -433,7 +434,7 @@ class SceneGraphBuilder:
     ) -> List[str]:
         """
         Rough "dominant color" estimation per box.
-        🚀 Optimized: Uses fast histogram-based method (5-10x faster than KMeans).
+        Optimized: Uses fast histogram-based method (5-10x faster than KMeans).
         
         Fallback order:
         1. Fast histogram binning (8x8x8 = 512 bins)
@@ -449,7 +450,7 @@ class SceneGraphBuilder:
         self, image: Image.Image, boxes_xyxy: Sequence[Sequence[float]]
     ) -> List[str]:
         """
-        🚀 Fast histogram-based dominant color extraction.
+        Fast histogram-based dominant color extraction.
         Uses 8x8x8 RGB binning instead of KMeans clustering.
         
         Performance: ~20ms per 100 objects vs ~200ms with KMeans (10x faster)
@@ -538,6 +539,7 @@ class SceneGraphBuilder:
                 # Ignore sklearn ConvergenceWarning (duplicate points / small crops)
                 try:
                     import warnings
+
                     from sklearn.exceptions import ConvergenceWarning  # type: ignore
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", category=ConvergenceWarning)

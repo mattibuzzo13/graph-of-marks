@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graph-of-marks"
-version = "0.1.17"
+version = "1.0.1"
 description = "Visual scene understanding pipeline with multi-model detection, segmentation, and scene graph generation"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
 import numpy as np
 from PIL import Image
-import cv2
 
 
 @dataclass
@@ -358,7 +358,7 @@ class TTADetector:
     ) -> Dict[str, Any]:
         """Fuse predictions using standard NMS (per-class)."""
         from gom.fusion.nms import labelwise_nms
-        
+
         # Convert to required format
         boxes_array = np.array(boxes)
         scores_array = np.array(scores)

@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
+
 import torch
-from pathlib import Path
 
 
 class ModelRegistry:

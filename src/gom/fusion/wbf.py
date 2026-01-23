@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from gom.types import Detection
-import logging
 
 logger = logging.getLogger(__name__)
 

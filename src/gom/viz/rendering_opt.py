@@ -26,7 +26,8 @@ Performance Impact:
 
 from __future__ import annotations
 
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
+
 import numpy as np
 
 
@@ -582,7 +583,7 @@ def profile_rendering(func):
 if __name__ == "__main__":
     # Test vectorized operations
     import time
-    
+
     # Generate test data
     N = 100
     boxes = np.random.rand(N, 4) * 512

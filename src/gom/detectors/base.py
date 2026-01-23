@@ -82,12 +82,13 @@ See Also:
 """
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import List, Sequence, Optional
-from PIL import Image
 import concurrent.futures
-import os
 import logging
+import os
+from abc import ABC, abstractmethod
+from typing import List, Optional, Sequence
+
+from PIL import Image
 
 from gom.types import Detection
 

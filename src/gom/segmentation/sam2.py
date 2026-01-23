@@ -41,15 +41,16 @@ Usage:
     0.94
 
 Improvements over SAM 1.0:
-    ✓ +5-10% mask IoU on complex scenes
-    ✓ Better on occluded objects
-    ✓ Finer detail preservation
-    ✓ Video tracking capability
-    ✓ ~15% faster inference
+    - +5-10% mask IoU on complex scenes
+    - Better on occluded objects
+    - Finer detail preservation
+    - Video tracking capability
+    - ~15% faster inference
     
-    ✗ Requires SAM2 repo installation
-    ✗ Larger checkpoint files
-    ✗ More VRAM usage
+    Cons:
+    - Requires SAM2 repo installation
+    - Larger checkpoint files
+    - More VRAM usage
 
 Notes:
     - Requires facebookresearch/sam2 package
@@ -135,13 +136,13 @@ class Sam2Segmenter(Segmenter):
             from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore
         except Exception as e:
             raise ImportError(
-                "Moduli SAM2 non trovati. Installa il repo ufficiale SAM2 (facebookresearch/sam2)."
+                "SAM2 modules not found. Install the official SAM2 repo (facebookresearch/sam2)."
             ) from e
 
         ckpt_path = Path(checkpoint)
         if not ckpt_path.exists():
-            raise FileNotFoundError(f"Checkpoint SAM-2 non trovato: {ckpt_path}")
-        # Il file YAML può essere risolto dal repo installato; non forziamo il download.
+            raise FileNotFoundError(f"SAM-2 checkpoint not found: {ckpt_path}")
+        # The YAML file can be resolved from the installed repo; no forced download.
         self._sam2_model = build_sam2(model_cfg, str(ckpt_path), device=self.device, precision=self._precision).eval()
         self._predictor = SAM2ImagePredictor(self._sam2_model)
 
@@ -179,14 +180,14 @@ class Sam2Segmenter(Segmenter):
         try:
             results = self._segment_batched(image_np, boxes_xyxy, H, W)
         except Exception as e:
-            print(f"[SAM2] Batch fallito, uso fallback sequenziale: {e}")
+            print(f"[SAM2] Batch failed, using sequential fallback: {e}")
             results = self._segment_sequential(image_np, boxes_xyxy, H, W)
 
-        # Postprocess per qualità e coerenza API
+        # Postprocess for quality and API consistency
         final: List[Dict[str, Any]] = []
         for r in results:
             mask = r["segmentation"].astype(bool)
-            # Postprocessing configurabile: solo se abilitato (ottimizzazione)
+            # Configurable postprocessing: only if enabled (optimization)
             if self.config.close_holes or self.config.remove_small_components:
                 mask = self.postprocess_mask(mask)
             final.append(
@@ -196,7 +197,7 @@ class Sam2Segmenter(Segmenter):
                     "predicted_iou": float(r.get("predicted_iou", 0.0)),
                 }
             )
-        # Libera cache/feature
+        # Release cache/features
         self._release_predictor_memory()
         return final
 
@@ -210,12 +211,12 @@ class Sam2Segmenter(Segmenter):
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        Batching in chunk per evitare OOM. Tenta predict_torch se disponibile, altrimenti per-box nel chunk.
+        Chunk batching to avoid OOM. Tries predict_torch if available, otherwise per-box in chunk.
         """
         results: List[Dict[str, Any]] = []
         chunk = self._adaptive_chunk_size(H, W, len(boxes_xyxy))
 
-        # Verifica API disponibili
+        # Check available APIs
         has_predict_torch = hasattr(self._predictor, "predict_torch")
         transform = getattr(self._predictor, "transform", None)
         device_type = "cuda" if self._amp_enabled else "cpu"
@@ -225,7 +226,7 @@ class Sam2Segmenter(Segmenter):
             current = boxes_xyxy[start:end]
 
             if has_predict_torch:
-                # Prova percorso torch nativo
+                # Try native torch path
                 try:
                     boxes_t = torch.as_tensor(current, dtype=torch.float32, device=self.device)
                     if transform is not None and hasattr(transform, "apply_boxes_torch"):
@@ -246,7 +247,7 @@ class Sam2Segmenter(Segmenter):
                         mask = m3[best].detach().to("cpu").numpy().astype(bool)
                         score = float(s3[best].item())
 
-                        # Fallback su punto centrale se maschera è troppo piccola
+                        # Fallback to center point if mask is too small
                         if mask.sum() < 50:
                             x1, y1, x2, y2 = current[i]
                             mask, score = self._fallback_point(mask, score, x1, y1, x2, y2)
@@ -254,9 +255,9 @@ class Sam2Segmenter(Segmenter):
                         results.append({"segmentation": mask, "predicted_iou": score})
                     continue
                 except Exception as e:
-                    print(f"[SAM2] predict_torch non disponibile/errore: {e}; uso fallback per-box.")
+                    print(f"[SAM2] predict_torch unavailable/error: {e}; using per-box fallback.")
 
-            # Fallback: per-box nel chunk (meno overhead rispetto a tutto-sequenziale)
+            # Fallback: per-box in chunk (less overhead vs fully-sequential)
             for (x1, y1, x2, y2) in current:
                 mask, score = self._predict_single_box(x1, y1, x2, y2, H, W)
                 results.append({"segmentation": mask, "predicted_iou": score})
@@ -265,7 +266,7 @@ class Sam2Segmenter(Segmenter):
 
     def _predict_single_box(self, x1: int, y1: int, x2: int, y2: int, H: int, W: int) -> Tuple[np.ndarray, float]:
         """
-        Predice una maschera per singolo box. Include shrink progressivo e fallback punto centrale.
+        Predict a mask for a single box. Includes progressive shrinking and center point fallback.
         """
         device_type = "cuda" if self._amp_enabled else "cpu"
         mask_ok: Optional[np.ndarray] = None
@@ -303,7 +304,7 @@ class Sam2Segmenter(Segmenter):
 
     def _fallback_point(self, mask_cur: np.ndarray, score_cur: float, x1: int, y1: int, x2: int, y2: int) -> Tuple[np.ndarray, float]:
         """
-        Fallback con punto centrale positivo; se fallisce, ritorna l'input.
+        Fallback with positive center point; if it fails, returns the input.
         """
         try:
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -326,7 +327,7 @@ class Sam2Segmenter(Segmenter):
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        Fallback totalmente sequenziale (usato solo se il batching fallisce all'inizio).
+        Fully sequential fallback (used only if batching fails at the start).
         """
         out: List[Dict[str, Any]] = []
         for (x1, y1, x2, y2) in boxes_xyxy:
@@ -336,7 +337,7 @@ class Sam2Segmenter(Segmenter):
 
     def _adaptive_chunk_size(self, H: int, W: int, n_boxes: int) -> int:
         """
-        Stima una dimensione di chunk sicura in base a VRAM e megapixel dell'immagine.
+        Estimate a safe chunk size based on VRAM and image megapixels.
         """
         if not torch.cuda.is_available() or self.device != "cuda":
             return min(64, max(1, n_boxes))
@@ -367,10 +368,10 @@ class Sam2Segmenter(Segmenter):
 
     def _release_predictor_memory(self) -> None:
         """
-        Libera feature/attivazioni tra chiamate per ridurre l'uso di VRAM.
-        Smart cache clear: solo se memoria > 80% utilizzata.
+        Release features/activations between calls to reduce VRAM usage.
+        Smart cache clear: only if memory > 80% used.
         """
-        # Alcune versioni hanno attributi interni con cache; facciamo best-effort.
+        # Some versions have internal attributes with cache; best-effort cleanup.
         for attr in ("features", "embedding", "image_embedding", "is_image_set"):
             if hasattr(self._predictor, attr):
                 try:
@@ -382,7 +383,7 @@ class Sam2Segmenter(Segmenter):
             torch.cuda.empty_cache()
     
     def _should_clear_cache(self) -> bool:
-        """Clear cache solo se memoria GPU utilizzata > 80%."""
+        """Clear cache only if GPU memory usage > 80%."""
         if not torch.cuda.is_available() or self.device != "cuda":
             return False
         try:
@@ -391,6 +392,6 @@ class Sam2Segmenter(Segmenter):
             if reserved == 0:
                 return False
             ratio = allocated / reserved
-            return ratio > 0.80  # Soglia 80%
+            return ratio > 0.80  # 80% threshold
         except Exception:
-            return False  # Fallback sicuro
+            return False  # Safe fallback

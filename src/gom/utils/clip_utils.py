@@ -74,11 +74,11 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 try:
     import torch
-    from transformers import CLIPProcessor, CLIPModel  # type: ignore
+    from transformers import CLIPModel, CLIPProcessor  # type: ignore
     _HAS_CLIP = True
 except Exception:
     _HAS_CLIP = False
@@ -122,6 +122,7 @@ class CLIPConfig:
     model_id: str = "openai/clip-vit-large-patch14"
     device: Optional[str] = None
     fp16_on_cuda: bool = True
+    token: Optional[str] = None  # HuggingFace token (auto-reads from HF_TOKEN env var if None)
 
 
 class CLIPWrapper:
@@ -172,8 +173,13 @@ class CLIPWrapper:
             return
 
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")  # type: ignore[attr-defined]
-        self.processor = CLIPProcessor.from_pretrained(self.config.model_id)  # type: ignore[operator]
-        self.model = CLIPModel.from_pretrained(self.config.model_id).to(self.device).eval()  # type: ignore[operator]
+        
+        # Get token from config or environment variable
+        import os
+        token = self.config.token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        
+        self.processor = CLIPProcessor.from_pretrained(self.config.model_id, token=token)  # type: ignore[operator]
+        self.model = CLIPModel.from_pretrained(self.config.model_id, token=token).to(self.device).eval()  # type: ignore[operator]
         self._amp_enabled = (self.device == "cuda" and bool(self.config.fp16_on_cuda))
         self._amp_dtype = torch.float16 if self._amp_enabled else torch.float32  # type: ignore[attr-defined]
 

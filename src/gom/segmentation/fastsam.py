@@ -58,7 +58,6 @@ class FastSAMSegmenter(Segmenter):
                 "  wget https://github.com/CASIA-IVA-Lab/FastSAM/releases/download/v1.0/FastSAM-x.pt"
             )
 
-        # Load model
         ckpt_path = Path(checkpoint)
         if not ckpt_path.exists():
             raise FileNotFoundError(
@@ -287,7 +286,7 @@ class MobileSAMSegmenter(Segmenter):
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         try:
-            from mobile_sam import sam_model_registry, SamPredictor  # type: ignore
+            from mobile_sam import SamPredictor, sam_model_registry  # type: ignore
         except ImportError:
             raise ImportError(
                 "MobileSAM not installed. Install with:\n"

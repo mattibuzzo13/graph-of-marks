@@ -43,27 +43,27 @@ Usage:
 Detector Comparison:
     
     YOLOv8:
-        - Speed: ⭐⭐⭐⭐⭐ (fastest, 100+ FPS on GPU)
-        - Accuracy: ⭐⭐⭐⭐ (good on COCO classes)
-        - Vocabulary: ❌ Closed-set (80 COCO classes)
+        - Speed: Fastest (100+ FPS on GPU)
+        - Accuracy: Good (COCO classes)
+        - Vocabulary: Closed-set (80 COCO classes)
         - Use case: Real-time, known objects
     
     OwlViT:
-        - Speed: ⭐⭐ (slower, ~10 FPS)
-        - Accuracy: ⭐⭐⭐ (good zero-shot)
-        - Vocabulary: ✅ Open (arbitrary text queries)
+        - Speed: Slower (~10 FPS)
+        - Accuracy: Good (zero-shot)
+        - Vocabulary: Open (arbitrary text queries)
         - Use case: Novel objects, VQA
     
     Detectron2:
-        - Speed: ⭐⭐⭐ (moderate, ~20 FPS)
-        - Accuracy: ⭐⭐⭐⭐⭐ (state-of-art on COCO)
-        - Vocabulary: ❌ Closed-set (configurable)
+        - Speed: Moderate (~20 FPS)
+        - Accuracy: State-of-art (COCO)
+        - Vocabulary: Closed-set (configurable)
         - Use case: High accuracy, instance segmentation
     
     GroundingDINO:
-        - Speed: ⭐⭐ (slower, transformer-based)
-        - Accuracy: ⭐⭐⭐⭐⭐ (best open-vocabulary)
-        - Vocabulary: ✅ Open (text grounding)
+        - Speed: Slower (transformer-based)
+        - Accuracy: Best (open-vocabulary)
+        - Vocabulary: Open (text grounding)
         - Use case: Complex queries, referring expressions
 
 See Also:
@@ -71,6 +71,7 @@ See Also:
     - gom.detectors.manager: Multi-detector orchestration
     - gom.fusion: Detection fusion strategies
 """
+
 from .base import Detector
 from .manager import DetectorManager
 

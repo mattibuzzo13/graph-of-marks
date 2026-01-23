@@ -1,11 +1,11 @@
 # igp/segmentation/samhq.py
-# SAM-HQ wrapper con:
-# - singolo embedding per immagine (set_image)
-# - batching in chunk adattivi per box (predict_torch se disponibile)
-# - autocast FP16 su CUDA
-# - fallback robusti (punto al centro, sequenziale e shrinking del box)
-# - postprocess maschere (chiudi fori, rimuovi componenti piccole)
-# - cleanup memoria GPU tra chiamate
+# SAM-HQ wrapper with:
+# - single embedding per image (set_image)
+# - adaptive chunk batching for boxes (predict_torch if available)
+# - FP16 autocast on CUDA
+# - robust fallbacks (center point, sequential, and box shrinking)
+# - mask postprocessing (close holes, remove small components)
+# - GPU memory cleanup between calls
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from PIL import Image
 
 from .base import Segmenter, SegmenterConfig
 
-# Checkpoint ufficiali SAM-HQ (usati se auto_download=True e non viene passato un ckpt locale).
+# Official SAM-HQ checkpoints (used if auto_download=True and no local checkpoint provided).
 _SAM_HQ_URLS = {
     "vit_b": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_b.pth",
     "vit_l": "https://huggingface.co/lkeab/hq-sam/resolve/main/sam_hq_vit_l.pth",
@@ -28,8 +28,8 @@ _SAM_HQ_URLS = {
 
 class SamHQSegmenter(Segmenter):
     """
-    SAM-HQ (SysCV). Richiede `segment_anything_hq`.
-    Prompt principale: bounding box; fallback: punto positivo al centro del box.
+    SAM-HQ (SysCV). Requires `segment_anything_hq`.
+    Primary prompt: bounding box; fallback: positive point at box center.
     """
 
     def __init__(
@@ -48,10 +48,10 @@ class SamHQSegmenter(Segmenter):
             import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Overwriting tiny_vit")
-                from segment_anything_hq import sam_model_registry, SamPredictor  # type: ignore
+                from segment_anything_hq import SamPredictor, sam_model_registry  # type: ignore
         except Exception as e:
             raise ImportError(
-                "segment_anything_hq non è installato. Installa da:\n"
+                "segment_anything_hq is not installed. Install from:\n"
                 "pip install git+https://github.com/SysCV/sam-hq.git"
             ) from e
 
@@ -73,18 +73,18 @@ class SamHQSegmenter(Segmenter):
             
         self._predictor = SamPredictor(self._sam_model)
 
-        # autocast preferito su CUDA
+        # autocast preferred on CUDA
         self._amp_enabled = (self.device == "cuda")
         self._amp_dtype = torch.float16 if self._amp_enabled else torch.float32
 
     @torch.inference_mode()
     def segment(self, image_pil: Image.Image, boxes: Sequence[Sequence[float]]) -> List[Dict[str, Any]]:
         """
-        Segmenta ognuno dei box sull'immagine.
-        Output per elemento:
+        Segment each box on the image.
+        Output per element:
           - 'segmentation': np.ndarray(bool, H, W)
           - 'bbox': [x, y, w, h] (xywh)
-          - 'predicted_iou': float (score equivalente)
+          - 'predicted_iou': float (equivalent score)
         """
         if not boxes:
             return []
@@ -98,7 +98,7 @@ class SamHQSegmenter(Segmenter):
             try:
                 results = self._segment_batched(image_np, boxes_xyxy, H, W)
             except Exception as e:
-                print(f"[SAM-HQ] Batch fallito, uso fallback sequenziale: {e}")
+                print(f"[SAM-HQ] Batch failed, using sequential fallback: {e}")
                 results = self._segment_sequential(image_np, boxes_xyxy, H, W)
 
             final: List[Dict[str, Any]] = []
@@ -125,7 +125,7 @@ class SamHQSegmenter(Segmenter):
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        Batching in chunk adattivi. Usa predict_torch se disponibile; altrimenti prevede per-box dentro il chunk.
+        Adaptive chunk batching. Uses predict_torch if available; otherwise predicts per-box within the chunk.
         """
         results: List[Dict[str, Any]] = []
         chunk = self._adaptive_chunk_size(H, W, len(boxes_xyxy))
@@ -165,9 +165,9 @@ class SamHQSegmenter(Segmenter):
                         results.append({"segmentation": mask, "predicted_iou": score})
                     continue
                 except Exception as e:
-                    print(f"[SAM-HQ] predict_torch non disponibile/errore: {e}; uso fallback per-box nel chunk.")
+                    print(f"[SAM-HQ] predict_torch unavailable/error: {e}; using per-box fallback in chunk.")
 
-            # Fallback: per-box nel chunk (riduce overhead rispetto al tutto-sequenziale)
+            # Fallback: per-box in chunk (reduces overhead vs fully-sequential)
             for (x1, y1, x2, y2) in current:
                 mask, score = self._predict_single_box(x1, y1, x2, y2, H, W)
                 results.append({"segmentation": mask, "predicted_iou": score})
@@ -176,7 +176,7 @@ class SamHQSegmenter(Segmenter):
 
     def _predict_single_box(self, x1: int, y1: int, x2: int, y2: int, H: int, W: int) -> Tuple[np.ndarray, float]:
         """
-        Predice una maschera per singolo box con shrinking progressivo e fallback al punto centrale.
+        Predict a mask for a single box with progressive shrinking and fallback to center point.
         """
         device_type = "cuda" if self._amp_enabled else "cpu"
         mask_ok: Optional[np.ndarray] = None
@@ -214,7 +214,7 @@ class SamHQSegmenter(Segmenter):
 
     def _fallback_point(self, mask_cur: np.ndarray, score_cur: float, x1: int, y1: int, x2: int, y2: int) -> Tuple[np.ndarray, float]:
         """
-        Fallback con singolo punto positivo al centro del box.
+        Fallback with a single positive point at the center of the box.
         """
         try:
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -237,7 +237,7 @@ class SamHQSegmenter(Segmenter):
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        Fallback completamente sequenziale (solo se il batching fallisce).
+        Fully sequential fallback (only if batching fails).
         """
         out: List[Dict[str, Any]] = []
         for (x1, y1, x2, y2) in boxes_xyxy:
@@ -247,7 +247,7 @@ class SamHQSegmenter(Segmenter):
 
     def _adaptive_chunk_size(self, H: int, W: int, n_boxes: int) -> int:
         """
-        Stima dimensione chunk sicura in base a VRAM e megapixel.
+        Estimate safe chunk size based on VRAM and megapixels.
         """
         if not torch.cuda.is_available() or self.device != "cuda":
             return min(64, max(1, n_boxes))
@@ -295,12 +295,12 @@ class SamHQSegmenter(Segmenter):
 
     def _resolve_checkpoint(self, checkpoint: Optional[str], model_type: str, auto_download: bool) -> Path:
         """
-        Usa il checkpoint passato o risolve un default in ./checkpoints. Se mancante e auto_download=True, scarica dall'URL ufficiale.
+        Use the provided checkpoint or resolve a default in ./checkpoints. If missing and auto_download=True, download from official URL.
         """
         if checkpoint:
             p = Path(checkpoint)
             if not p.exists():
-                raise FileNotFoundError(f"Checkpoint SAM-HQ non trovato: {checkpoint}")
+                raise FileNotFoundError(f"Checkpoint SAM-HQ not found: {checkpoint}")
             return p
 
         fname = f"sam_hq_{model_type}.pth"
@@ -309,7 +309,7 @@ class SamHQSegmenter(Segmenter):
 
         if not p.exists():
             if not auto_download:
-                raise FileNotFoundError(f"Checkpoint SAM-HQ assente: {p}")
+                raise FileNotFoundError(f"Checkpoint SAM-HQ missing: {p}")
             from torch.hub import download_url_to_file
             url = _SAM_HQ_URLS.get(model_type, _SAM_HQ_URLS["vit_h"])
             download_url_to_file(url, str(p), progress=True)

@@ -11,7 +11,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import RLock
-from typing import Callable, Generic, Hashable, Iterable, Iterator, MutableMapping, Optional, Tuple, TypeVar
+from typing import Callable, Generic, Hashable, Iterable, Optional, Tuple, TypeVar
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")

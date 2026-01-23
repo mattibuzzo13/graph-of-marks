@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.transforms import Bbox
 from PIL import Image
 
@@ -59,9 +59,8 @@ except Exception:
 # Vectorized rendering optimizations (optional performance enhancement)
 try:
     from gom.viz.rendering_opt import (
-        VectorizedMaskRenderer,
         BatchTextRenderer,
-        GeometricOptimizer,
+        VectorizedMaskRenderer,
     )
     RENDERING_OPT_AVAILABLE = True  # Optimized rendering paths available
 
@@ -170,13 +169,13 @@ class VisualizerConfig:
 
     # Typography and visual style
     font_family: str = "DejaVu Sans"  # Font family for all text elements
-    obj_fontsize_inside: int = 12
-    obj_fontsize_outside: int = 12
-    rel_fontsize: int = 10
+    obj_fontsize_inside: int = 9
+    obj_fontsize_outside: int = 10
+    rel_fontsize: int = 8
     legend_fontsize: int = 8
     seg_fill_alpha: float = 0.25
     bbox_linewidth: float = 2.0
-    rel_arrow_linewidth: float = 2.5
+    rel_arrow_linewidth: float = 2.0
     rel_arrow_mutation_scale: float = 26.0
     label_bbox_linewidth: float = 3.0
     relation_label_bbox_linewidth: float = 3.0
@@ -1849,11 +1848,11 @@ class Visualizer:
         v_disp = v_disp / norm
         normal_disp = np.array([-v_disp[1], v_disp[0]])
 
-        # testo stimato
+        # estimated text size
         w_txt, h_txt = self._estimate_text_px(ax, text, self.cfg.rel_fontsize)
         text_diag = float(np.sqrt(w_txt ** 2 + h_txt ** 2))
 
-        # se la freccia è corta rispetto alla label, sposta un po' fuori
+        # if the arrow is short relative to the label, shift it out a bit
         if norm < text_diag * 1.1:
             offset_disp = normal_disp * (text_diag * 0.6)
             off_data = to_data(mid_disp + offset_disp)
@@ -2679,7 +2678,7 @@ class Visualizer:
                 return float((dx * dx + dy * dy) ** 0.5)
             return 1e9
 
-        from collections import defaultdict, Counter
+        from collections import Counter, defaultdict
         rels_by_src: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for r in relationships:
             rels_by_src[int(r.get("src_idx", -1))].append(r)

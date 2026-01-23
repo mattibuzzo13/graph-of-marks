@@ -70,14 +70,15 @@ Classes Detected (COCO 80):
     teddy bear, hair drier, toothbrush
 
 Advantages vs YOLOv8:
-    ✓ Instance segmentation (pixel-accurate masks)
-    ✓ Higher AP on COCO (44.3 vs 53.9 YOLOv8x)
-    ✓ Extensive model zoo (100+ configs)
-    ✓ Better for research/experimentation
+    - Instance segmentation (pixel-accurate masks)
+    - Higher AP on COCO (44.3 vs 53.9 YOLOv8x)
+    - Extensive model zoo (100+ configs)
+    - Better for research/experimentation
     
-    ✗ Slower inference (~3x vs YOLOv8)
-    ✗ More complex setup
-    ✗ Larger memory footprint
+    Cons:
+    - Slower inference (~3x vs YOLOv8)
+    - More complex setup
+    - Larger memory footprint
 
 Notes:
     - Requires `detectron2` package (install from source or PyPI)
@@ -96,17 +97,17 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 import torch
-from PIL import Image
-
-from gom.types import Detection
-from gom.detectors.base import Detector
-from gom.utils.detector_utils import make_detection
+from detectron2 import model_zoo
 
 # Keep Detectron2 imports local to this module to avoid overhead elsewhere.
 from detectron2.config import get_cfg
-from detectron2 import model_zoo
-from detectron2.engine import DefaultPredictor
 from detectron2.data import MetadataCatalog
+from detectron2.engine import DefaultPredictor
+from PIL import Image
+
+from gom.detectors.base import Detector
+from gom.types import Detection
+from gom.utils.detector_utils import make_detection
 
 
 class Detectron2Detector(Detector):

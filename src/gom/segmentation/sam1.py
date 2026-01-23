@@ -48,14 +48,15 @@ Output Format:
         - predicted_iou: confidence score (0.0-1.0)
 
 Advantages vs SAM 2:
-    ✓ Mature, stable API
-    ✓ Lighter memory footprint
-    ✓ Better documented
-    ✓ Faster for single-image workflows
-    
-    ✗ No video tracking
-    ✗ Lower quality on challenging cases
-    ✗ No temporal consistency
+    - Mature, stable API
+    - Lighter memory footprint
+    - Better documented
+    - Faster for single-image workflows
+
+Disadvantages vs SAM 2:
+    - No video tracking
+    - Lower quality on challenging cases
+    - No temporal consistency
 
 Notes:
     - Requires `segment_anything` package from Meta
@@ -73,14 +74,13 @@ See Also:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
 from PIL import Image
 
 from .base import Segmenter, SegmenterConfig
-
 
 # Official SAM v1 checkpoint URLs (Meta)
 _SAM_URLS = {
@@ -158,10 +158,10 @@ class Sam1Segmenter(Segmenter):
         checkpoint: Optional[str] = None,
         model_type: str = "vit_h",
         *,
-        points_per_side: int = 32,                  # mantenuto per compatibilità API
-        pred_iou_thresh: float = 0.8,               # non usato direttamente
-        stability_score_thresh: float = 0.85,       # non usato direttamente
-        min_mask_region_area: int = 300,            # non usato direttamente
+        points_per_side: int = 32,                  # kept for API compatibility
+        pred_iou_thresh: float = 0.8,               # not used directly
+        stability_score_thresh: float = 0.85,       # not used directly
+        min_mask_region_area: int = 300,            # not used directly
         config: Optional[SegmenterConfig] = None,
         auto_download: bool = True,
     ) -> None:
@@ -170,10 +170,10 @@ class Sam1Segmenter(Segmenter):
         self.model_type = model_type
 
         try:
-            from segment_anything import sam_model_registry, SamPredictor  # type: ignore
+            from segment_anything import SamPredictor, sam_model_registry  # type: ignore
         except Exception as e:
             raise ImportError(
-                "segment_anything non è installato. Installa da:\n"
+                "segment_anything is not installed. Install from:\n"
                 "https://github.com/facebookresearch/segment-anything"
             ) from e
 
@@ -182,7 +182,7 @@ class Sam1Segmenter(Segmenter):
         self._sam_model = sam_model_registry[model_type](checkpoint=str(ckpt_path)).to(self.device).eval()
         self._predictor = SamPredictor(self._sam_model)
 
-        # dtype preferita su CUDA
+        # preferred dtype on CUDA
         self._amp_enabled = (self.device == "cuda")
         self._amp_dtype = torch.float16 if self._amp_enabled else torch.float32
 
@@ -229,24 +229,24 @@ class Sam1Segmenter(Segmenter):
         image_np = np.array(image_pil)
         H, W = image_np.shape[:2]
 
-        # Pre-clamp per sicurezza
+        # Pre-clamp for safety
         boxes_clamped = [self.clamp_box_xyxy(b, W, H) for b in boxes]
 
-        # Prepara predictor e embedding
+        # Prepare predictor and embedding
         self._predictor.set_image(image_np)
 
         try:
-            # Percorso preferito: batching su torch
+            # Preferred path: batching on torch
             results = self._segment_boxes_batched(image_np, boxes_clamped, H, W)
         except Exception as e:
-            print(f"[SAM1] Batch fallito, fallback a sequenziale: {e}")
+            print(f"[SAM1] Batch failed, fallback to sequential: {e}")
             results = self._segment_boxes_sequential(image_np, boxes_clamped, H, W)
 
-        # Post-process maschere e bounding box
+        # Post-process masks and bounding boxes
         final: List[Dict[str, Any]] = []
         for res in results:
             mask = res["segmentation"].astype(bool)
-            # Postprocessing configurabile: solo se abilitato (ottimizzazione)
+            # Configurable postprocessing: only if enabled (optimization)
             if self.config.close_holes or self.config.remove_small_components:
                 mask = self.postprocess_mask(mask)
             bbox_xywh = self.bbox_from_mask(mask)
@@ -256,21 +256,21 @@ class Sam1Segmenter(Segmenter):
                 "predicted_iou": float(res.get("predicted_iou", 0.0)),
             })
 
-        # Libera embedding
+        # Release embedding
         self._predictor.reset_image()
         if hasattr(self._predictor, "features"):
             try:
                 delattr(self._predictor, "features")
             except Exception:
                 pass
-        # Smart cache clear: solo se memoria > 80% utilizzata
+        # Smart cache clear: only if memory > 80% used
         if self._should_clear_cache():
             torch.cuda.empty_cache()
 
         return final
     
     def _should_clear_cache(self) -> bool:
-        """Clear cache solo se memoria GPU utilizzata > 80%."""
+        """Clear cache only if GPU memory usage > 80%."""
         if not torch.cuda.is_available() or self.device != "cuda":
             return False
         try:
@@ -279,9 +279,9 @@ class Sam1Segmenter(Segmenter):
             if reserved == 0:
                 return False
             ratio = allocated / reserved
-            return ratio > 0.80  # Soglia 80%
+            return ratio > 0.80  # 80% threshold
         except Exception:
-            return False  # Fallback sicuro
+            return False  # Safe fallback
 
     # ----------------- internals -----------------
 
@@ -293,23 +293,23 @@ class Sam1Segmenter(Segmenter):
         W: int,
     ) -> List[Dict[str, Any]]:
         """
-        Batch inference con predict_torch e chunking adattivo per evitare OOM.
+        Batch inference with predict_torch and adaptive chunking to avoid OOM.
         """
         device = self.device
         results: List[Dict[str, Any]] = []
 
-        # Trasforma box in coordinate del modello SAM
+        # Transform boxes to SAM model coordinates
         boxes_tensor = torch.as_tensor(boxes_xyxy, dtype=torch.float32, device=device)
         boxes_trans = self._predictor.transform.apply_boxes_torch(boxes_tensor, image_np.shape[:2])
 
-        # Chunking adattivo
+        # Adaptive chunking
         chunk = self._adaptive_chunk_size(H, W, len(boxes_xyxy))
         for start in range(0, len(boxes_xyxy), chunk):
             end = min(start + chunk, len(boxes_xyxy))
             bx = boxes_trans[start:end]
 
             with torch.autocast(device_type="cuda", dtype=self._amp_dtype, enabled=self._amp_enabled), torch.inference_mode():
-                # predict_torch ritorna (B, 3, H, W) e (B, 3)
+                # predict_torch returns (B, 3, H, W) and (B, 3)
                 masks_t, ious_t, _ = self._predictor.predict_torch(
                     point_coords=None,
                     point_labels=None,
@@ -317,7 +317,7 @@ class Sam1Segmenter(Segmenter):
                     multimask_output=True,
                 )
 
-            # Per ciascun box scegli la mask con IoU predetto maggiore
+            # For each box, choose the mask with highest predicted IoU
             for i in range(masks_t.shape[0]):
                 m3 = masks_t[i]          # (3, H, W)
                 s3 = ious_t[i]           # (3,)
@@ -325,7 +325,7 @@ class Sam1Segmenter(Segmenter):
                 best_mask = m3[best_idx].detach().to("cpu").numpy().astype(bool)
                 best_score = float(s3[best_idx].item())
 
-                # Fallback: se maschera quasi vuota, prova punto centrale
+                # Fallback: if mask is nearly empty, try center point
                 if best_mask.sum() < 50:
                     x1, y1, x2, y2 = boxes_xyxy[start + i]
                     cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
@@ -362,7 +362,7 @@ class Sam1Segmenter(Segmenter):
             mask_ok = None
             score_ok = 0.0
 
-            # Prova box shrinking progressivo per robustezza
+            # Try progressive box shrinking for robustness
             for shrink in (0, 2, 4, 8, 12, 16):
                 xs = max(0, x1 + shrink)
                 ys = max(0, y1 + shrink)
@@ -379,7 +379,7 @@ class Sam1Segmenter(Segmenter):
                 mask = masks_box[best].astype(bool)
                 score = float(scores_box[best])
 
-                # Fallback su punto centrale se maschera è troppo piccola
+                # Fallback to center point if mask is too small
                 if mask.sum() < 50:
                     cx, cy = (xs + xe) // 2, (ys + ye) // 2
                     try:
@@ -420,7 +420,7 @@ class Sam1Segmenter(Segmenter):
         except Exception:
             gb = 8.0
 
-        # base per VRAM
+        # base based on VRAM
         if gb >= 40:
             base = 512
         elif gb >= 24:
@@ -432,7 +432,7 @@ class Sam1Segmenter(Segmenter):
         else:
             base = 128
 
-        # riduci per immagini molto grandi
+        # reduce for very large images
         mp = (H * W) / 1_000_000.0
         if mp > 4:
             base //= 2
@@ -445,10 +445,10 @@ class Sam1Segmenter(Segmenter):
         if checkpoint:
             p = Path(checkpoint)
             if not p.exists():
-                raise FileNotFoundError(f"SAM-1 checkpoint non trovato: {checkpoint}")
+                raise FileNotFoundError(f"SAM-1 checkpoint not found: {checkpoint}")
             return p
 
-        # Default filename per model type
+        # Default filename for model type
         fname = {
             "vit_h": "sam_vit_h_4b8939.pth",
             "vit_l": "sam_vit_l_0b3195.pth",
@@ -459,8 +459,8 @@ class Sam1Segmenter(Segmenter):
 
         if not p.exists():
             if not auto_download:
-                raise FileNotFoundError(f"Checkpoint SAM-1 mancante: {p}")
-            # Download dall’URL ufficiale
+                raise FileNotFoundError(f"Checkpoint SAM-1 missing: {p}")
+            # Download from official URL
             url = _SAM_URLS.get(model_type, _SAM_URLS["vit_h"])
             from torch.hub import download_url_to_file
             download_url_to_file(url, str(p))

@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Callable
-import torch
-import numpy as np
-from PIL import Image
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+import numpy as np
+import torch
+from PIL import Image
 
 
 @dataclass

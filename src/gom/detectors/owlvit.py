@@ -58,13 +58,14 @@ Default Queries (100+ objects):
     - And 70+ more...
 
 Advantages vs YOLOv8:
-    ✓ Detects arbitrary concepts without retraining
-    ✓ Better for rare/domain-specific objects
-    ✓ Flexible text-based queries
+    - Detects arbitrary concepts without retraining
+    - Better for rare/domain-specific objects
+    - Flexible text-based queries
     
-    ✗ Slower inference (~4x vs YOLOv8)
-    ✗ Lower accuracy on common objects
-    ✗ Requires well-phrased text queries
+    Cons:
+    - Slower inference (~4x vs YOLOv8)
+    - Lower accuracy on common objects
+    - Requires well-phrased text queries
 
 Notes:
     - Requires `transformers` package: `pip install transformers`
@@ -84,13 +85,11 @@ from typing import List, Optional, Sequence
 
 import torch
 from PIL import Image
-
-from transformers import Owlv2Processor, Owlv2ForObjectDetection
+from transformers import Owlv2ForObjectDetection, Owlv2Processor
 
 from gom.detectors.base import Detector
 from gom.types import Detection
 from gom.utils.detector_utils import make_detection
-
 
 # Queries di default (COCO-like + extra)
 _DEFAULT_QUERIES: Sequence[str] = (
@@ -196,10 +195,10 @@ class OwlViTDetector(Detector):
         self.queries: Sequence[str] = list(queries) if queries is not None else list(_DEFAULT_QUERIES)
         self.tta_hflip = bool(tta_hflip)
 
-        # Processor + modello
+        # Processor + model
         self.processor = Owlv2Processor.from_pretrained(model_name)
 
-        # Dtype scelto in base al device e flag fp16
+        # Dtype chosen based on device and fp16 flag
         dtype = torch.float16 if (fp16 and str(self.device).startswith("cuda") and torch.cuda.is_available()) else torch.float32
         self.model = Owlv2ForObjectDetection.from_pretrained(
             model_name,
@@ -330,7 +329,7 @@ class OwlViTDetector(Detector):
         if not images:
             return []
 
-        # Prepara batch: ripeti le stesse query per ciascuna immagine
+        # Prepare batch: repeat the same queries for each image
         batch_text = [self.queries] * len(images)
 
         encoding = self.processor(
@@ -338,7 +337,7 @@ class OwlViTDetector(Detector):
             text=batch_text,
             return_tensors="pt",
         )
-        # Move su device
+        # Move to device
         encoding = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in encoding.items()}
 
         use_amp = (self.model.device.type == "cuda")
@@ -347,7 +346,7 @@ class OwlViTDetector(Detector):
         with torch.inference_mode(), torch.amp.autocast(device_type, enabled=use_amp):
             outputs = self.model(**encoding)
 
-        # Post-process: target_sizes = (H, W) per immagine
+        # Post-process: target_sizes = (H, W) per image
         target_sizes = torch.tensor(
             [[img.height, img.width] for img in images],
             device=self.device,

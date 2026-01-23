@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
 import numpy as np
 from PIL import Image
 
@@ -172,7 +173,7 @@ class DetectorEnsemble:
         
         try:
             from ensemble_boxes import weighted_boxes_fusion
-            
+
             # Prepare inputs for WBF
             boxes_list = []
             scores_list = []
@@ -423,7 +424,7 @@ class DetectorEnsemble:
         """Fuse using standard NMS (combine all, then NMS)."""
         
         from gom.fusion.nms import labelwise_nms
-        
+
         # Combine all predictions
         all_boxes = []
         all_labels = []
@@ -487,7 +488,7 @@ class DetectorEnsemble:
             return
         
         from gom.fusion.nms import bbox_iou
-        
+
         # Compute per-model performance
         for history in self.prediction_history:
             predictions = history["predictions"]

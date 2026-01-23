@@ -1,4 +1,4 @@
-# 🚀 SOTA Detection Fusion Module
+# SOTA Detection Fusion Module
 
 ## Overview
 
@@ -6,12 +6,12 @@ State-of-the-art multi-detector fusion for object detection with implementations
 
 ### Key Features
 
-✅ **Multiple fusion strategies**: WBF, NMS variants, Confluence  
-✅ **SOTA methods**: DIoU-NMS, Matrix-NMS, Adaptive-NMS, Soft-NMS  
-✅ **GPU acceleration**: Optional PyTorch/Torchvision backend  
-✅ **Mask fusion**: Weighted average, union, majority voting  
-✅ **Benchmarking tools**: Compare methods on your data  
-✅ **Fully vectorized**: NumPy + optional CUDA
+- **Multiple fusion strategies**: WBF, NMS variants, Confluence  
+- **SOTA methods**: DIoU-NMS, Matrix-NMS, Adaptive-NMS, Soft-NMS  
+- **GPU acceleration**: Optional PyTorch/Torchvision backend  
+- **Mask fusion**: Weighted average, union, majority voting  
+- **Benchmarking tools**: Compare methods on your data  
+- **Fully vectorized**: NumPy + optional CUDA
 
 ---
 
@@ -55,9 +55,9 @@ results = compare_fusion_methods(
 
 # Output:
 # Testing wbf...
-#   ✓ wbf: 12.3ms, 45 outputs (15 removed), avg_score=0.870
+#   wbf: 12.3ms, 45 outputs (15 removed), avg_score=0.870
 # Testing nms...
-#   ✓ nms: 2.1ms, 38 outputs (22 removed), avg_score=0.892
+#   nms: 2.1ms, 38 outputs (22 removed), avg_score=0.892
 # ...
 ```
 
@@ -65,7 +65,7 @@ results = compare_fusion_methods(
 
 ## Available Methods
 
-### 1. WBF (Weighted Boxes Fusion) ⭐ **Recommended**
+### 1. WBF (Weighted Boxes Fusion) - **Recommended**
 
 **Best for**: General multi-detector fusion with confidence weighting
 
@@ -117,7 +117,7 @@ kept_indices = nms(boxes, scores=scores, iou_thr=0.5)
 ```
 
 **Pros**:
-- ⚡ Very fast (~1-3ms)
+- Very fast (~1-3ms)
 - Simple and reliable
 - GPU acceleration available
 
@@ -127,7 +127,7 @@ kept_indices = nms(boxes, scores=scores, iou_thr=0.5)
 
 ---
 
-### 3. Soft-NMS (Gaussian) 🎯
+### 3. Soft-NMS (Gaussian)
 
 **Best for**: Crowded scenes, overlapping objects
 
