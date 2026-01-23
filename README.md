@@ -22,10 +22,12 @@ If you use Graph of Marks in your research, please cite:
 
 ```bibtex
 @inproceedings{gom2026aaai,
-  title={Graph of Marks: A Visual Prompting Framework for Scene Understanding},
-  author={DISI-UNIBO-NLP},
-  booktitle={Proceedings of the 38th AAAI Conference on Artificial Intelligence},
-  year={2026}
+  title={Graph-of-Mark: Promote Spatial Reasoning in Multimodal Language Models with Graph-Based Visual Prompting},
+  author={Giacomo Frisoni, Lorenzo Molfetta, Mattia Buzzoni, Gianluca Moro},
+  booktitle    = {AAAI-26, Sponsored by the Association for the Advancement of Artificial Intelligence},
+  year={2026},
+  publisher    = {{AAAI} Press},
+  year         = {2026},
 }
 ```
 
